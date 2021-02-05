@@ -1911,8 +1911,6 @@ instance IsExprBuilder (ExprBuilder t st fs) where
   intDiv sym x y
       -- Div by 1.
     | Just 1 <- asInteger y = return x
-      -- Div 0 by anything is zero.
-    | Just 0 <- asInteger x = intLit sym 0
       -- As integers.
     | Just xi <- asInteger x, Just yi <- asInteger y, yi /= 0 =
       if yi >= 0 then
@@ -1926,8 +1924,6 @@ instance IsExprBuilder (ExprBuilder t st fs) where
   intMod sym x y
       -- Mod by 1.
     | Just 1 <- asInteger y = intLit sym 0
-      -- Mod 0 by anything is zero.
-    | Just 0 <- asInteger x = intLit sym 0
       -- As integers.
     | Just xi <- asInteger x, Just yi <- asInteger y, yi /= 0 =
         intLit sym (xi `mod` abs yi)
@@ -2779,6 +2775,8 @@ instance IsExprBuilder (ExprBuilder t st fs) where
     | Just x' <- asString x
     , Just off' <- asInteger off
     , Just len' <- asInteger len
+    , 0 <= off', 0 <= len'
+    , off' + len' <= stringLitLength x'
     = stringLit sym $! stringLitSubstring x' off' len'
 
     | otherwise
@@ -3160,7 +3158,7 @@ instance IsExprBuilder (ExprBuilder t st fs) where
         sqrt_dbl = sqrt
     case x of
       SemiRingLiteral SR.SemiRingRealRepr r _
-        | r <= 0 -> realLit sym 0
+        | r < 0 -> sbMakeExpr sym (RealSqrt x)
         | Just w <- tryRationalSqrt r -> realLit sym w
         | sbFloatReduce sym -> realLit sym (toRational (sqrt_dbl (fromRational r)))
       _ -> sbMakeExpr sym (RealSqrt x)
@@ -3186,7 +3184,7 @@ instance IsExprBuilder (ExprBuilder t st fs) where
   realAtan2 sb y x = do
     case (asRational y, asRational x) of
       (Just 0, _) -> realLit sb 0
-      (Just yc, Just xc) | sbFloatReduce sb -> do
+      (Just yc, Just xc) | xc /= 0, sbFloatReduce sb -> do
         realLit sb (toRational (atan2 (toDouble yc) (toDouble xc)))
       _ -> sbMakeExpr sb (RealATan2 y x)
 
@@ -3209,7 +3207,7 @@ instance IsExprBuilder (ExprBuilder t st fs) where
 
   realLog sym x =
     case asRational x of
-      Just c | sbFloatReduce sym -> realLit sym (toRational (log (toDouble c)))
+      Just c | c > 0, sbFloatReduce sym -> realLit sym (toRational (log (toDouble c)))
       _ -> sbMakeExpr sym (RealLog x)
 
   ----------------------------------------------------------------------
