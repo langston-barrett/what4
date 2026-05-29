@@ -175,6 +175,9 @@ tests = TT.testGroup "Strides"
   , genTest "toBitwiseCorrect" $
       do SW n <- genWidth
          S.toBitwiseCorrect n <$> S.genDomain n <*> genNatBV n
+  , genTest "strideBitwiseCorrect" $
+      do SW n <- genWidth
+         S.strideBitwiseCorrect n <$> S.genDomain n <*> genNatBV n
   , genTest "fromBitwiseCorrect" $
       do SW n <- genWidth
          S.fromBitwiseCorrect n <$> B.genDomain n <*> chooseInteger (0, maxUnsigned n)
