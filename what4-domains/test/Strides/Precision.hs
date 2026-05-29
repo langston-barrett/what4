@@ -52,9 +52,6 @@ genWidth =
          | Just LeqProof <- isPosNat n -> pure (SW n)
        _ -> error "test panic! genWidth"
 
-genNatBV :: NatRepr w -> Gen Natural
-genNatBV w = fromInteger <$> chooseInteger (0, maxUnsigned w)
-
 -- | The strides result has at most as many elements as the arith result.
 sizeLeq ::
   (1 <= w, 1 <= u) =>
@@ -65,9 +62,11 @@ sizeLeq _w c arith =
 -- | The strides result is contained in the arith result.
 subsetOf ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> A.Domain w -> Natural -> Property
-subsetOf _w c arith x =
-  S.member c x ==> property (A.member arith (toInteger x))
+  NatRepr w -> S.Domain w -> A.Domain w -> Property
+subsetOf w c arith =
+  case S.fromArith w arith of
+    Nothing -> property (S.size c == 0)
+    Just a  -> property (S.leqExact c a)
 
 precise_negate :: (1 <= w) => NatRepr w -> S.Domain w -> Property
 precise_negate w c =
@@ -227,134 +226,134 @@ precise_ashr w a b =
 -- can leave the arith convex hull). We test it everywhere and let the
 -- failures tell us which ops actually do.
 
-subset_negate :: (1 <= w) => NatRepr w -> S.Domain w -> Natural -> Property
-subset_negate w c x =
-  S.proper c ==> subsetOf w (S.negate w c) (A.negate (S.toArith c)) x
+subset_negate :: (1 <= w) => NatRepr w -> S.Domain w -> Property
+subset_negate w c =
+  S.proper c ==> subsetOf w (S.negate w c) (A.negate (S.toArith c))
 
 subset_scale ::
   (1 <= w) =>
-  NatRepr w -> Integer -> S.Domain w -> Natural -> Property
-subset_scale w k c x =
-  S.proper c ==> subsetOf w (S.scale w k c) (A.scale k (S.toArith c)) x
+  NatRepr w -> Integer -> S.Domain w -> Property
+subset_scale w k c =
+  S.proper c ==> subsetOf w (S.scale w k c) (A.scale k (S.toArith c))
 
 subset_udiv ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_udiv w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_udiv w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.udiv w a b) (A.udiv (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.udiv w a b) (A.udiv (S.toArith a) (S.toArith b))
 
 subset_urem ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_urem w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_urem w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.urem w a b) (A.urem (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.urem w a b) (A.urem (S.toArith a) (S.toArith b))
 
 subset_sdiv ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_sdiv w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_sdiv w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.sdiv w a b) (A.sdiv w (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.sdiv w a b) (A.sdiv w (S.toArith a) (S.toArith b))
 
 subset_srem ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_srem w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_srem w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.srem w a b) (A.srem w (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.srem w a b) (A.srem w (S.toArith a) (S.toArith b))
 
 subset_udivSmtlib ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_udivSmtlib w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_udivSmtlib w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.udivSmtlib w a b) (A.udivSmtlib (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.udivSmtlib w a b) (A.udivSmtlib (S.toArith a) (S.toArith b))
 
 subset_uremSmtlib ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_uremSmtlib w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_uremSmtlib w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.uremSmtlib w a b) (A.uremSmtlib (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.uremSmtlib w a b) (A.uremSmtlib (S.toArith a) (S.toArith b))
 
 subset_sdivSmtlib ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_sdivSmtlib w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_sdivSmtlib w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.sdivSmtlib w a b) (A.sdivSmtlib w (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.sdivSmtlib w a b) (A.sdivSmtlib w (S.toArith a) (S.toArith b))
 
 subset_sremSmtlib ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_sremSmtlib w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_sremSmtlib w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.sremSmtlib w a b) (A.sremSmtlib w (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.sremSmtlib w a b) (A.sremSmtlib w (S.toArith a) (S.toArith b))
 
 subset_zext ::
   forall w u.
   (1 <= w, w + 1 <= u) =>
-  NatRepr w -> S.Domain w -> NatRepr u -> Natural -> Property
-subset_zext w c u x =
+  NatRepr w -> S.Domain w -> NatRepr u -> Property
+subset_zext w c u =
   case NR.leqTrans (NR.leqAdd (LeqProof :: LeqProof 1 w) (knownNat @1))
                    (LeqProof :: LeqProof (w + 1) u) of
     LeqProof ->
-      S.proper c ==> subsetOf u (S.zext w c u) (A.zext (S.toArith c) u) x
+      S.proper c ==> subsetOf u (S.zext w c u) (A.zext (S.toArith c) u)
 
 subset_sext ::
   forall w u.
   (1 <= w, w + 1 <= u) =>
-  NatRepr w -> S.Domain w -> NatRepr u -> Natural -> Property
-subset_sext w c u x =
+  NatRepr w -> S.Domain w -> NatRepr u -> Property
+subset_sext w c u =
   case NR.leqTrans (NR.leqAdd (LeqProof :: LeqProof 1 w) (knownNat @1))
                    (LeqProof :: LeqProof (w + 1) u) of
     LeqProof ->
-      S.proper c ==> subsetOf u (S.sext w c u) (A.sext w (S.toArith c) u) x
+      S.proper c ==> subsetOf u (S.sext w c u) (A.sext w (S.toArith c) u)
 
 subset_concat ::
   forall u v.
   (1 <= u, 1 <= v) =>
-  NatRepr u -> S.Domain u -> NatRepr v -> S.Domain v -> Natural -> Property
-subset_concat u a v b x =
+  NatRepr u -> S.Domain u -> NatRepr v -> S.Domain v -> Property
+subset_concat u a v b =
   case NR.leqAddPos u v of
     LeqProof ->
       S.proper a ==> S.proper b ==>
         subsetOf (NR.addNat u v) (S.concat u a v b)
-                 (A.concat u (S.toArith a) v (S.toArith b)) x
+                 (A.concat u (S.toArith a) v (S.toArith b))
 
 subset_select ::
   forall i n w.
   (1 <= n, i + n <= w) =>
-  NatRepr i -> NatRepr n -> NatRepr w -> S.Domain w -> Natural -> Property
-subset_select i n w c x =
+  NatRepr i -> NatRepr n -> NatRepr w -> S.Domain w -> Property
+subset_select i n w c =
   case NR.leqTrans (LeqProof :: LeqProof 1 n)
                    (NR.leqTrans (NR.addPrefixIsLeq i n)
                                 (LeqProof :: LeqProof (i + n) w)) of
     LeqProof ->
-      S.proper c ==> subsetOf n (S.select i n w c) (A.select i n (S.toArith c)) x
+      S.proper c ==> subsetOf n (S.select i n w c) (A.select i n (S.toArith c))
 
 subset_shl ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_shl w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_shl w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.shl w a b) (A.shl w (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.shl w a b) (A.shl w (S.toArith a) (S.toArith b))
 
 subset_lshr ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_lshr w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_lshr w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.lshr w a b) (A.lshr w (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.lshr w a b) (A.lshr w (S.toArith a) (S.toArith b))
 
 subset_ashr ::
   (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_ashr w a b x =
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_ashr w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.ashr w a b) (A.ashr w (S.toArith a) (S.toArith b)) x
+    subsetOf w (S.ashr w a b) (A.ashr w (S.toArith a) (S.toArith b))
 
 tests :: TT.TestTree
 tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
@@ -443,35 +442,35 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
   -- a coset that leaves the arith convex hull (e.g., 'mul').
   , genTest "subset_negate" $
       do SW n <- genWidth
-         subset_negate n <$> S.genDomain n <*> genNatBV n
+         subset_negate n <$> S.genDomain n
   , genTest "subset_scale" $
       do SW n <- genWidth
          subset_scale n <$> chooseInteger (0, maxUnsigned n)
-                        <*> S.genDomain n <*> genNatBV n
+                        <*> S.genDomain n
   , genTest "subset_udiv" $
       do SW n <- genWidth
-         subset_udiv n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_udiv n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_urem" $
       do SW n <- genWidth
-         subset_urem n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_urem n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_sdiv" $
       do SW n <- genWidth
-         subset_sdiv n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_sdiv n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_srem" $
       do SW n <- genWidth
-         subset_srem n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_srem n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_udivSmtlib" $
       do SW n <- genWidth
-         subset_udivSmtlib n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_udivSmtlib n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_uremSmtlib" $
       do SW n <- genWidth
-         subset_uremSmtlib n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_uremSmtlib n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_sdivSmtlib" $
       do SW n <- genWidth
-         subset_sdivSmtlib n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_sdivSmtlib n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_sremSmtlib" $
       do SW n <- genWidth
-         subset_sremSmtlib n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_sremSmtlib n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_zext" $
       do SW w <- genWidth
          SW n <- genWidth
@@ -480,8 +479,7 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
            Nothing -> error "impossible!"
            Just LeqProof ->
              do c <- S.genDomain w
-                x <- genNatBV u
-                pure (subset_zext w c u x)
+                pure (subset_zext w c u)
   , genTest "subset_sext" $
       do SW w <- genWidth
          SW n <- genWidth
@@ -490,15 +488,13 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
            Nothing -> error "impossible!"
            Just LeqProof ->
              do c <- S.genDomain w
-                x <- genNatBV u
-                pure (subset_sext w c u x)
+                pure (subset_sext w c u)
   , genTest "subset_concat" $
       do SW m <- genWidth
          SW n <- genWidth
          a <- S.genDomain m
          b <- S.genDomain n
-         x <- genNatBV (addNat m n)
-         pure (subset_concat m a n b x)
+         pure (subset_concat m a n b)
   , genTest "subset_select" $
       do SW n <- genWidth
          SW i <- genWidth
@@ -507,15 +503,14 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
          let w = addNat i_n z
          LeqProof <- pure (addIsLeq i_n z)
          c <- S.genDomain w
-         x <- genNatBV n
-         pure (subset_select i n w c x)
+         pure (subset_select i n w c)
   , genTest "subset_shl" $
       do SW n <- genWidth
-         subset_shl n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_shl n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_lshr" $
       do SW n <- genWidth
-         subset_lshr n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_lshr n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_ashr" $
       do SW n <- genWidth
-         subset_ashr n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+         subset_ashr n <$> S.genDomain n <*> S.genDomain n
   ]
