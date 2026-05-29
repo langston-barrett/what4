@@ -201,6 +201,11 @@ haskellOnly = Set.fromList
   , "toListMember", "memberToList", "toListNoDuplicates"
   , "sizeViaToList"
   , "isSelfWrappingViaToList"
+  -- 'fromAscEltList' takes an arbitrary-length list of elements, which
+  -- Cryptol's fixed-size sequences can't represent directly. The
+  -- 'fromAscEltListToListExactNonWrapping' round-trip also uses 'toList'.
+  , "fromAscEltListMember"
+  , "fromAscEltListToListExactNonWrapping"
   -- 'firstCosetMemberCorrect' uses parametric width and shift amounts that
   -- are difficult to express in Cryptol's type system.
   , "firstCosetMemberCorrect"

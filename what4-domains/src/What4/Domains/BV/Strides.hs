@@ -309,6 +309,7 @@ module What4.Domains.BV.Strides
   , proper
   -- * Construction
   , mk
+  , fromAscEltList
   -- , singleton
   -- , fromRange
   -- , fromFoldable
@@ -373,6 +374,8 @@ module What4.Domains.BV.Strides
   , genPair
   -- ** Construction
   -- , correct_singleton
+  , fromAscEltListMember
+  , fromAscEltListToListExactNonWrapping
   -- ** Conversion
   , toArithCorrect
   , startEndArcCorrect
@@ -477,6 +480,7 @@ import           Prelude hiding (negate, not, and, or, concat)
 import qualified Prelude
 
 import qualified Data.Bits as Bits
+import qualified Data.List as List
 import qualified Data.Set as Set
 
 import           Data.Parameterized.NatRepr (NatRepr, LeqProof(..), maxUnsigned)
@@ -752,6 +756,24 @@ mk w s st nn =
       | otherwise        = (s, st, nn)
     c = Domain { start = s', stride = st', n = n', mask = m }
 {-# INLINE mk #-}
+
+-- | /O(n · w)/. Construct the tightest progression covering an ascending list of
+-- distinct unsigned bitvectors. Elements are assumed to lie in @[0, 2^w)@ and
+-- to be strictly increasing (no duplicates). Returns 'Nothing' on the empty
+-- list.
+fromAscEltList :: (1 <= w) => NatRepr w -> [Natural] -> Maybe (Domain w)
+-- References:
+--
+-- * SASI Definition 2, Abstraction function
+fromAscEltList w =
+  \case
+    [] -> Nothing
+    [x] -> Just (mk w x 1 0)
+    (x : xs) ->
+      let !diffs = zipWith (-) xs (x:xs)
+          !d = Prelude.foldr1 Prelude.gcd (map toInteger diffs)
+          !nn = fromInteger ((toInteger (last xs) - toInteger x) `Prelude.div` d)
+      in Just (mk w x (fromInteger d) nn)
 
 -- ------------------------------------------------------------------
 -- * Conversion
@@ -1551,6 +1573,38 @@ isSelfWrappingViaToList c@Domain{stride, mask} =
   proper c ==> property (isSelfWrapping c == (k * stride > mask))
   where
     k = fromIntegral (length (toList c) - 1) :: Natural
+
+-- ------------------------------------------------------------------
+-- ** Construction
+
+-- | /Soundness of 'fromAscEltList'/: every element of an ascending,
+-- distinct, in-range input list is a member of the resulting progression.
+fromAscEltListMember :: (1 <= w) => NatRepr w -> [Natural] -> Property
+fromAscEltListMember w xs =
+  ascendingDistinctInRange ==>
+    case fromAscEltList w xs of
+      Nothing -> property (null xs)
+      Just c  -> property (Prelude.all (member c) xs)
+  where
+    m = integerToNatural (maxUnsigned w)
+    inRange = Prelude.all (\x -> x .&. m == x)
+    strictlyAscending ys = Prelude.and (zipWith (<) ys (drop 1 ys))
+    ascendingDistinctInRange = inRange xs && strictlyAscending xs
+
+-- | /Round-trip exactness on monotonic orbits/: for a progression @c@ whose
+-- orbit doesn't cross @0@ (@start + n·stride < 2^w@), 'toList' is already
+-- sorted as a regular AP with step @stride c@, so the gcd of consecutive
+-- differences is exactly @stride c@ and the recovered progression has the
+-- same elements as @c@.
+fromAscEltListToListExactNonWrapping ::
+  (1 <= w) => NatRepr w -> Domain w -> Property
+fromAscEltListToListExactNonWrapping w c =
+  proper c ==> orbitDoesNotCrossZero ==>
+    case fromAscEltList w (List.sort (toList c)) of
+      Nothing -> property False
+      Just c' -> property (leqExact c c' && leqExact c' c)
+  where
+    orbitDoesNotCrossZero = start c + n c * stride c <= mask c
 
 -- ------------------------------------------------------------------
 -- ** Queries
