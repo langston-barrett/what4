@@ -20,5 +20,5 @@ jobs:
             https://github.com/ndmitchell/hlint/releases/download/v3.8/hlint-3.8-x86_64-linux.tar.gz
           tar xvf hlint.tar.gz
 
-          cd what4/
+          cd what4-domains/
           ../hlint-3.8/hlint src test

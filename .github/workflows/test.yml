@@ -1,71 +1,33 @@
-name: What4 CI
+name: what4-domains CI
 on:
   - push
   - pull_request
 
-# This CI configuration uses nix tooling to obtain the needed GHC and
-# cabal-install packages, as well as the external dependencies
-# (solvers, libz, libgmp, etc.).  The cabal + cabal project files
-# handle Haskell-level dependencies within the nix shell used for the
-# build.
-#
-# Variable aspects of this CI configuration:
-#
-# * GHC versions
-#   - specified in the strategy matrix
-#   - provided via nix: ensure the nix base and NIXPKGS used provide the requested GHC version
-# * nix tool version 2.11.0
-#   - all nix operations use new tool suite and cmdline interface (available in 2.4+) instead of older format
-
-# The CACHE_VERSION can be updated to force the use of a new cache if
-# the current cache contents become corrupted/invalid.  This can
-# sometimes happen when (for example) the OS version is changed but
-# older .so files are cached, which can have various effects
-# (e.g. cabal complains it can't find a valid version of the "happy"
-# tool).
 env:
   CACHE_VERSION: 4
 
 jobs:
-  genmatrix:
-    runs-on: ubuntu-24.04
-    outputs:
-      matrix: ${{ steps.gen-matrix.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: true
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-25.05
-          install_url: https://releases.nixos.org/nix/nix-2.31.0/install
-          extra_nix_config: |
-            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
-
-      - uses: cachix/cachix-action@v17
-        with:
-          name: galois
-          authToken: '${{ secrets.CACHIX_WHAT4 }}'
-      - id: gen-matrix
-        run: |
-          echo ::set-output name=matrix::$(nix run nixpkgs#swi-prolog -- .github/workflows/gen_matrix.pl)
-
   linux:
-    name: GHC-${{ matrix.ghc }} Z3-${{ matrix.z3 }} Yices-${{ matrix.yices }} CVC4-${{ matrix.cvc4 }} CVC5-${{ matrix.cvc5 }} STP-${{ matrix.stp }} Bitwuzla-${{ matrix.bitwuzla }} Boolector-${{ matrix.boolector }} ABC-${{ matrix.abc }} ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    needs: genmatrix
+    name: GHC-${{ matrix.ghc }}
+    runs-on: ubuntu-24.04
     continue-on-error: false
-    env:
-      CI_TEST_LEVEL: "1"
     strategy:
-      matrix: ${{fromJSON(needs.genmatrix.outputs.matrix)}}
+      matrix:
+        ghc:
+          - "9.12.2"
+          - "9.10.1"
+          - "9.8.1"
+          - "9.6.2"
+          - "9.4.4"
+          - "9.2.2"
+          - "9.0.2"
+          - "8.10.7"
+          - "8.8.4"
       fail-fast: false
     steps:
       - uses: actions/checkout@v6
         with:
-          submodules: true
+          submodules: false
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
@@ -84,14 +46,8 @@ jobs:
         name: Restore cabal store cache
         id: cache
         env:
-          # NB: Each `matrix.os` (e.g., `ubuntu-22.04-arm`) uniquely determines
-          # a `runner.arch` (e.g., ARM64), so there is no need to include the
-          # latter as part of the cache key
-          key: ${{ env.CACHE_VERSION }}-cabal-${{ matrix.os }}-ghc${{ matrix.ghc }}
+          key: ${{ env.CACHE_VERSION }}-cabal-ubuntu-24.04-ghc${{ matrix.ghc }}
         with:
-          # Note that in Cabal 3.12 and later, ~/.cabal/store moved to
-          # ~/.local/state/cabal/store. We support lots of versions of GHC and
-          # Cabal, so we cache both. Someday, we can remove the former.
           path: |
             ~/.cabal/store
             ~/.local/state/cabal/store
@@ -102,9 +58,6 @@ jobs:
             ${{ env.key }}-
 
       - name: Setup Environment Vars
-        # Setup a nix shell environment command that will supply the
-        # appropriate GHC version as well as dependent libraries (and
-        # includes for zlib) as well as the cabal-install tool.
         run: |
           GHC=haskell.compiler.ghc$(echo ${{ matrix.ghc }} | sed -e s,\\.,,g)
           case ${{ matrix.ghc }} in
@@ -119,11 +72,6 @@ jobs:
           esac
           echo "GHC_NIXPKGS=${GHC_NIXPKGS}" >> $GITHUB_ENV
           echo NS="nix shell ${GHC_NIXPKGS}#pkg-config ${GHC_NIXPKGS}#cabal-install ${GHC_NIXPKGS}#${GHC} ${GHC_NIXPKGS}#gmp ${GHC_NIXPKGS}#zlib ${GHC_NIXPKGS}#zlib.dev" >> $GITHUB_ENV
-          # In a normal nix derivation, there is a pkgconfig hook that automatically
-          # handles this, but since we are just using a nix shell this must be setup
-          # manually so that if the haskell zlib package is built, it finds the right
-          # zlib packge config.
-          echo PKG_CONFIG_PATH=$(nix eval --raw ${GHC_NIXPKGS}#zlib.dev)/lib/pkgconfig >> $GITHUB_ENV
 
       - name: Cabal update
         shell: bash
@@ -132,71 +80,19 @@ jobs:
       - name: Cabal check
         shell: bash
         run: |
-          (cd what4;         $NS -c cabal check)
-          (cd what4-abc;     $NS -c cabal check)
-          (cd what4-blt;     $NS -c cabal check)
-          (cd what4-domains; $NS -c cabal check)
-
-      - name: Cabal configure what4
-        shell: bash
-        # Note: the extra-lib-dirs and extra-include-dirs specified on
-        # the command-line are placed at the top-level of the
-        # generated cabal.project.local, but only apply to the primary
-        # package.  The zlib dependency also needs these flags, so the
-        # following adds a zlib package-specific stanza for these.
-        run: |
-          cd what4
-          $NS -c cabal configure --enable-tests -fdRealTestDisable -fsolverTests --extra-lib-dirs=$(nix eval --raw ${GHC_NIXPKGS}#zlib)/lib --extra-include-dirs=$(nix eval --raw ${GHC_NIXPKGS}#zlib.dev)/include
-          echo "" >> ../cabal.project.local
-          echo package zlib >> ../cabal.project.local
-          echo "  extra-lib-dirs: $(nix eval --raw ${GHC_NIXPKGS}#zlib)/lib" >> ../cabal.project.local
-          echo "  extra-include-dirs: $(nix eval --raw ${GHC_NIXPKGS}#zlib.dev)/include" >> ../cabal.project.local
-          cp ../cabal.project.local ./
-          cat ../cabal.project.ci >> ../cabal.project.local
-          cat ../cabal.project.local
+          cd what4-domains && $NS -c cabal check
 
       - name: Build
         shell: bash
-        run: |
-          $NS -c cabal build pkg:what4-domains pkg:what4
-          if [ "${{ matrix.ghc }}" = "9.10.1" ]; then
-            $NS -c cabal build pkg:w4smt2
-          fi
+        run: $NS -c cabal build pkg:what4-domains
 
       - name: Test
         shell: bash
-        run: |
-          cd what4
-          echo ABC version $(nix eval github:GaloisInc/flakes#abc.v${{ matrix.abc }}.version)
-          echo Bitwuzla version $(nix run github:GaloisInc/flakes#bitwuzla.v${{ matrix.bitwuzla }} -- --version | head -n1)
-          echo Boolector version $(nix run github:GaloisInc/flakes#boolector.v${{ matrix.boolector }} -- --version | head -n1)
-          echo CVC4 version $(nix run github:GaloisInc/flakes#cvc4.v${{ matrix.cvc4 }} -- --version | head -n1)
-          echo CVC5 version $(nix run github:GaloisInc/flakes#cvc5.v${{ matrix.cvc5 }} -- --version | head -n1)
-          echo STP version $(nix run github:GaloisInc/flakes#stp.v${{ matrix.stp }} -- --version | head -n1)
-          echo Yices version $(nix run github:GaloisInc/flakes#yices.v${{ matrix.yices }} -- --version | head -n1)
-          echo Z3 version $(nix run github:GaloisInc/flakes#z3.v${{ matrix.z3 }} -- --version | head -n1)
-          if [ "${{ matrix.ghc }}" = "9.10.1" ]; then
-            test_pkgs="pkg:what4-domains pkg:what4 pkg:w4smt2"
-          else
-            test_pkgs="pkg:what4-domains pkg:what4"
-          fi
-          $NS \
-            github:GaloisInc/flakes#abc.v${{ matrix.abc }} \
-            github:GaloisInc/flakes#bitwuzla.v${{ matrix.bitwuzla }} \
-            github:GaloisInc/flakes#boolector.v${{ matrix.boolector }} \
-            github:GaloisInc/flakes#cvc4.v${{ matrix.cvc4 }} \
-            github:GaloisInc/flakes#cvc5.v${{ matrix.cvc5 }} \
-            github:GaloisInc/flakes#stp.v${{ matrix.stp }} \
-            github:GaloisInc/flakes#yices.v${{ matrix.yices }} \
-            github:GaloisInc/flakes#z3.v${{ matrix.z3 }} \
-            -c cabal test $test_pkgs
+        run: $NS -c cabal test pkg:what4-domains
 
       - name: Documentation
         shell: bash
-        run: |
-          $NS -c cabal haddock what4-domains
-          cd what4
-          $NS -c cabal haddock what4
+        run: $NS -c cabal haddock what4-domains
 
       - uses: actions/cache/save@v5
         name: Save cabal store cache
@@ -208,25 +104,11 @@ jobs:
             dist-newstyle
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
-      # The following step happens here for two reasons:
-      #
-      # 1. It rarely fails, going last can save some time if earlier steps fail
-      # 2. It must come after we save the Cabal cache as it runs `cabal clean`
       - name: Package's Cabal/GHC compatibility
         shell: bash
-        # Using setup will use the cabal library installed with GHC
-        # instead of the cabal library of the Cabal-install tool to
-        # verify the cabal file is compatible with the associated
-        # GHC cabal library version.  Cannot run configure or build,
-        # because dependencies aren't present, but a clean is
-        # sufficient to cause parsing/validation of the cabal file.
         run: |
           defsetup()  { echo import Distribution.Simple; echo main = defaultMain; }
           setup_src() { if [ ! -f Setup.hs ] ; then defsetup > DefSetup.hs; fi; ls *Setup.hs; }
           setup_bin() { echo setup.${{ matrix.ghc }}; }
           with_ghc()  { $NS -c ${@}; }
-          (cd what4;         with_ghc ghc -o $(setup_bin) $(setup_src) && ./$(setup_bin) clean)
-          (cd what4-abc;     with_ghc ghc -o $(setup_bin) $(setup_src) && ./$(setup_bin) clean)
-          (cd what4-blt;     with_ghc ghc -o $(setup_bin) $(setup_src) && ./$(setup_bin) clean)
           (cd what4-domains; with_ghc ghc -o $(setup_bin) $(setup_src) && ./$(setup_bin) clean)
-          (cd w4smt2;        with_ghc ghc -o $(setup_bin) $(setup_src) && ./$(setup_bin) clean)
