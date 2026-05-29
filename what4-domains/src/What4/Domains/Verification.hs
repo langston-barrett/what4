@@ -91,6 +91,7 @@ where
 
 import Control.Monad.Trans (lift)
 import Control.Monad.Trans.Reader
+import Control.Monad.Trans.Writer.Strict (WriterT, runWriterT, tell)
 
 -- | Local definition of a Property: intended to be a proxy for a
 -- QuickCheck Property or a Hedgehog Property.  The 'toNativeProperty'
@@ -155,11 +156,19 @@ data GenEnv m = GenEnv { genChooseBool :: m Bool
 -- generator, and the 'a' return type is the type returned by running
 -- this monad.
 --
+-- A 'WriterT' layer records each primitive draw ('chooseBool',
+-- 'chooseInt', 'chooseInteger') so that 'toNativeProperty' can return
+-- a counterexample log alongside the generated value. The log is in
+-- draw order, with one entry per primitive call. Combinators built on
+-- top of these primitives (e.g. 'genDomain', 'genPair') flatten into a
+-- sequence of these primitive draws, so the log can be read against
+-- the test source to identify the failing inputs.
+--
 -- Tests should only use the 'Gen TYPE' as an output; the
 -- constructors and internals should be used only by the test
 -- concretization.
 newtype Gen a =
-  Gen { unGen :: forall m. Monad m => ReaderT (GenEnv m) m a }
+  Gen { unGen :: forall m. Monad m => ReaderT (GenEnv m) (WriterT [String] m) a }
 
 instance Functor Gen where
   fmap f (Gen m) = Gen (fmap f m)
@@ -173,28 +182,44 @@ instance Monad Gen where
 
 -- | A test generator that returns True or False
 chooseBool :: Gen Bool
-chooseBool = Gen (asks genChooseBool >>= lift)
+chooseBool = Gen $ do
+  draw <- asks genChooseBool
+  x <- lift (lift draw)
+  lift (tell [show x])
+  pure x
 
 -- | A test generator that returns an 'Int' value between the
 -- specified (inclusive) bounds.
 chooseInt :: (Int, Int) -> Gen Int
-chooseInt r = Gen (asks genChooseInt >>= lift . ($ r))
+chooseInt r = Gen $ do
+  draw <- asks genChooseInt
+  x <- lift (lift (draw r))
+  lift (tell [show x ++ " in " ++ show r])
+  pure x
 
 -- | A test generator that returns an 'Integer' value between the
 -- specified (inclusive) bounds.
 chooseInteger :: (Integer, Integer) -> Gen Integer
-chooseInteger r = Gen (asks genChooseInteger >>= lift . ($ r))
+chooseInteger r = Gen $ do
+  draw <- asks genChooseInteger
+  x <- lift (lift (draw r))
+  lift (tell [show x ++ " in " ++ show r])
+  pure x
 
 -- | A test generator that returns the current shrink size of the
--- generator functionality.
+-- generator functionality. The size is not recorded in the
+-- counterexample log because it is derived from the framework rather
+-- than a user-visible draw.
 getSize :: Gen Int
-getSize = Gen (asks genGetSize >>= lift)
+getSize = Gen (asks genGetSize >>= lift . lift)
 
 -- | This function should be called by the testing code to convert the
 -- proxy tests in this module into the native tests (e.g. QuickCheck
 -- or Hedgehog).  This function is provided with the mapping
 -- environment between the proxy tests here and the native
 -- equivalents, and a local Generator monad expression, returning a
--- native Generator equivalent.
-toNativeProperty :: Monad m => GenEnv m -> Gen b -> m b
-toNativeProperty gens (Gen gprops) = runReaderT gprops gens
+-- native Generator equivalent paired with a log of primitive draws.
+-- The log is intended to be surfaced as a counterexample by the
+-- bindings layer when a property fails.
+toNativeProperty :: Monad m => GenEnv m -> Gen b -> m (b, [String])
+toNativeProperty gens (Gen gprops) = runWriterT (runReaderT gprops gens)

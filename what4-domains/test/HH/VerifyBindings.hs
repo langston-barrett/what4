@@ -4,6 +4,7 @@
 module VerifyBindings where
 
 import           Control.Applicative
+import           Data.List (intercalate)
 import           Hedgehog
 import qualified Hedgehog.Gen as Gen
 import qualified Hedgehog.Range as Range
@@ -21,9 +22,18 @@ verifyGenerators = V.GenEnv { V.genChooseBool = Gen.bool
 
 
 genTest :: String -> V.Gen V.Property -> TestTree
-genTest nm p = testProperty nm $ property $ mkProp =<< (forAll $ V.toNativeProperty verifyGenerators p)
+genTest nm p = testProperty nm $ property $ do
+  (prop, draws) <- forAllWith (formatDraws . snd) (V.toNativeProperty verifyGenerators p)
+  mkProp prop
   where mkProp (V.BoolProperty b) = test $ assert b
         mkProp (V.AssumptionProp a) = if (V.preCondition a) then (mkProp $ V.assumedProp a) else discard
+
+formatDraws :: [String] -> String
+formatDraws [] = "Counterexample: (no primitive draws)"
+formatDraws draws =
+  "Counterexample (primitive draws in order):\n  "
+    ++ intercalate "\n  " (zipWith fmtOne [0 :: Int ..] draws)
+  where fmtOne i s = "drawn[" ++ show i ++ "] = " ++ s
 
 
 setTestOptions :: TestTree -> TestTree

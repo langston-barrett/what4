@@ -3,6 +3,7 @@
 
 module VerifyBindings where
 
+import           Data.List (intercalate)
 import           Test.Tasty
 import           Test.Tasty.QuickCheck
 import qualified What4.Domains.Verification as V
@@ -22,7 +23,16 @@ verifyGenerators = V.GenEnv { V.genChooseBool = elements [ True, False ]
 
 
 genTest :: String -> V.Gen V.Property -> TestTree
-genTest nm p = testProperty nm (property $ V.toNativeProperty verifyGenerators p)
+genTest nm p = testProperty nm $ do
+  (prop, draws) <- V.toNativeProperty verifyGenerators p
+  pure (counterexample (formatDraws draws) prop)
+
+formatDraws :: [String] -> String
+formatDraws [] = "Counterexample: (no primitive draws)"
+formatDraws draws =
+  "Counterexample (primitive draws in order):\n  "
+    ++ intercalate "\n  " (zipWith fmtOne [0 :: Int ..] draws)
+  where fmtOne i s = "drawn[" ++ show i ++ "] = " ++ s
 
 
 setTestOptions :: TestTree -> TestTree
