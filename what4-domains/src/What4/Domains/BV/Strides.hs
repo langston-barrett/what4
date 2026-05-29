@@ -380,6 +380,7 @@ module What4.Domains.BV.Strides
   , fromArithCorrect
   , roundtripArith
   , toBitwiseCorrect
+  , strideBitwiseCorrect
   , fromBitwiseCorrect
   -- ** Internal helpers
   , modNegCorrect
@@ -811,21 +812,47 @@ fromArith w = \case
 -- those are moved into a common module that 'Strides' can import (e.g. by adding a
 -- dep from 'BV.Bitwise' to 'BV.Arith'), inline-call them instead.
 
--- TODO? Can we do better than just arith-to-bitwise by considering stride?
-
 -- | /O(w log w)/. Convert a progression to a bitwise domain.
 toBitwise :: Domain w -> B.Domain w
-toBitwise c = arithToBitwise (toArith c)
+-- Two independently sound bitwise sources are 'B.meet'-ed:
+--
+--   * 'arcBitwise': the bits constant across the wrapped-interval arc
+--     'toArith' yields.
+--   * 'strideBitwise': the low @v@ bits, where @stride = 2^v · m@ with @m@
+--     odd; see that function's docstring.
+--
+-- The arc path alone can lose the stride-bit information (e.g.
+-- @start=1, stride=4, n=3@ at @w=4@ has arc @[1, 13]@, which has /no/
+-- constant bits, even though the orbit @{1, 5, 9, 13}@ has its low two
+-- bits fixed to @01@).
+toBitwise c = B.meet (arcBitwise c) (strideBitwise c)
+
+-- | /O(w log w)/. Bitwise domain from the arc 'toArith' produces.
+arcBitwise :: Domain w -> B.Domain w
+arcBitwise = arithToBitwise . toArith
+
+-- | /O(1)/. Bitwise domain from the stride alone: every orbit element
+-- shares its low @v@ bits with @start@, where @stride = 2^v · m@ for odd
+-- @m@. (Each step adds a multiple of @2^v@, leaving the low @v@ bits
+-- unchanged.) The high bits are unconstrained.
+strideBitwise :: Domain w -> B.Domain w
+strideBitwise c = B.interval imask fixedLow (fixedLow Bits..|. highMask)
   where
-    arithToBitwise a =
-      let imask = A.bvdMask a in
-      case A.arithDomainData a of
-        Nothing -> B.interval imask 0 imask
-        Just (alo, _) -> B.interval imask lo hi
-          where
-            u = A.unknowns a
-            hi = alo Bits..|. u
-            lo = hi `Bits.xor` u
+    imask    = toInteger (mask c)
+    lowMask  = toInteger (strideGcd c) - 1
+    highMask = imask `Bits.xor` lowMask
+    fixedLow = toInteger (start c) Bits..&. lowMask
+
+arithToBitwise :: A.Domain w -> B.Domain w
+arithToBitwise a =
+  let imask = A.bvdMask a in
+  case A.arithDomainData a of
+    Nothing -> B.interval imask 0 imask
+    Just (alo, _) -> B.interval imask lo hi
+      where
+        u = A.unknowns a
+        hi = alo Bits..|. u
+        lo = hi `Bits.xor` u
 
 -- | /O(1)/. Convert a bitwise domain to a progression.
 fromBitwise :: NatRepr w -> B.Domain w -> Maybe (Domain w)
@@ -1708,6 +1735,16 @@ toBitwiseCorrect :: (1 <= w) => NatRepr w -> Domain w -> Natural -> Property
 toBitwiseCorrect _w c x =
   proper c ==> member c x' ==>
     property (B.member (toBitwise c) (toInteger x'))
+  where
+    x' = modMask c x
+
+-- | Every element in a progression is also in its 'strideBitwise'
+-- conversion (i.e., shares its low @v@ bits with @start@, where
+-- @stride = 2^v · m@ for odd @m@).
+strideBitwiseCorrect :: (1 <= w) => NatRepr w -> Domain w -> Natural -> Property
+strideBitwiseCorrect _w c x =
+  proper c ==> member c x' ==>
+    property (B.member (strideBitwise c) (toInteger x'))
   where
     x' = modMask c x
 

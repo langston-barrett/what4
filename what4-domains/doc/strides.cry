@@ -203,7 +203,16 @@ fromArith : {n} (fin n, n >= 1) => Dom n -> Domain n
 fromArith a = { start = a.lo, stride = 1, n = zext a.sz }
 
 toBitwise : {n} (fin n, n >= 2) => Domain n -> Bits::Dom n
-toBitwise c = BV::arithToBitDom (toArith c)
+toBitwise c = Bits::meet (arcBitwise c) (strideBitwise c)
+
+arcBitwise : {n} (fin n, n >= 2) => Domain n -> Bits::Dom n
+arcBitwise c = BV::arithToBitDom (toArith c)
+
+strideBitwise : {n} (fin n, n >= 2) => Domain n -> Bits::Dom n
+strideBitwise c = { lomask = fixedLow, himask = fixedLow || (~lowMask) }
+  where
+    lowMask = strideGcd c - 1
+    fixedLow = c.start && lowMask
 
 fromBitwise : {n} (fin n, n >= 2) => Bits::Dom n -> Domain n
 fromBitwise b = fromArith (BV::bitToArithDom b)
@@ -643,6 +652,9 @@ roundtripArith a = ~ a.isBot ==> toArith (fromArith a) =@= a
 toBitwiseCorrect : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
 toBitwiseCorrect c v = proper c ==> member c v ==> Bits::mem (toBitwise c) v
 
+strideBitwiseCorrect : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+strideBitwiseCorrect c v = proper c ==> member c v ==> Bits::mem (strideBitwise c) v
+
 fromBitwiseCorrect : {n} (fin n, n >= 2) => Bits::Dom n -> [n] -> Property
 fromBitwiseCorrect b v = Bits::mem b v ==> member (fromBitwise b) v
 
@@ -652,6 +664,7 @@ property p_cosetArcCorrect = cosetArcCorrect`{8}
 property p_fromArithCorrect = fromArithCorrect`{8}
 property p_roundtripArith = roundtripArith`{8}
 property p_toBitwiseCorrect = toBitwiseCorrect`{8}
+property p_strideBitwiseCorrect = strideBitwiseCorrect`{8}
 property p_fromBitwiseCorrect = fromBitwiseCorrect`{8}
 
 // ------------------------------------------------------------------
