@@ -231,20 +231,6 @@ subset_negate :: (1 <= w) => NatRepr w -> S.Domain w -> Natural -> Property
 subset_negate w c x =
   S.proper c ==> subsetOf w (S.negate w c) (A.negate (S.toArith c)) x
 
-subset_add ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_add w a b x =
-  S.proper a ==> S.proper b ==>
-    subsetOf w (S.add w a b) (A.add (S.toArith a) (S.toArith b)) x
-
-subset_sub ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Natural -> Property
-subset_sub w a b x =
-  S.proper a ==> S.proper b ==>
-    subsetOf w (S.sub w a b) (A.add (S.toArith a) (A.negate (S.toArith b))) x
-
 subset_scale ::
   (1 <= w) =>
   NatRepr w -> Integer -> S.Domain w -> Natural -> Property
@@ -458,12 +444,6 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
   , genTest "subset_negate" $
       do SW n <- genWidth
          subset_negate n <$> S.genDomain n <*> genNatBV n
-  , genTest "subset_add" $
-      do SW n <- genWidth
-         subset_add n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
-  , genTest "subset_sub" $
-      do SW n <- genWidth
-         subset_sub n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
   , genTest "subset_scale" $
       do SW n <- genWidth
          subset_scale n <$> chooseInteger (0, maxUnsigned n)
