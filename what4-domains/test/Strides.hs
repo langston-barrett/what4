@@ -7,6 +7,7 @@ module Strides (tests) where
 
 import qualified Test.Tasty as TT
 
+import qualified Data.List as List
 import           Data.Parameterized.NatRepr (NatRepr, addNat, addIsLeq, isPosNat, knownNat, someNat, testLeq, LeqProof(..), maxUnsigned)
 import           Data.Parameterized.Some (Some(..))
 import           GHC.TypeNats (type (<=))
@@ -45,6 +46,14 @@ genWidthSmall =
 
 genNatBV :: NatRepr w -> Gen Natural
 genNatBV w = fromInteger <$> chooseInteger (0, maxUnsigned w)
+
+-- | A strictly-ascending list of distinct 'Natural's in @[0, 2^w)@.
+genAscNatList :: NatRepr w -> Gen [Natural]
+genAscNatList w =
+  do sz <- getSize
+     k <- chooseInt (0, min (sz + 1) 64)
+     ys <- mapM (const (genNatBV w)) [1 .. k]
+     pure (List.sort (List.nub ys))
 
 -- | An arbitrary nonnegative natural, used to seed bitvector-shaped values
 -- whose width is chosen separately by 'genWidthExp'.
@@ -181,6 +190,12 @@ tests = TT.testGroup "Strides"
   , genTest "fromBitwiseCorrect" $
       do SW n <- genWidth
          S.fromBitwiseCorrect n <$> B.genDomain n <*> chooseInteger (0, maxUnsigned n)
+  , genTest "fromAscEltListMember" $
+      do SW n <- genWidth
+         S.fromAscEltListMember n <$> genAscNatList n
+  , genTest "fromAscEltListToListExactNonWrapping" $
+      do SW n <- genWidthSmall
+         S.fromAscEltListToListExactNonWrapping n <$> S.genDomain n
 
   -- Arithmetic
   , genTest "correct_neg" $
