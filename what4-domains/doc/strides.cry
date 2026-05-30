@@ -540,13 +540,57 @@ concat a b = fromArith (Arith::concat (toArith a) (toArith b))
 // * Shifts and rotations
 
 shl : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-shl = liftArith2 Arith::shl
+shl a b =
+  if cStride == 0 then mk 0 1 0
+  else if leqExact mulResult arithResult then mulResult
+  else arithResult
+  where
+    (l_b, u_b) = Arith::ubounds (toArith b)
+    cStride : [n]
+    cStride = 1 << l_b
+    cN : [n + 1]
+    cN = ((1 : [n + 1]) << (zext (u_b - l_b) : [n + 1])) - 1
+    c = mk cStride cStride cN
+    mulResult = mul a c
+    arithResult = liftArith2 Arith::shl a b
+
+arcNoWrap : {n} (fin n, n >= 2) => Domain n -> Bit
+arcNoWrap c =
+  (zext c.start + zext c.n * zext c.stride : [2 * n + 1]) <= zext (~ zero : [n])
 
 lshr : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-lshr = liftArith2 Arith::lshr
+lshr a b =
+  if b.n == 0 /\ kFitsCtz /\ (kI == 0 \/ arcNoWrap a)
+    then mk (a.start >> kI) (a.stride >> kI) a.n
+  else mk lo 1 (zext (hi - lo))
+  where
+    kI = b.start
+    kFitsCtz = a.stride && ((1 << kI) - 1) == 0
+    (l_a, u_a) = Arith::ubounds (toArith a)
+    (l_b, u_b) = Arith::ubounds (toArith b)
+    lo = l_a >> u_b
+    hi = u_a >> l_b
 
 ashr : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-ashr = liftArith2 Arith::ashr
+ashr a b =
+  if b.n == 0 /\ kI == 0 then a
+  else if b.n == 0 /\ kFitsCtz /\ arcNoWrap a /\ allPositive
+    then mk (a.start >> kI) (a.stride >> kI) a.n
+  else if b.n == 0 /\ kFitsCtz /\ arcNoWrap a /\ allNegative
+    then mk ((a.start >> kI) + signExtOff) (a.stride >> kI) a.n
+  else mk lo 1 (zext (hi - lo))
+  where
+    kI = b.start
+    kFitsCtz = a.stride && ((1 << kI) - 1) == 0
+    endA = end a
+    allPositive = ~ (a.start @ 0) /\ ~ (endA @ 0)
+    allNegative = a.start @ 0 /\ endA @ 0
+    signExtOff : [n]
+    signExtOff = - (1 << (`n - kI))
+    (l_a, u_a) = Arith::sbounds (toArith a)
+    (l_b, u_b) = Arith::ubounds (toArith b)
+    lo = if l_a <$ 0 then l_a >>$ l_b else l_a >>$ u_b
+    hi = if u_a <$ 0 then u_a >>$ u_b else u_a >>$ l_b
 
 rol : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 rol = liftBitwise2 Bits::rolAbstract
