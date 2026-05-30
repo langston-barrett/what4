@@ -1448,14 +1448,137 @@ select i n _w c =
 -- ------------------------------------------------------------------
 -- * Shifts and rotations
 
+-- | /O(w)/. Left shift.
 shl :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-shl w = liftArith2 w (A.shl w)
+-- References:
+--
+-- * CLP 3.3.3 Shift Operations:
+--
+--     (l1, u1, δ1) << (l2, u2, δ2) =
+--       (min(l1 << l2, l1 << u2),
+--        max(u1 << l2, u1 << u2),
+--        gcd(|l1|, δ1) << l2)
+--
+-- Implemented as @mul a c@, where @c@ over-approximates
+-- @{ 2^k mod 2^w | k ∈ b }@ by the progression
+-- @(2^l_b, 2^l_b, 2^(u_b - l_b) - 1)@ (i.e., @{2^l_b, 2·2^l_b, ..., 2^u_b}@).
+-- 'mul' then yields:
+--
+--   * start  = l_a · 2^l_b mod 2^w                — matches paper's @l1 << l2@
+--   * stride = gcd(l_a, δ_a) · 2^l_b mod 2^w      — matches paper's @gcd(|l1|, δ1) << l2@
+--   * n      = the paper's step count
+--
+-- (Algebra: @mul@'s @gcd(t1·l_c, l_a·t_c, t1·t_c) = 2^l_b · gcd(l_a, t_a)@,
+-- and its span unfolds to the same closed form the paper gives.)
+--
+-- Shift counts ≥ @w@ produce 0, so we cap @l_b'@ and @u_b'@ at @w@. When
+-- @l_b' = w@, every result is 0, so we shortcut to @{0}@.
+--
+-- 'mul' is sound w.r.t. the concrete shl semantics, but its closed-form
+-- @n'@ for non-singleton @b@ can land in a coset that extends past
+-- @A.shl@'s arc, leaving 'mul' incomparable with @A.shl@. We accept the
+-- 'mul' result only when 'leqExact' confirms it is contained in the
+-- arith arc; otherwise we fall back to the arith result.
+shl w a b
+  | l_b' == wInt = mk w 0 1 0
+  | leqExact mulResult arithResult = mulResult
+  | otherwise = arithResult
+  where
+    wInt = NR.intValue w
+    (l_b, u_b) = A.ubounds (toArith b)
+    l_b' = min l_b wInt
+    u_b' = min u_b wInt
+    cStride = (1 :: Natural) `shiftL` fromInteger l_b'
+    cN      = ((1 :: Natural) `shiftL` fromInteger (u_b' - l_b')) - 1
+    c       = mk w cStride cStride cN
+    mulResult   = mul w a c
+    arithResult = liftArith2 w (A.shl w) a b
 
+-- | /O(w)/. Logical right shift.
 lshr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-lshr w = liftArith2 w (A.lshr w)
+-- References:
+--
+-- * CLP 3.3.3 Shift Operations, Table 3.2 (@s(l1) = +, s(u1) = +@):
+--
+--     (l1, u1, δ1) >>u (l2, u2, δ2) = (l1 >>u u2, u1 >>u l2, 1)
+--
+-- For a singleton shift @b = {k}@ with @k ≤ ctz(stride a)@ and an arc that
+-- doesn't wrap mod @2^w@: write @stride a = 2^v · m@ (m odd) and decompose
+-- each @x = (q + i·m)·2^v + c@ where @c = start a mod 2^v@. For @k ≤ v@,
+-- @c >> k@ is constant in @i@, so @x >> k = (start a >> k) + i·(stride a >> k)@
+-- — a clean progression with stride @stride a >> k@. (Note this works for any
+-- @start a@; the bottom @v@ bits of start are preserved into the result, so
+-- we don't need @ctz(start a) ≥ k@.)
+--
+-- For non-singleton @b@, different @k ∈ b@ give different shifted strides
+-- @stride a >> k@, and the union of those progressions is generally not a
+-- single CLP, so we fall back to Table 3.2's stride-1 bounds.
+lshr w a b
+  | n b == 0
+  , kI <= ctzStride
+  , kI == 0 || arcNoWrap
+  = mk w (start a `Bits.shiftR` kI)
+         (stride a `Bits.shiftR` kI) (n a)
+  | otherwise = mk w lo 1 (hi - lo)
+  where
+    wInt = NR.intValue w
+    kI = fromInteger (min (toInteger (start b)) wInt) :: Int
+    ctzStride = countTrailingZerosOr0 (toInteger (stride a))
+    arcNoWrap = start a + n a * stride a <= mask a
+    (l_a, u_a) = A.ubounds (toArith a)
+    (l_b, u_b) = A.ubounds (toArith b)
+    l_b' = fromInteger (min l_b wInt) :: Int
+    u_b' = fromInteger (min u_b wInt) :: Int
+    lo = fromInteger (l_a `Bits.shiftR` u_b')
+    hi = fromInteger (u_a `Bits.shiftR` l_b')
 
+-- | /O(w)/. Arithmetic right shift.
 ashr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-ashr w = liftArith2 w (A.ashr w)
+-- References:
+--
+-- * CLP 3.3.3 Shift Operations, Table 3.2 (sign-based case analysis):
+--
+--     s(l1) = -, s(u1) = -:  (l1 >>s l2, u1 >>s u2, 1)
+--     s(l1) = -, s(u1) = +:  (l1 >>s l2, u1 >>s l2, 1)
+--     s(l1) = +, s(u1) = +:  (l1 >>s u2, u1 >>s l2, 1)
+--
+-- (The @s(l1) = +, s(u1) = -@ case cannot occur for a linearly-ordered range.)
+--
+-- Same singleton-shift stride preservation as 'lshr', plus a sign-half check:
+-- positive orbits behave like 'lshr'; negative orbits get the sign-extension
+-- offset @2^w - 2^(w-k)@ added (top @k@ bits of every result are 1).
+ashr w a b
+  | n b == 0 && kI == 0 = a
+  | n b == 0
+  , kI <= ctzStride
+  , arcNoWrap
+  , allPositive
+  = mk w (start a `Bits.shiftR` kI)
+         (stride a `Bits.shiftR` kI) (n a)
+  | n b == 0
+  , kI <= ctzStride
+  , arcNoWrap
+  , allNegative
+  = let off    = (mask a + 1) - (1 `shiftL` (wIntI - kI))  -- 2^w - 2^(w-k)
+        start' = (start a `Bits.shiftR` kI) + off
+    in mk w start' (stride a `Bits.shiftR` kI) (n a)
+  | otherwise = mk w (asN w lo) 1 (asN w (hi - lo))
+  where
+    wInt = NR.intValue w
+    wIntI = fromInteger wInt :: Int
+    kI = fromInteger (min (toInteger (start b)) wInt) :: Int
+    ctzStride = countTrailingZerosOr0 (toInteger (stride a))
+    arcNoWrap = start a + n a * stride a <= mask a
+    halfRange = (mask a + 1) `Prelude.div` 2  -- 2^(w-1)
+    endA = start a + n a * stride a  -- meaningful only when arcNoWrap
+    allPositive = endA < halfRange
+    allNegative = start a >= halfRange
+    (l_a, u_a) = A.sbounds w (toArith a)
+    (l_b, u_b) = A.ubounds (toArith b)
+    l_b' = fromInteger (min l_b wInt) :: Int
+    u_b' = fromInteger (min u_b wInt) :: Int
+    lo = l_a `Bits.shiftR` (if l_a < 0 then l_b' else u_b')
+    hi = u_a `Bits.shiftR` (if u_a < 0 then u_b' else l_b')
 
 rol :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rol w = liftBitwise2 w (B.rolAbstract w)
