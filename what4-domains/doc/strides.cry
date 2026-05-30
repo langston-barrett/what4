@@ -378,38 +378,151 @@ srem = liftArith2 Arith::srem
 bnot : {n} (fin n, n >= 2) => Domain n -> Domain n
 bnot c = mk (~ end c) c.stride c.n
 
-// Hull max: maximum unsigned value of any orbit member. Saturates to @~0@
-// on wrapped or self-wrapping orbits, since @start + n*stride@ may overflow.
-hullMax : {n} (fin n, n >= 2) => Domain n -> [n]
-hullMax c =
-  if span > zext (~ 0 : [n]) then ~ 0
-  else if (zext c.start + span : [2 * n + 1]) > zext (~ 0 : [n]) then ~ 0
-  else c.start + drop`{1} c.n * c.stride
+// /Hacker's Delight/ §4.3 minAND. Tight lower bound on @{x && y | alo <= x
+// <= ahi /\ blo <= y <= bhi}@. The loop walks bit positions from MSB to LSB
+// and tries to clear shared @0@-bits in the inputs.
+warrenAndLo : {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> [n]
+warrenAndLo alo ahi blo bhi = (final.0) && (final.1)
   where
+    step (a, b) m =
+      if (~ a) && (~ b) && m != 0 /\ aPrime <= ahi
+        then (aPrime, b)
+      else if (~ a) && (~ b) && m != 0 /\ bPrime <= bhi
+        then (a, bPrime)
+      else (a, b)
+      where
+        aPrime = (a || m) && (~ (m - 1))
+        bPrime = (b || m) && (~ (m - 1))
+    bits : [n][n]
+    bits = [ 1 << i | i <- reverse [0 .. n - 1] ]
+    final = foldl step (alo, blo) bits
+
+// /Hacker's Delight/ §4.3 maxAND. Tight upper bound on the AND.
+warrenAndHi : {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> [n]
+warrenAndHi alo ahi blo bhi = (final.0) && (final.1)
+  where
+    step (a, b) m =
+      if a && (~ b) && m != 0 /\ aPrime >= alo
+        then (aPrime, b)
+      else if (~ a) && b && m != 0 /\ bPrime >= blo
+        then (a, bPrime)
+      else (a, b)
+      where
+        aPrime = (a && (~ m)) || (m - 1)
+        bPrime = (b && (~ m)) || (m - 1)
+    bits : [n][n]
+    bits = [ 1 << i | i <- reverse [0 .. n - 1] ]
+    final = foldl step (ahi, bhi) bits
+
+// Sound unsigned @[lo, hi]@ range of an operand's orbit, for use as input
+// to Warren's bounds:
+//
+//   * non-wrap, non-self-wrap: @[start, end]@.
+//   * wrap (crosses 0, non-self-wrap): @[0, ~0]@ — the orbit straddles 0.
+//   * self-wrap: the coset arc @[start % g, ~0 - (g - 1) + start % g]@.
+operandRange : {n} (fin n, n >= 2) => Domain n -> ([n], [n])
+operandRange c =
+  if isSelfWrapping c then (lo, lo + ~ 0 - (g - 1))
+  else if (zext c.start + span : [2 * n + 1]) > zext (~ 0 : [n]) then (0, ~ 0)
+  else (c.start, c.start + drop`{1} c.n * c.stride)
+  where
+    g = strideGcd c
+    lo = c.start % g
     span : [2 * n + 1]
     span = zext c.n * zext c.stride
 
-// CLP report §3.3.4: stride @d = min(g1, g2)@, upper bound @min(hullMax a,
-// hullMax b)@ since @x & y <= min(x, y)@, lower bound = coset rep of
-// @start a && start b@.
+// CLP report §3.3.4 (cheap O(w) variant): stride @d = min(g1, g2)@, upper
+// bound = @min(end of operandRange a, end of operandRange b)@, lower bound
+// = coset rep of @start a && start b@.
 band : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 band a b = mk cosetLo d nSteps
   where
     g1 = strideGcd a
     g2 = strideGcd b
     d  = if g1 <= g2 then g1 else g2
-    sub_ = if hullMax a <= hullMax b then hullMax a else hullMax b
+    (_, aHi) = operandRange a
+    (_, bHi) = operandRange b
+    sub_ = if aHi <= bHi then aHi else bHi
     sStart = a.start && b.start
     cosetLo = sStart && (d - 1)
     nSteps : [n + 1]
     nSteps = if sub_ < cosetLo then 0 else zext ((sub_ - cosetLo) / d)
 
+// /Hacker's Delight/ §4.3 tight bounds: strictly at least as precise as
+// 'band', but more expensive (Warren's loop runs @w@ iterations of
+// @O(w)@ bitwise-and on naturals).
+bandPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+bandPrecise a b = mk cosetLo d nSteps
+  where
+    g1 = strideGcd a
+    g2 = strideGcd b
+    d  = if g1 <= g2 then g1 else g2
+    (aLo, aHi) = operandRange a
+    (bLo, bHi) = operandRange b
+    wLo = warrenAndLo aLo aHi bLo bHi
+    wHi = warrenAndHi aLo aHi bLo bHi
+    sStart = a.start && b.start
+    sStartCoset = sStart && (d - 1)
+    cosetLo = wLo + ((sStartCoset - wLo) && (d - 1))
+    nSteps : [n + 1]
+    nSteps = if wHi < cosetLo then 0 else zext ((wHi - cosetLo) / d)
+
 // De Morgan: @x | y = ~(~x & ~y)@.
 bor : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 bor a b = bnot (band (bnot a) (bnot b))
 
+borPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+borPrecise a b = bnot (bandPrecise (bnot a) (bnot b))
+
 bxor : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 bxor = liftBitwise2 Bits::bxor
+
+// /Hacker's Delight/ §4.3 minAND/maxAND tightness: for any @x ∈ [alo, ahi]@,
+// @y ∈ [blo, bhi]@, @warrenAndLo <= x && y <= warrenAndHi@.
+warrenAndLoCorrect :
+  {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> [n] -> [n] -> Property
+warrenAndLoCorrect alo ahi blo bhi x y =
+  alo <= ahi ==> blo <= bhi ==>
+    alo <= x ==> x <= ahi ==> blo <= y ==> y <= bhi ==>
+      warrenAndLo alo ahi blo bhi <= x && y
+
+warrenAndHiCorrect :
+  {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> [n] -> [n] -> Property
+warrenAndHiCorrect alo ahi blo bhi x y =
+  alo <= ahi ==> blo <= bhi ==>
+    alo <= x ==> x <= ahi ==> blo <= y ==> y <= bhi ==>
+      x && y <= warrenAndHi alo ahi blo bhi
+
+// 'operandRange' is sound: every orbit member lies in @[lo, hi]@.
+operandRangeCorrect : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+operandRangeCorrect c x =
+  proper c ==> member c x ==> (lo <= x /\ x <= hi)
+  where
+    (lo, hi) = operandRange c
+
+// Soundness of @bandPrecise@.
+correct_andPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_andPrecise a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    member (bandPrecise a b) (x && y)
+
+// Soundness of @borPrecise@.
+correct_orPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_orPrecise a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    member (borPrecise a b) (x || y)
+
+// @bandPrecise@ is at least as precise as @band@ on the 'leqExact' order.
+andPreciseDominatesAnd : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+andPreciseDominatesAnd a b =
+  proper a ==> proper b ==> leqExact (bandPrecise a b) (band a b)
+
+property p_warrenAndLoCorrect      = warrenAndLoCorrect`{4}
+property p_warrenAndHiCorrect      = warrenAndHiCorrect`{4}
+property p_operandRangeCorrect     = operandRangeCorrect`{4}
+property p_correct_andPrecise      = correct_andPrecise`{4}
+property p_correct_orPrecise       = correct_orPrecise`{4}
+property p_andPreciseDominatesAnd  = andPreciseDominatesAnd`{4}
 
 // ------------------------------------------------------------------
 // * Concatenation, extension, selection, and truncation
@@ -874,38 +987,10 @@ property p_correct_xor = correct_xor`{4}
 //
 // Each property is provable Q.E.D. — the witnesses were found by Z3 from
 // the open dominance properties (which were refuted) and inlined here.
-bandIncomparableWithLift : Bit
-bandIncomparableWithLift =
-  // Witness: paper's @band@ contains an element the lift does not.
-  ~ leqExact (band a1 b1) (liftBitwise2 Bits::band a1 b1) /\
-  // Witness: the lift contains an element paper's @band@ does not.
-  ~ leqExact (liftBitwise2 Bits::band a2 b2) (band a2 b2)
-  where
-    a1 : Domain 4
-    a1 = { start = 2, stride = 8, n = 1 }
-    b1 : Domain 4
-    b1 = { start = 8, stride = 4, n = 1 }
-    a2 : Domain 4
-    a2 = { start = 14, stride = 4, n = 2 }
-    b2 : Domain 4
-    b2 = { start = 10, stride = 2, n = 1 }
-
-borIncomparableWithLift : Bit
-borIncomparableWithLift =
-  ~ leqExact (bor a1 b1) (liftBitwise2 Bits::bor a1 b1) /\
-  ~ leqExact (liftBitwise2 Bits::bor a2 b2) (bor a2 b2)
-  where
-    a1 : Domain 4
-    a1 = { start = 9, stride = 1, n = 5 }
-    b1 : Domain 4
-    b1 = { start = 6, stride = 8, n = 1 }
-    a2 : Domain 4
-    a2 = { start = 3, stride = 6, n = 1 }
-    b2 : Domain 4
-    b2 = { start = 8, stride = 5, n = 3 }
-
-property p_bandIncomparableWithLift = bandIncomparableWithLift
-property p_borIncomparableWithLift  = borIncomparableWithLift
+// Note: 'band' and @liftBitwise2 Bits::band@ are /incomparable/ on the
+// 'leqExact' order: at @n = 4@, Z3 can refute both directions of dominance.
+// See 'bandIncomparableWithLift' in @test\/Strides.hs@ for a manual
+// counter-example. A reduced product of the two would dominate either alone.
 
 
 // ------------------------------------------------------------------

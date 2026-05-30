@@ -316,7 +316,9 @@ module What4.Domains.BV.Strides
   -- * Conversion
   , toArith
   , hull
-  , hullData
+  , operandRange
+  , warrenAndLo
+  , warrenAndHi
   , fromArith
   , toBitwise
   , fromBitwise
@@ -353,7 +355,9 @@ module What4.Domains.BV.Strides
   -- * Bitwise operations
   , not
   , and
+  , andPrecise
   , or
+  , orPrecise
   , xor
   -- * Concatenation, extension, selection, and truncation
   , zext
@@ -457,8 +461,14 @@ module What4.Domains.BV.Strides
   -- ** Bitwise operations
   , correct_not
   , correct_and
+  , correct_andPrecise
   , correct_or
+  , correct_orPrecise
   , correct_xor
+  , warrenAndLoCorrect
+  , warrenAndHiCorrect
+  , operandRangeCorrect
+  , andPreciseDominatesAnd
   -- ** Concatenation, extension, selection, and truncation
   , correct_zero_ext
   , correct_sign_ext
@@ -1346,35 +1356,50 @@ and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- * CLP 3.3.4 Bit Operations, CLP-CLP @&@ case.
 --
 -- Stride @d = min(strideGcd a, strideGcd b) = 2^min(α1, α2)@. Safe upper
--- bound is @min(maxOf a, maxOf b)@ since @x & y ≤ min(x, y)@; @maxOf@
--- saturates to @mask@ on a wrapped or self-wrapping hull. Lower bound is
--- the coset representative of @start a & start b@.
+-- bound is @min(hi a, hi b)@ from 'operandRange' since @x & y ≤ min(x, y)@.
+-- Lower bound is the @d@-coset rep of @start a & start b@ (so this isn't a
+-- tight bound — see 'andPrecise' for that).
 and w a b =
   assert (proper a) $
   assert (proper b) $
   let !d  = min (strideGcd a) (strideGcd b)
-      !maxOfA = hullMax a
-      !maxOfB = hullMax b
-      !sub_    = min maxOfA maxOfB
+      !(_, aHi) = operandRange a
+      !(_, bHi) = operandRange b
+      !sub_    = min aHi bHi
       !sStart  = (start a Bits..&. start b) Bits..&. mask a
       !cosetLo = sStart Bits..&. (d - 1)
       !nSteps  = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
   in mk w cosetLo d nSteps
 
--- | /O(w)/. The maximum unsigned value of any orbit member, computed from
--- the hull. Saturates to @mask@ on wrapped or self-wrapping orbits.
-hullMax :: Domain w -> Natural
-hullMax c =
-  let !(lo, sz) = hullData c
-      !m        = mask c
-  in if lo + sz > m then m else lo + sz
+-- | /O(w^2)/. Bitwise AND, using /Hacker's Delight/ §4.3 tight bounds on the
+-- AND of the operands' 'operandRange's. Strictly at least as precise as
+-- 'and', but more expensive — bitwise-and on 'Natural' is @O(w)@, and Warren's
+-- inner loop runs @w@ iterations.
+andPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+andPrecise w a b =
+  assert (proper a) $
+  assert (proper b) $
+  let !d  = min (strideGcd a) (strideGcd b)
+      !(aLo, aHi) = operandRange a
+      !(bLo, bHi) = operandRange b
+      !wLo = warrenAndLo (mask a) aLo aHi bLo bHi
+      !wHi = warrenAndHi (mask a) aLo aHi bLo bHi
+      !sStart  = (start a Bits..&. start b) Bits..&. mask a
+      !sStartCoset = sStart Bits..&. (d - 1)
+      !cosetLo = wLo + (modSub (mask a) sStartCoset wLo Bits..&. (d - 1))
+      !nSteps  = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
+  in mk w cosetLo d nSteps
 
--- | /O(w log w)/. Bitwise OR.
+-- | /O(w)/. Bitwise OR.
 or :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
 -- * CLP 3.3.4 Bit Operations, CLP-CLP @|@ case: @x | y = ~(~x & ~y)@.
 or w a b = not w (and w (not w a) (not w b))
+
+-- | /O(w^2)/. Bitwise OR via De Morgan from 'andPrecise'.
+orPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+orPrecise w a b = not w (andPrecise w (not w a) (not w b))
 
 xor :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 xor w = liftBitwise2 w B.xor
@@ -1507,13 +1532,75 @@ hull c@Domain{start = s, stride = t, n = nn, mask = m} =
   assert (proper c) $
   A.interval (toInteger m) (toInteger s) (toInteger (nn * t))
 
--- | /O(w)/. Like 'hull' but returns the @(lo, sz)@ pair directly. On
--- self-wrap, saturates to the full range @(0, mask)@.
-hullData :: Domain w -> (Natural, Natural)
-hullData c@Domain{start = s, stride = t, n = nn, mask = m} =
+-- | /O(w)/. Sound unsigned @[lo, hi]@ range of an operand's orbit, suitable
+-- as input to interval-based bitwise bound algorithms (e.g. 'warrenAndLo').
+--
+--   * Non-wrap, non-self-wrap: @[start, end]@.
+--   * Wrap (orbit straddles 0, but not self-wrap): @[0, mask]@.
+--   * Self-wrap: the coset arc @[start mod g, mask - g + 1 + start mod g]@.
+operandRange :: Domain w -> (Natural, Natural)
+operandRange c@Domain{start = s, stride = t, n = nn, mask = m} =
   assert (proper c) $
-  let !sz = nn * t
-  in if sz >= m then (0, m) else (s, sz)
+  let !span_ = nn * t
+      !lo = s `Prelude.mod` strideGcd c
+  in if span_ >= m then (lo, m - (strideGcd c - 1) + lo)  -- self-wrap
+     else if s + span_ > m then (0, m)                    -- wrap (not self)
+     else (s, s + span_)                                  -- no wrap
+
+-- | /O(w)/. Tight unsigned lower bound on @{ x .&. y | alo <= x <= ahi,
+-- blo <= y <= bhi }@.
+--
+-- /Hacker's Delight/ §4.3, minAND. Walks bit positions MSB to LSB,
+-- attempting to flip shared 0-bits to 1 in @a@ or @b@.
+warrenAndLo ::
+  Natural {- ^ @mask@ -} ->
+  Natural {- ^ @alo@ -} ->
+  Natural {- ^ @ahi@ -} ->
+  Natural {- ^ @blo@ -} ->
+  Natural {- ^ @bhi@ -} ->
+  Natural
+warrenAndLo m alo ahi blo bhi =
+  uncurry (Bits..&.) (go alo blo (popCount m - 1))
+  where
+    notN x = m - x  -- @~x@ at the operand's width.
+    go !a !b !i
+      | i < 0 = (a, b)
+      | otherwise =
+          let !bit_ = 1 `shiftL` i
+              !aPrime = (a Bits..|. bit_) Bits..&. notN (bit_ - 1)
+              !bPrime = (b Bits..|. bit_) Bits..&. notN (bit_ - 1)
+              !canFlip = (notN a Bits..&. notN b Bits..&. bit_) /= 0
+          in if canFlip && aPrime <= ahi then go aPrime b (i - 1)
+             else if canFlip && bPrime <= bhi then go a bPrime (i - 1)
+             else go a b (i - 1)
+
+-- | /O(w)/. Tight unsigned upper bound on @{ x .&. y | alo <= x <= ahi,
+-- blo <= y <= bhi }@.
+--
+-- /Hacker's Delight/ §4.3, maxAND. Walks bit positions MSB to LSB,
+-- attempting to clear bits where one operand has 1 and the other 0.
+warrenAndHi ::
+  Natural {- ^ @mask@ -} ->
+  Natural {- ^ @alo@ -} ->
+  Natural {- ^ @ahi@ -} ->
+  Natural {- ^ @blo@ -} ->
+  Natural {- ^ @bhi@ -} ->
+  Natural
+warrenAndHi m alo ahi blo bhi =
+  uncurry (Bits..&.) (go ahi bhi (popCount m - 1))
+  where
+    notN x = m - x
+    go !a !b !i
+      | i < 0 = (a, b)
+      | otherwise =
+          let !bit_ = 1 `shiftL` i
+              !aPrime = (a Bits..&. notN bit_) Bits..|. (bit_ - 1)
+              !bPrime = (b Bits..&. notN bit_) Bits..|. (bit_ - 1)
+          in if (a Bits..&. notN b Bits..&. bit_) /= 0 && aPrime >= alo
+             then go aPrime b (i - 1)
+             else if (notN a Bits..&. b Bits..&. bit_) /= 0 && bPrime >= blo
+                  then go a bPrime (i - 1)
+                  else go a b (i - 1)
 
 -- ------------------------------------------------------------------
 -- * Generators
@@ -2144,6 +2231,69 @@ correct_xor ::
 correct_xor w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (xor w a b) (Bits.xor x y))
+
+correct_andPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_andPrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (andPrecise w a b) (x Bits..&. y))
+
+correct_orPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_orPrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (orPrecise w a b) (x Bits..|. y))
+
+-- | 'warrenAndLo' is a sound lower bound on @{ x .&. y | alo <= x <= ahi,
+-- blo <= y <= bhi }@, where all values are at width @k@.
+warrenAndLoCorrect ::
+  Natural -> Natural -> Natural -> Natural -> Natural -> Natural -> Int -> Property
+warrenAndLoCorrect alo ahi blo bhi x y k =
+  k >= 1 ==> alo' <= ahi' ==> blo' <= bhi' ==>
+    alo' <= x' ==> x' <= ahi' ==> blo' <= y' ==> y' <= bhi'
+      ==> property (warrenAndLo m alo' ahi' blo' bhi' <= x' .&. y')
+  where
+    m    = (1 `shiftL` k) - 1
+    alo' = alo .&. m
+    ahi' = ahi .&. m
+    blo' = blo .&. m
+    bhi' = bhi .&. m
+    x'   = x .&. m
+    y'   = y .&. m
+
+-- | 'warrenAndHi' is a sound upper bound on the AND, at width @k@.
+warrenAndHiCorrect ::
+  Natural -> Natural -> Natural -> Natural -> Natural -> Natural -> Int -> Property
+warrenAndHiCorrect alo ahi blo bhi x y k =
+  k >= 1 ==> alo' <= ahi' ==> blo' <= bhi' ==>
+    alo' <= x' ==> x' <= ahi' ==> blo' <= y' ==> y' <= bhi'
+      ==> property (x' .&. y' <= warrenAndHi m alo' ahi' blo' bhi')
+  where
+    m    = (1 `shiftL` k) - 1
+    alo' = alo .&. m
+    ahi' = ahi .&. m
+    blo' = blo .&. m
+    bhi' = bhi .&. m
+    x'   = x .&. m
+    y'   = y .&. m
+
+-- | 'operandRange' soundly bounds the orbit: every member lies in @[lo, hi]@.
+operandRangeCorrect :: Domain w -> Natural -> Property
+operandRangeCorrect c x =
+  proper c ==> member c x' ==>
+    let !(lo, hi) = operandRange c
+    in property (lo <= x' && x' <= hi)
+  where
+    x' = x Bits..&. mask c
+
+-- | 'andPrecise' is at least as precise as 'and' on the 'leqExact' order.
+andPreciseDominatesAnd ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+andPreciseDominatesAnd w a b =
+  proper a ==> proper b ==>
+    property (leqExact (andPrecise w a b) (and w a b))
 
 -- ------------------------------------------------------------------
 -- ** Concatenation, extension, selection, and truncation
