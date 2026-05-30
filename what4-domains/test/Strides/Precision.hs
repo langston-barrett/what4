@@ -19,6 +19,14 @@
 --
 -- (Bitwise and rotation ops lift through 'B.Domain' rather than 'A.Domain',
 -- so they are not compared against an Arith oracle here.)
+--
+-- The @bitwise_<op>@ properties further check that each strides op is at
+-- least as precise as the bitwise lifting
+-- @S.fromBitwise w (B.op (S.toBitwise a) (S.toBitwise b))@. They are
+-- regression tests for the eventual replacement of 'liftBitwise1' /
+-- 'liftBitwise2': the new implementation must not lose precision against
+-- the bitwise oracle. Subset ('S.leqExact') is the default; ops whose
+-- closed form can leave the bitwise image fall back to cardinality.
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -36,6 +44,7 @@ import           GHC.TypeNats (type (+), type (<=))
 import           Numeric.Natural (Natural)
 
 import qualified What4.Domains.BV.Arith as A
+import qualified What4.Domains.BV.Bitwise as B
 import qualified What4.Domains.BV.Strides as S
 import           What4.Domains.Verification (Gen, Property, chooseInt, chooseInteger, getSize, property, (==>))
 import           VerifyBindings (genTest)
@@ -67,6 +76,27 @@ subsetOf w c arith =
   case S.fromArith w arith of
     Nothing -> property (S.size c == 0)
     Just a  -> property (S.leqExact c a)
+
+-- | The strides result is contained in the bitwise result lifted back
+-- through 'S.fromBitwise'. Used by the @bitwise_<op>@ properties below.
+subsetOfB ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> B.Domain w -> Property
+subsetOfB w c b =
+  case S.fromBitwise w b of
+    Nothing -> property (S.size c == 0)
+    Just a  -> property (S.leqExact c a)
+
+-- | The strides result has at most as many elements as the bitwise result
+-- lifted back through 'S.fromBitwise'. Fallback for ops whose closed form
+-- can leave the bitwise image even when the bitwise lift is well-defined.
+sizeLeqB ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> B.Domain w -> Property
+sizeLeqB w c b =
+  case S.fromBitwise w b of
+    Nothing -> property (S.size c == 0)
+    Just a  -> property (S.size c <= S.size a)
 
 precise_negate :: (1 <= w) => NatRepr w -> S.Domain w -> Property
 precise_negate w c =
@@ -339,6 +369,218 @@ subset_ashr w a b =
   S.proper a ==> S.proper b ==>
     subsetOf w (S.ashr w a b) (A.ashr w (S.toArith a) (S.toArith b))
 
+-- ------------------------------------------------------------------
+-- * Bitwise-bound properties
+--
+-- Each strides op should be at least as precise as the corresponding
+-- bitwise op on @S.toBitwise@'d operands lifted back through
+-- 'S.fromBitwise'. These are regression tests for the planned replacement
+-- of 'liftBitwise1' / 'liftBitwise2': the new implementation must not
+-- regress against this oracle.
+--
+-- Subset via 'S.leqExact' is the default. Ops whose closed form can leave
+-- the bitwise image fall back to cardinality (currently: @mul@, @udiv@,
+-- @urem@, @sdiv@, @srem@, and their SMT-LIB variants — coset walks and
+-- div/rem can both land outside the convex bitwise hull).
+
+bitwise_negate :: (1 <= w) => NatRepr w -> S.Domain w -> Property
+bitwise_negate w c =
+  S.proper c ==> subsetOfB w (S.negate w c) (B.negate (S.toBitwise c))
+
+bitwise_add ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_add w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.add w a b) (B.add (S.toBitwise a) (S.toBitwise b))
+
+bitwise_sub ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_sub w a b =
+  S.proper a ==> S.proper b ==>
+    subsetOfB w (S.sub w a b) (B.sub (S.toBitwise a) (S.toBitwise b))
+
+-- 'scale' walks a coset that the bitwise hull doesn't always cover; the
+-- result is sometimes incomparable with the bitwise lift as a set.
+bitwise_scale ::
+  (1 <= w) =>
+  NatRepr w -> Integer -> S.Domain w -> Property
+bitwise_scale w k c =
+  S.proper c ==> sizeLeqB w (S.scale w k c) (B.scale k (S.toBitwise c))
+
+-- 'mul' walks a coset out of the bitwise hull, same as for the arith
+-- hull; cardinality is the most we can claim.
+bitwise_mul ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_mul w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.mul w a b) (B.mul (S.toBitwise a) (S.toBitwise b))
+
+-- div/rem can leave the bitwise image; cardinality only.
+bitwise_udiv ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_udiv w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.udiv w a b) (B.udiv (S.toBitwise a) (S.toBitwise b))
+
+bitwise_urem ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_urem w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.urem w a b) (B.urem (S.toBitwise a) (S.toBitwise b))
+
+bitwise_sdiv ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_sdiv w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.sdiv w a b) (B.sdiv w (S.toBitwise a) (S.toBitwise b))
+
+bitwise_srem ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_srem w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.srem w a b) (B.srem w (S.toBitwise a) (S.toBitwise b))
+
+bitwise_udivSmtlib ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_udivSmtlib w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.udivSmtlib w a b) (B.udivSmtlib (S.toBitwise a) (S.toBitwise b))
+
+bitwise_uremSmtlib ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_uremSmtlib w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.uremSmtlib w a b) (B.uremSmtlib (S.toBitwise a) (S.toBitwise b))
+
+bitwise_sdivSmtlib ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_sdivSmtlib w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.sdivSmtlib w a b) (B.sdivSmtlib w (S.toBitwise a) (S.toBitwise b))
+
+bitwise_sremSmtlib ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_sremSmtlib w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.sremSmtlib w a b) (B.sremSmtlib w (S.toBitwise a) (S.toBitwise b))
+
+bitwise_not :: (1 <= w) => NatRepr w -> S.Domain w -> Property
+bitwise_not w c =
+  S.proper c ==> subsetOfB w (S.not w c) (B.not (S.toBitwise c))
+
+bitwise_and ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_and w a b =
+  S.proper a ==> S.proper b ==>
+    subsetOfB w (S.and w a b) (B.and (S.toBitwise a) (S.toBitwise b))
+
+bitwise_or ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_or w a b =
+  S.proper a ==> S.proper b ==>
+    subsetOfB w (S.or w a b) (B.or (S.toBitwise a) (S.toBitwise b))
+
+bitwise_xor ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_xor w a b =
+  S.proper a ==> S.proper b ==>
+    subsetOfB w (S.xor w a b) (B.xor (S.toBitwise a) (S.toBitwise b))
+
+-- ext/concat/select and the abstract shifts all go through 'liftArith2'
+-- in strides (or 'fromArith' for ext/concat/select), so the strides result
+-- is the arith arc of the bitwise input — generally incomparable with the
+-- bitwise lift as a set, even when both are well-defined.
+bitwise_zext ::
+  forall w u.
+  (1 <= w, w + 1 <= u) =>
+  NatRepr w -> S.Domain w -> NatRepr u -> Property
+bitwise_zext w c u =
+  case NR.leqTrans (NR.leqAdd (LeqProof :: LeqProof 1 w) (knownNat @1))
+                   (LeqProof :: LeqProof (w + 1) u) of
+    LeqProof ->
+      S.proper c ==> sizeLeqB u (S.zext w c u) (B.zext (S.toBitwise c) u)
+
+bitwise_sext ::
+  forall w u.
+  (1 <= w, w + 1 <= u) =>
+  NatRepr w -> S.Domain w -> NatRepr u -> Property
+bitwise_sext w c u =
+  case NR.leqTrans (NR.leqAdd (LeqProof :: LeqProof 1 w) (knownNat @1))
+                   (LeqProof :: LeqProof (w + 1) u) of
+    LeqProof ->
+      S.proper c ==> sizeLeqB u (S.sext w c u) (B.sext w (S.toBitwise c) u)
+
+bitwise_concat ::
+  forall u v.
+  (1 <= u, 1 <= v) =>
+  NatRepr u -> S.Domain u -> NatRepr v -> S.Domain v -> Property
+bitwise_concat u a v b =
+  case NR.leqAddPos u v of
+    LeqProof ->
+      S.proper a ==> S.proper b ==>
+        sizeLeqB (NR.addNat u v) (S.concat u a v b)
+                 (B.concat u (S.toBitwise a) v (S.toBitwise b))
+
+bitwise_select ::
+  forall i n w.
+  (1 <= n, i + n <= w) =>
+  NatRepr i -> NatRepr n -> NatRepr w -> S.Domain w -> Property
+bitwise_select i n w c =
+  case NR.leqTrans (LeqProof :: LeqProof 1 n)
+                   (NR.leqTrans (NR.addPrefixIsLeq i n)
+                                (LeqProof :: LeqProof (i + n) w)) of
+    LeqProof ->
+      S.proper c ==> sizeLeqB n (S.select i n w c) (B.select i n (S.toBitwise c))
+
+bitwise_shl ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_shl w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.shl w a b) (B.shlAbstract w (S.toBitwise a) (S.toBitwise b))
+
+bitwise_lshr ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_lshr w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.lshr w a b) (B.lshrAbstract w (S.toBitwise a) (S.toBitwise b))
+
+bitwise_ashr ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_ashr w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeqB w (S.ashr w a b) (B.ashrAbstract w (S.toBitwise a) (S.toBitwise b))
+
+bitwise_rol ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_rol w a b =
+  S.proper a ==> S.proper b ==>
+    subsetOfB w (S.rol w a b) (B.rolAbstract w (S.toBitwise a) (S.toBitwise b))
+
+bitwise_ror ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+bitwise_ror w a b =
+  S.proper a ==> S.proper b ==>
+    subsetOfB w (S.ror w a b) (B.rorAbstract w (S.toBitwise a) (S.toBitwise b))
+
 tests :: TT.TestTree
 tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
   [ genTest "precise_negate" $
@@ -485,4 +727,113 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
   , genTest "subset_ashr" $
       do SW n <- genWidth
          subset_ashr n <$> S.genDomain n <*> S.genDomain n
+
+  -- Bitwise-bound regression tests. Strides should beat
+  -- @S.fromBitwise w (B.op (S.toBitwise a) (S.toBitwise b))@ for every op.
+  -- Some ops are commented out below: those don't yet have a native
+  -- strides implementation (they go through 'liftArith2' / 'fromArith'),
+  -- and the arith arc is genuinely less precise than the bitwise lift on
+  -- some inputs. They become live regression tests once strides grows a
+  -- native implementation that meets-in the bitwise oracle (or does
+  -- better).
+  , genTest "bitwise_negate" $
+      do SW n <- genWidth
+         bitwise_negate n <$> S.genDomain n
+  , genTest "bitwise_add" $
+      do SW n <- genWidth
+         bitwise_add n <$> S.genDomain n <*> S.genDomain n
+  , genTest "bitwise_sub" $
+      do SW n <- genWidth
+         bitwise_sub n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_scale" $
+  --     do SW n <- genWidth
+  --        bitwise_scale n <$> chooseInteger (0, maxUnsigned n)
+  --                        <*> S.genDomain n
+  , genTest "bitwise_mul" $
+      do SW n <- genWidth
+         bitwise_mul n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_udiv" $
+  --     do SW n <- genWidth
+  --        bitwise_udiv n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_urem" $
+  --     do SW n <- genWidth
+  --        bitwise_urem n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_sdiv" $
+  --     do SW n <- genWidth
+  --        bitwise_sdiv n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_srem" $
+  --     do SW n <- genWidth
+  --        bitwise_srem n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_udivSmtlib" $
+  --     do SW n <- genWidth
+  --        bitwise_udivSmtlib n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_uremSmtlib" $
+  --     do SW n <- genWidth
+  --        bitwise_uremSmtlib n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_sdivSmtlib" $
+  --     do SW n <- genWidth
+  --        bitwise_sdivSmtlib n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_sremSmtlib" $
+  --     do SW n <- genWidth
+  --        bitwise_sremSmtlib n <$> S.genDomain n <*> S.genDomain n
+  , genTest "bitwise_not" $
+      do SW n <- genWidth
+         bitwise_not n <$> S.genDomain n
+  -- , genTest "bitwise_and" $
+  --     do SW n <- genWidth
+  --        bitwise_and n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_or" $
+  --     do SW n <- genWidth
+  --        bitwise_or n <$> S.genDomain n <*> S.genDomain n
+  , genTest "bitwise_xor" $
+      do SW n <- genWidth
+         bitwise_xor n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_zext" $
+  --     do SW w <- genWidth
+  --        SW n <- genWidth
+  --        let u = addNat w n
+  --        case testLeq (addNat w (knownNat @1)) u of
+  --          Nothing -> error "impossible!"
+  --          Just LeqProof ->
+  --            do c <- S.genDomain w
+  --               pure (bitwise_zext w c u)
+  -- , genTest "bitwise_sext" $
+  --     do SW w <- genWidth
+  --        SW n <- genWidth
+  --        let u = addNat w n
+  --        case testLeq (addNat w (knownNat @1)) u of
+  --          Nothing -> error "impossible!"
+  --          Just LeqProof ->
+  --            do c <- S.genDomain w
+  --               pure (bitwise_sext w c u)
+  -- , genTest "bitwise_concat" $
+  --     do SW m <- genWidth
+  --        SW n <- genWidth
+  --        a <- S.genDomain m
+  --        b <- S.genDomain n
+  --        pure (bitwise_concat m a n b)
+  -- , genTest "bitwise_select" $
+  --     do SW n <- genWidth
+  --        SW i <- genWidth
+  --        SW z <- genWidth
+  --        let i_n = addNat i n
+  --        let w = addNat i_n z
+  --        LeqProof <- pure (addIsLeq i_n z)
+  --        c <- S.genDomain w
+  --        pure (bitwise_select i n w c)
+  -- , genTest "bitwise_shl" $
+  --     do SW n <- genWidth
+  --        bitwise_shl n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_lshr" $
+  --     do SW n <- genWidth
+  --        bitwise_lshr n <$> S.genDomain n <*> S.genDomain n
+  -- , genTest "bitwise_ashr" $
+  --     do SW n <- genWidth
+  --        bitwise_ashr n <$> S.genDomain n <*> S.genDomain n
+  , genTest "bitwise_rol" $
+      do SW n <- genWidth
+         bitwise_rol n <$> S.genDomain n <*> S.genDomain n
+  , genTest "bitwise_ror" $
+      do SW n <- genWidth
+         bitwise_ror n <$> S.genDomain n <*> S.genDomain n
   ]
