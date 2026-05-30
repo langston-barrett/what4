@@ -230,6 +230,26 @@ subset_negate :: (1 <= w) => NatRepr w -> S.Domain w -> Property
 subset_negate w c =
   S.proper c ==> subsetOf w (S.negate w c) (A.negate (S.toArith c))
 
+subset_add ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_add w a b =
+  S.proper a ==> S.proper b ==>
+    Prelude.not (S.isSelfWrapping a) ==> Prelude.not (S.isSelfWrapping b) ==>
+      subsetOf w (S.add w a b) (A.add (S.toArith a) (S.toArith b))
+
+subset_sub ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+subset_sub w a b =
+  S.proper a ==> S.proper b ==>
+    Prelude.not (S.isSelfWrapping a) ==> Prelude.not (S.isSelfWrapping b) ==>
+      subsetOf w (S.sub w a b) (A.add (S.toArith a) (A.negate (S.toArith b)))
+
+-- Note: there is no @subset_mul@. Closed-form 'mul' walks the result coset
+-- via the cross-term @i·j·t1·t2@ and lands outside the arith convex hull
+-- even on non-self-wrapping inputs. See the @precise_mul@ note above.
+
 subset_scale ::
   (1 <= w) =>
   NatRepr w -> Integer -> S.Domain w -> Property
@@ -443,6 +463,12 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
   , genTest "subset_negate" $
       do SW n <- genWidth
          subset_negate n <$> S.genDomain n
+  , genTest "subset_add" $
+      do SW n <- genWidth
+         subset_add n <$> S.genDomain n <*> S.genDomain n
+  , genTest "subset_sub" $
+      do SW n <- genWidth
+         subset_sub n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_scale" $
       do SW n <- genWidth
          subset_scale n <$> chooseInteger (0, maxUnsigned n)
