@@ -166,6 +166,38 @@ tests = TT.testGroup "Strides"
   , genTest "sizeViaToList" $
       do SW n <- genWidthSmall
          S.sizeViaToList <$> S.genDomain n
+  , genTest "correct_eq" $
+      do SW n <- genWidth
+         S.correct_eq n <$>
+           ((,) <$> S.genDomain n <*> genNatBV n) <*>
+           ((,) <$> S.genDomain n <*> genNatBV n)
+  , genTest "cosetsDisjointCorrect" $
+      do SW n <- genWidth
+         S.cosetsDisjointCorrect <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+  , genTest "eqExactCorrect" $
+      do SW n <- genWidthSmall
+         S.eqExactCorrect <$> S.genDomain n <*> S.genDomain n
+  , genTest "eqReflexive" $
+      do SW n <- genWidth
+         S.eqReflexive <$> S.genDomain n
+  , genTest "eqSymmetric" $
+      do SW n <- genWidth
+         S.eqSymmetric <$> S.genDomain n <*> S.genDomain n
+  , genTest "eqTransitive" $
+      do SW n <- genWidth
+         S.eqTransitive <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "eqExactReflexive" $
+      do SW n <- genWidth
+         S.eqExactReflexive <$> S.genDomain n
+  , genTest "eqExactSymmetric" $
+      do SW n <- genWidth
+         S.eqExactSymmetric <$> S.genDomain n <*> S.genDomain n
+  , genTest "eqExactTransitive" $
+      do SW n <- genWidth
+         S.eqExactTransitive <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "eqRefinesEqExact" $
+      do SW n <- genWidthSmall
+         S.eqRefinesEqExact <$> S.genDomain n <*> S.genDomain n
   , genTest "toArithCorrect" $
       do SW n <- genWidth
          S.toArithCorrect n <$> S.genDomain n <*> genNatBV n

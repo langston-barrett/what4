@@ -49,6 +49,13 @@ wrapOffset c v = modSub v c.start
 strideGcd : {n} (fin n, n >= 1) => Domain n -> [n]
 strideGcd c = c.stride && modNeg c.stride
 
+cosetsDisjoint : {n} (fin n, n >= 1) => Domain n -> Domain n -> Bit
+cosetsDisjoint a b = (a.start - b.start) && (gMin - 1) != 0
+  where
+    gA = strideGcd a
+    gB = strideGcd b
+    gMin = if gA <= gB then gA else gB
+
 orbitMask : {n} (fin n, n >= 2) => Domain n -> [n]
 orbitMask c = (- g) / g
   where g = strideGcd c
@@ -258,6 +265,16 @@ leqExact a b =
 size : {n} (fin n, n >= 2) => Domain n -> [n + 1]
 size c = c.n + 1
 
+eq : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe Bit
+eq a b =
+  if a.n == 0 /\ b.n == 0 then Just (a.start == b.start)
+  else if cosetsDisjoint a b then Just False
+  else if ~ (Arith::overlap (hull a) (hull b)) then Just False
+  else Nothing
+
+eqExact : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+eqExact a b = size a == size b /\ leqExact a b
+
 // ------------------------------------------------------------------
 // * Arithmetic
 
@@ -418,14 +435,10 @@ meetPrecise a b =
 
 meetStrides : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
 meetStrides a b =
-  if delta && (gMin - 1) != 0 then Nothing
+  if cosetsDisjoint a b then Nothing
   else if arith.isBot then Nothing
   else Just (fromArith arith)
   where
-    gA = strideGcd a
-    gB = strideGcd b
-    gMin = if gA <= gB then gA else gB
-    delta = a.start - b.start
     arith = Arith::meet (hull a) (hull b)
 
 // ------------------------------------------------------------------
@@ -613,6 +626,74 @@ leqExactTransitive a b c =
   proper a ==> proper b ==> proper c ==>
     leqExact a b ==> leqExact b c ==> leqExact a c
 
+correct_eq : {n} (fin n, n >= 2) => Domain n -> [n] -> Domain n -> [n] -> Property
+correct_eq a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    case eq a b of
+      Just r  -> if r then x == y else x != y
+      Nothing -> True
+
+cosetsDisjointCorrect : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
+cosetsDisjointCorrect a b x =
+  proper a ==> proper b ==> member a x ==> member b x ==>
+    ~ (cosetsDisjoint a b)
+
+eqExactCorrect : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+eqExactCorrect a b =
+  proper a ==> proper b ==>
+    eqExact a b == (and [ member a x == member b x
+                        | x <- [0 .. 2^^n - 1] : [_][n] ])
+
+eqExactReflexive : {n} (fin n, n >= 2) => Domain n -> Property
+eqExactReflexive a = proper a ==> eqExact a a
+
+eqExactSymmetric : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+eqExactSymmetric a b = proper a ==> proper b ==> eqExact a b == eqExact b a
+
+eqExactTransitive : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+eqExactTransitive a b c =
+  proper a ==> proper b ==> proper c ==>
+    eqExact a b ==> eqExact b c ==> eqExact a c
+
+eqMaybeEq : Maybe Bit -> Maybe Bit -> Bit
+eqMaybeEq m1 m2 = case m1 of
+  Nothing -> case m2 of
+    Nothing -> True
+    Just _  -> False
+  Just x  -> case m2 of
+    Nothing -> False
+    Just y  -> x == y
+
+eqReflexive : {n} (fin n, n >= 2) => Domain n -> Property
+eqReflexive a = proper a ==> ~ (eqMaybeEq (eq a a) (Just False))
+
+eqSymmetric : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+eqSymmetric a b = proper a ==> proper b ==> eqMaybeEq (eq a b) (eq b a)
+
+eqTransitive : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+eqTransitive a b c =
+  proper a ==> proper b ==> proper c ==>
+    case eq a b of
+      Nothing -> True
+      Just rab ->
+        case eq b c of
+          Nothing  -> True
+          Just rbc ->
+            // Definite answers compose: T,T -> T; T,F -> F; F,T -> F.
+            // The F,F case is vacuous in the usual sense (both pairs are
+            // unequal but tell us nothing about a vs c).
+            if rab /\ rbc then eqMaybeEq (eq a c) (Just True)
+            else if rab /\ ~ rbc then eqMaybeEq (eq a c) (Just False)
+            else if ~ rab /\ rbc then eqMaybeEq (eq a c) (Just False)
+            else True
+
+eqRefinesEqExact : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+eqRefinesEqExact a b =
+  proper a ==> proper b ==>
+    case eq a b of
+      Just r  -> if r then eqExact a b else ~ (eqExact a b)
+      Nothing -> True
+
 property p_startMember               = startMember`{8}
 property p_endMember                 = endMember`{8}
 property p_leqCorrect                = leqCorrect`{4}
@@ -626,6 +707,16 @@ property p_leqExactCorrect           = leqExactCorrect`{4}
 property p_leqExactComplete          = leqExactComplete`{4}
 property p_leqExactReflexive         = leqExactReflexive`{4}
 property p_leqExactTransitive        = leqExactTransitive`{4}
+property p_correct_eq                = correct_eq`{4}
+property p_cosetsDisjointCorrect     = cosetsDisjointCorrect`{4}
+property p_eqExactCorrect            = eqExactCorrect`{4}
+property p_eqReflexive               = eqReflexive`{4}
+property p_eqSymmetric               = eqSymmetric`{4}
+property p_eqTransitive              = eqTransitive`{4}
+property p_eqExactReflexive          = eqExactReflexive`{4}
+property p_eqExactSymmetric          = eqExactSymmetric`{4}
+property p_eqExactTransitive         = eqExactTransitive`{4}
+property p_eqRefinesEqExact          = eqRefinesEqExact`{4}
 
 // ------------------------------------------------------------------
 // ** Conversion
