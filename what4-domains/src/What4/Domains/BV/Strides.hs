@@ -898,14 +898,16 @@ arithToBitwise a =
         hi = alo Bits..|. u
         lo = hi `Bits.xor` u
 
--- | /O(1)/. Convert a bitwise domain to a progression.
+-- | /O(w)/. Convert a bitwise domain to a progression.
 fromBitwise :: NatRepr w -> B.Domain w -> Maybe (Domain w)
-fromBitwise w b = fromArith w (bitwiseToArith b)
-  where
-    bitwiseToArith d =
-      let imask = B.bvdMask d
-          (lo, hi) = B.bitbounds d
-      in A.interval imask lo ((hi - lo) Bits..&. imask)
+fromBitwise w b =
+  let !(lo, hi) = B.bitbounds b
+      !u        = lo `Bits.xor` hi
+      !v        = countTrailingZerosOr0 u
+      !st       = 1 `shiftL` v
+      !lo'      = integerToNatural lo
+      !nSteps   = integerToNatural ((hi - lo) `Bits.shiftR` v)
+  in Just (mk w lo' st nSteps)
 
 -- ------------------------------------------------------------------
 -- * Queries
