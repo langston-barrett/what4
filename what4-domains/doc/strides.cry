@@ -215,7 +215,16 @@ strideBitwise c = { lomask = fixedLow, himask = fixedLow || (~lowMask) }
     fixedLow = c.start && lowMask
 
 fromBitwise : {n} (fin n, n >= 2) => Bits::Dom n -> Domain n
-fromBitwise b = fromArith (BV::bitToArithDom b)
+fromBitwise b = mk b.lomask st nSteps
+  where
+    u : [n]
+    u = b.lomask ^ b.himask
+    g : [n]
+    g = u && (- u)
+    st : [n]
+    st = if u == 0 then 1 else g
+    nSteps : [n + 1]
+    nSteps = if u == 0 then 0 else zext ((b.himask - b.lomask) / g)
 
 // ------------------------------------------------------------------
 // * Queries
