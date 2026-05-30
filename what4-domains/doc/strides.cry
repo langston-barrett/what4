@@ -374,14 +374,39 @@ srem = liftArith2 Arith::srem
 // ------------------------------------------------------------------
 // * Bitwise
 
+// CLP report §3.3.4: @~(l, u, δ) = (~u, ~l, δ)@. Exact.
 bnot : {n} (fin n, n >= 2) => Domain n -> Domain n
-bnot = liftBitwise1 Bits::bnot
+bnot c = mk (~ end c) c.stride c.n
 
+// Hull max: maximum unsigned value of any orbit member. Saturates to @~0@
+// on wrapped or self-wrapping orbits, since @start + n*stride@ may overflow.
+hullMax : {n} (fin n, n >= 2) => Domain n -> [n]
+hullMax c =
+  if span > zext (~ 0 : [n]) then ~ 0
+  else if (zext c.start + span : [2 * n + 1]) > zext (~ 0 : [n]) then ~ 0
+  else c.start + drop`{1} c.n * c.stride
+  where
+    span : [2 * n + 1]
+    span = zext c.n * zext c.stride
+
+// CLP report §3.3.4: stride @d = min(g1, g2)@, upper bound @min(hullMax a,
+// hullMax b)@ since @x & y <= min(x, y)@, lower bound = coset rep of
+// @start a && start b@.
 band : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-band = liftBitwise2 Bits::band
+band a b = mk cosetLo d nSteps
+  where
+    g1 = strideGcd a
+    g2 = strideGcd b
+    d  = if g1 <= g2 then g1 else g2
+    sub_ = if hullMax a <= hullMax b then hullMax a else hullMax b
+    sStart = a.start && b.start
+    cosetLo = sStart && (d - 1)
+    nSteps : [n + 1]
+    nSteps = if sub_ < cosetLo then 0 else zext ((sub_ - cosetLo) / d)
 
+// De Morgan: @x | y = ~(~x & ~y)@.
 bor : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-bor = liftBitwise2 Bits::bor
+bor a b = bnot (band (bnot a) (bnot b))
 
 bxor : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 bxor = liftBitwise2 Bits::bxor
@@ -842,6 +867,46 @@ property p_correct_not = correct_not`{4}
 property p_correct_and = correct_and`{4}
 property p_correct_or  = correct_or`{4}
 property p_correct_xor = correct_xor`{4}
+
+// Closed witnesses (no free variables) at @n = 4@ showing that paper's
+// @band@ and the bitwise lift are incomparable on the @leqExact@ order:
+// neither's concretization is contained in the other's.
+//
+// Each property is provable Q.E.D. — the witnesses were found by Z3 from
+// the open dominance properties (which were refuted) and inlined here.
+bandIncomparableWithLift : Bit
+bandIncomparableWithLift =
+  // Witness: paper's @band@ contains an element the lift does not.
+  ~ leqExact (band a1 b1) (liftBitwise2 Bits::band a1 b1) /\
+  // Witness: the lift contains an element paper's @band@ does not.
+  ~ leqExact (liftBitwise2 Bits::band a2 b2) (band a2 b2)
+  where
+    a1 : Domain 4
+    a1 = { start = 2, stride = 8, n = 1 }
+    b1 : Domain 4
+    b1 = { start = 8, stride = 4, n = 1 }
+    a2 : Domain 4
+    a2 = { start = 14, stride = 4, n = 2 }
+    b2 : Domain 4
+    b2 = { start = 10, stride = 2, n = 1 }
+
+borIncomparableWithLift : Bit
+borIncomparableWithLift =
+  ~ leqExact (bor a1 b1) (liftBitwise2 Bits::bor a1 b1) /\
+  ~ leqExact (liftBitwise2 Bits::bor a2 b2) (bor a2 b2)
+  where
+    a1 : Domain 4
+    a1 = { start = 9, stride = 1, n = 5 }
+    b1 : Domain 4
+    b1 = { start = 6, stride = 8, n = 1 }
+    a2 : Domain 4
+    a2 = { start = 3, stride = 6, n = 1 }
+    b2 : Domain 4
+    b2 = { start = 8, stride = 5, n = 3 }
+
+property p_bandIncomparableWithLift = bandIncomparableWithLift
+property p_borIncomparableWithLift  = borIncomparableWithLift
+
 
 // ------------------------------------------------------------------
 // ** Concatenation, extension, selection, and truncation

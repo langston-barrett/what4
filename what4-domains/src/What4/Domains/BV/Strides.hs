@@ -316,6 +316,7 @@ module What4.Domains.BV.Strides
   -- * Conversion
   , toArith
   , hull
+  , hullData
   , fromArith
   , toBitwise
   , fromBitwise
@@ -1326,14 +1327,54 @@ sremSmtlib w = liftArith2 w (A.sremSmtlib w)
 -- ------------------------------------------------------------------
 -- * Bitwise operations
 
+-- | /O(w)/. Bitwise complement.
 not :: (1 <= w) => NatRepr w -> Domain w -> Domain w
-not w = liftBitwise1 w B.not
+-- References:
+--
+-- * CLP 3.3.4, BITWISE COMPLEMENT.
+--
+-- Stride and step count are preserved; the orbit reverses, so the new @start@
+-- is the bitwise complement of the old @end@. Exact.
+not w c@Domain{stride, n = nn, mask} =
+  assert (proper c) $
+  mk w (mask - end c) stride nn
 
+-- | /O(w)/. Bitwise AND.
 and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-and w = liftBitwise2 w B.and
+-- References:
+--
+-- * CLP 3.3.4 Bit Operations, CLP-CLP @&@ case.
+--
+-- Stride @d = min(strideGcd a, strideGcd b) = 2^min(α1, α2)@. Safe upper
+-- bound is @min(maxOf a, maxOf b)@ since @x & y ≤ min(x, y)@; @maxOf@
+-- saturates to @mask@ on a wrapped or self-wrapping hull. Lower bound is
+-- the coset representative of @start a & start b@.
+and w a b =
+  assert (proper a) $
+  assert (proper b) $
+  let !d  = min (strideGcd a) (strideGcd b)
+      !maxOfA = hullMax a
+      !maxOfB = hullMax b
+      !sub_    = min maxOfA maxOfB
+      !sStart  = (start a Bits..&. start b) Bits..&. mask a
+      !cosetLo = sStart Bits..&. (d - 1)
+      !nSteps  = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
+  in mk w cosetLo d nSteps
 
+-- | /O(w)/. The maximum unsigned value of any orbit member, computed from
+-- the hull. Saturates to @mask@ on wrapped or self-wrapping orbits.
+hullMax :: Domain w -> Natural
+hullMax c =
+  let !(lo, sz) = hullData c
+      !m        = mask c
+  in if lo + sz > m then m else lo + sz
+
+-- | /O(w log w)/. Bitwise OR.
 or :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-or w = liftBitwise2 w B.or
+-- References:
+--
+-- * CLP 3.3.4 Bit Operations, CLP-CLP @|@ case: @x | y = ~(~x & ~y)@.
+or w a b = not w (and w (not w a) (not w b))
 
 xor :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 xor w = liftBitwise2 w B.xor
@@ -1465,6 +1506,14 @@ hull :: Domain w -> A.Domain w
 hull c@Domain{start = s, stride = t, n = nn, mask = m} =
   assert (proper c) $
   A.interval (toInteger m) (toInteger s) (toInteger (nn * t))
+
+-- | /O(w)/. Like 'hull' but returns the @(lo, sz)@ pair directly. On
+-- self-wrap, saturates to the full range @(0, mask)@.
+hullData :: Domain w -> (Natural, Natural)
+hullData c@Domain{start = s, stride = t, n = nn, mask = m} =
+  assert (proper c) $
+  let !sz = nn * t
+  in if sz >= m then (0, m) else (s, sz)
 
 -- ------------------------------------------------------------------
 -- * Generators
