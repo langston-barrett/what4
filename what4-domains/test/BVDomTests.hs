@@ -42,6 +42,7 @@ import qualified What4.Domains.Arithmetic.Internal as ArithOpt
 
 import qualified Strides
 import qualified StridedInterval
+import qualified WI
 
 
 main :: IO ()
@@ -61,6 +62,7 @@ main = defaultMain $
     , transferTests
     , Strides.tests
     , StridedInterval.tests
+    , WI.tests
     ]
 
 data SomeWidth where

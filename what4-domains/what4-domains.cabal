@@ -172,6 +172,7 @@ library
     What4.Domains.BV.Strides
     What4.Domains.BV.Strides.Internal
     What4.Domains.BV.StridedInterval
+    What4.Domains.BV.WI
     What4.Domains.BV.XOR
     What4.Domains.Internal
     What4.Domains.Verification
@@ -198,6 +199,7 @@ test-suite bvdomain_tests
     StridedInterval
     StridedInterval.Precision
     VerifyBindings
+    WI
 
 
 test-suite bvdomain_tests_hh
@@ -213,6 +215,7 @@ test-suite bvdomain_tests_hh
     StridedInterval
     StridedInterval.Precision
     VerifyBindings
+    WI
 
 
 test-suite bvdomain_coverage

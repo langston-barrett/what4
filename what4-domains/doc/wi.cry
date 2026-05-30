@@ -1,0 +1,410 @@
+// A spec for "What4.Domains.BV.WI".
+//
+// Wrapped intervals (WIs), as defined in /Signedness-Agnostic Program Analysis:
+// Precise Integer Bounds for Low-Level Code/ (Navas, Schachte, Søndergaard,
+// Stuckey, APLAS '12).
+//
+// A WI at width @n@ is one of @bottom@, @top@, or @delim x y@ where the
+// invariant is @x != y + 1@ (otherwise top is canonical).
+module wi where
+
+type Property = Bit
+
+// We tag each constructor explicitly.
+type Tag = [2]
+type bottomTag = 0
+type topTag    = 1
+type delimTag  = 2
+
+// A WI is a tag plus an endpoint pair (only meaningful for the @delim@ case).
+type Domain n
+  = { tag : Tag
+    , x : [n]
+    , y : [n]
+    }
+
+bottom : {n} (fin n, n >= 2) => Domain n
+bottom = { tag = 0, x = 0, y = 0 }
+
+top : {n} (fin n, n >= 2) => Domain n
+top = { tag = 1, x = 0, y = 0 }
+
+// Smart constructor: canonicalizes @x = y + 1@ to @top@.
+delim : {n} (fin n, n >= 2) => [n] -> [n] -> Domain n
+delim x y =
+  if x == y + 1 then top
+                else { tag = 2, x = x, y = y }
+
+singleton : {n} (fin n, n >= 2) => [n] -> Domain n
+singleton x = delim x x
+
+isBottom : {n} (fin n, n >= 2) => Domain n -> Bit
+isBottom c = c.tag == 0
+
+isTop : {n} (fin n, n >= 2) => Domain n -> Bit
+isTop c = c.tag == 1
+
+proper : {n} (fin n, n >= 2) => Domain n -> Bit
+proper c =
+  isBottom c \/ isTop c \/ (c.tag == 2 /\ c.x != c.y + 1)
+
+// ------------------------------------------------------------------
+// * Internal helpers
+
+// @circLeq x a b@: starting from @x@ on the bitvector circle, is @a@
+// encountered no later than @b@ when walking clockwise?
+circLeq : {n} (fin n, n >= 1) => [n] -> [n] -> [n] -> Bit
+circLeq x a b = a - x <= b - x
+
+// Most-significant bit at width @n@.
+msb : {n} (fin n, n >= 1) => [n] -> Bit
+msb v = v ! 0
+
+// ------------------------------------------------------------------
+// * Queries
+
+member : {n} (fin n, n >= 2) => Domain n -> [n] -> Bit
+member c v =
+  if isBottom c then False
+  else if isTop c then True
+  else circLeq c.x v c.y
+
+size : {n} (fin n, n >= 2) => Domain n -> [n + 1]
+size c =
+  if isBottom c then 0
+  else if isTop c then 1 # (zero : [n])
+  else zext (c.y - c.x) + 1
+
+subset : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+subset s t =
+  if isBottom s then True
+  else if isTop t then True
+  else if isTop s then False
+  else if isBottom t then False
+  else if s == t then True
+  else
+    member t s.x /\ member t s.y /\
+      (~ member s t.x \/ ~ member s t.y)
+
+// ------------------------------------------------------------------
+// * Lattice
+
+complement : {n} (fin n, n >= 2) => Domain n -> Domain n
+complement c =
+  if isTop c then bottom
+  else if isBottom c then top
+  else { tag = 2, x = c.y + 1, y = c.x - 1 }
+
+// The biased pseudo-join (APLAS '12 §3.1, page 8). Sound but not associative
+// and not monotone.
+pseudoJoin : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+pseudoJoin s t =
+  if subset s t then t
+  else if subset t s then s
+  else if isTop s \/ isTop t then top
+  else if mutContain then top
+  else if bInT /\ cInS then delim s.x t.y
+  else if dInS /\ aInT then delim t.x s.y
+  else if sizeBC < sizeDA then delim s.x t.y
+  else if sizeBC > sizeDA then delim t.x s.y
+  else if s.x <= t.x then delim s.x t.y
+  else delim t.x s.y
+  where
+    aInT = member t s.x
+    bInT = member t s.y
+    cInS = member s t.x
+    dInS = member s t.y
+    mutContain = aInT /\ bInT /\ cInS /\ dInS
+    sizeBC = t.x - s.y - 1
+    sizeDA = s.x - t.y - 1
+
+widen : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+widen s t = if subset t s then s else top
+
+// ------------------------------------------------------------------
+// * Splits (poles)
+
+northPole : {n} (fin n, n >= 2) => Domain n
+northPole = { tag = 2, x = 2^^(`n - 1) - 1, y = 2^^(`n - 1) }
+
+southPole : {n} (fin n, n >= 2) => Domain n
+southPole = { tag = 2, x = - 1, y = 0 }
+
+// nsplit returns 0, 1, or 2 segments. We model variable-length output as a
+// length-2 list with explicit "present" flags.
+type Split n = [2](Bit, Domain n)
+
+nsplit : {n} (fin n, n >= 2) => Domain n -> Split n
+nsplit c =
+  if isBottom c then [(False, bottom), (False, bottom)]
+  else if isTop c then
+    [ (True, { tag = 2, x = 0, y = 2^^(`n - 1) - 1 })
+    , (True, { tag = 2, x = 2^^(`n - 1), y = - 1 }) ]
+  else if subset northPole c then
+    [ (True, { tag = 2, x = c.x, y = 2^^(`n - 1) - 1 })
+    , (True, { tag = 2, x = 2^^(`n - 1), y = c.y }) ]
+  else
+    [ (True, c), (False, bottom) ]
+
+ssplit : {n} (fin n, n >= 2) => Domain n -> Split n
+ssplit c =
+  if isBottom c then [(False, bottom), (False, bottom)]
+  else if isTop c then
+    [ (True, { tag = 2, x = 0, y = 2^^(`n - 1) - 1 })
+    , (True, { tag = 2, x = 2^^(`n - 1), y = - 1 }) ]
+  else if subset southPole c then
+    [ (True, { tag = 2, x = c.x, y = - 1 })
+    , (True, { tag = 2, x = 0, y = c.y }) ]
+  else
+    [ (True, c), (False, bottom) ]
+
+// Membership in a split: any of its segments contains the bitvector.
+splitMember : {n} (fin n, n >= 2) => Split n -> [n] -> Bit
+splitMember s v = (s @ 0).0 /\ member (s @ 0).1 v
+              \/ (s @ 1).0 /\ member (s @ 1).1 v
+
+// ------------------------------------------------------------------
+// * Arithmetic
+//
+// We give specs for the operations exposed by "What4.Domains.BV.WI". The
+// implementation in Haskell may use auxiliary helpers (umul/smul/usmul,
+// segment-wise division, etc.) that are not modeled here directly; their
+// soundness is captured by the soundness of the top-level operations.
+
+neg : {n} (fin n, n >= 2) => Domain n -> Domain n
+neg c =
+  if isBottom c then bottom
+  else if isTop c then top
+  else delim (- c.y) (- c.x)
+
+add : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+add s t =
+  if isBottom s \/ isBottom t then bottom
+  else if isTop s \/ isTop t then top
+  else if zext (s.y - s.x) + zext (t.y - t.x) + 2 <= (1 # (zero : [n]))
+       then delim (s.x + t.x) (s.y + t.y)
+       else top
+
+sub : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+sub s t =
+  if isBottom s \/ isBottom t then bottom
+  else if isTop s \/ isTop t then top
+  else if zext (s.y - s.x) + zext (t.y - t.x) + 2 <= (1 # (zero : [n]))
+       then delim (s.x - t.y) (s.y - t.x)
+       else top
+
+// ------------------------------------------------------------------
+// * Bitwise
+//
+// (Specs not detailed in Cryptol; soundness is verified at the Haskell layer.)
+
+bnot : {n} (fin n, n >= 2) => Domain n -> Domain n
+bnot c =
+  if isBottom c then bottom
+  else if isTop c then top
+  else delim (~ c.y) (~ c.x)
+
+// ------------------------------------------------------------------
+// * Warren's unsigned bitwise primitives
+//
+// /Hacker's Delight/ §4.3 and §4.4. Given two unsigned ranges @[alo, ahi]@,
+// @[blo, bhi]@, return tight bounds for the bitwise AND or OR of any two
+// members.
+
+warrenAndLo : {n} (fin n, n >= 1) => [n] -> [n] -> [n] -> [n] -> [n]
+warrenAndLo alo ahi blo bhi = (loops ! 0).0 && (loops ! 0).1
+  where
+    masks = [ 1 << (`n - 1 - i) | i <- [0 .. n - 1] ] : [n][n]
+    loops = scanl step (alo, blo) masks
+    step (a, b) m =
+      if (~ a && ~ b && m) != 0 /\ ((a || m) && ~ (m - 1)) <= ahi
+        then ((a || m) && ~ (m - 1), b)
+      else if (~ a && ~ b && m) != 0 /\ ((b || m) && ~ (m - 1)) <= bhi
+        then (a, (b || m) && ~ (m - 1))
+      else (a, b)
+
+warrenAndHi : {n} (fin n, n >= 1) => [n] -> [n] -> [n] -> [n] -> [n]
+warrenAndHi alo ahi blo bhi = (loops ! 0).0 && (loops ! 0).1
+  where
+    masks = [ 1 << (`n - 1 - i) | i <- [0 .. n - 1] ] : [n][n]
+    loops = scanl step (ahi, bhi) masks
+    step (a, b) m =
+      if (a && ~ b && m) != 0 /\ ((a && ~ m) || (m - 1)) >= alo
+        then ((a && ~ m) || (m - 1), b)
+      else if (~ a && b && m) != 0 /\ ((b && ~ m) || (m - 1)) >= blo
+        then (a, (b && ~ m) || (m - 1))
+      else (a, b)
+
+warrenOrLo : {n} (fin n, n >= 1) => [n] -> [n] -> [n] -> [n] -> [n]
+warrenOrLo alo ahi blo bhi = (loops ! 0).0 || (loops ! 0).1
+  where
+    masks = [ 1 << (`n - 1 - i) | i <- [0 .. n - 1] ] : [n][n]
+    loops = scanl step (alo, blo) masks
+    step (a, b) m =
+      if (~ a && b && m) != 0 /\ ((a || m) && ~ (m - 1)) <= ahi
+        then ((a || m) && ~ (m - 1), b)
+      else if (a && ~ b && m) != 0 /\ ((b || m) && ~ (m - 1)) <= bhi
+        then (a, (b || m) && ~ (m - 1))
+      else (a, b)
+
+warrenOrHi : {n} (fin n, n >= 1) => [n] -> [n] -> [n] -> [n] -> [n]
+warrenOrHi alo ahi blo bhi = (loops ! 0).0 || (loops ! 0).1
+  where
+    masks = [ 1 << (`n - 1 - i) | i <- [0 .. n - 1] ] : [n][n]
+    loops = scanl step (ahi, bhi) masks
+    step (a, b) m =
+      if (a && b && m) != 0 /\ ((a - m) || (m - 1)) >= alo
+        then ((a - m) || (m - 1), b)
+      else if (a && b && m) != 0 /\ ((b - m) || (m - 1)) >= blo
+        then (a, (b - m) || (m - 1))
+      else (a, b)
+
+// ------------------------------------------------------------------
+// * Correctness properties
+
+// ------------------------------------------------------------------
+// ** Internal helpers
+
+circLeqAtZero : {n} (fin n, n >= 1) => [n] -> [n] -> Property
+circLeqAtZero a b = circLeq 0 a b == (a <= b)
+
+circLeqAnchorMin : {n} (fin n, n >= 1) => [n] -> [n] -> Property
+circLeqAnchorMin x v = circLeq x x v
+
+circLeqAnchorMax : {n} (fin n, n >= 1) => [n] -> [n] -> Property
+circLeqAnchorMax x v = circLeq x v (x - 1)
+
+msbHighBit : {n} (fin n, n >= 1) => [n] -> Property
+msbHighBit x = msb x == (x >= 2^^(`n - 1))
+
+warrenAndSound : {n} (fin n, n >= 1) => [n] -> [n] -> [n] -> [n] -> [n] -> [n] -> Property
+warrenAndSound alo ahi blo bhi a b =
+  alo <= ahi ==> blo <= bhi ==>
+    alo <= a ==> a <= ahi ==> blo <= b ==> b <= bhi ==>
+      warrenAndLo alo ahi blo bhi <= a && b /\
+      a && b <= warrenAndHi alo ahi blo bhi
+
+warrenOrSound : {n} (fin n, n >= 1) => [n] -> [n] -> [n] -> [n] -> [n] -> [n] -> Property
+warrenOrSound alo ahi blo bhi a b =
+  alo <= ahi ==> blo <= bhi ==>
+    alo <= a ==> a <= ahi ==> blo <= b ==> b <= bhi ==>
+      warrenOrLo alo ahi blo bhi <= a || b /\
+      a || b <= warrenOrHi alo ahi blo bhi
+
+property p_circLeqAtZero    = circLeqAtZero`{8}
+property p_circLeqAnchorMin = circLeqAnchorMin`{8}
+property p_circLeqAnchorMax = circLeqAnchorMax`{8}
+property p_msbHighBit       = msbHighBit`{8}
+property p_warrenAndSound   = warrenAndSound`{4}
+property p_warrenOrSound    = warrenOrSound`{4}
+
+// The segment helpers are sound on inputs satisfying the corresponding
+// pole-non-straddling and divisor-non-zero preconditions. The Haskell layer
+// captures these via 'correct_udivSeg', 'correct_uremSeg', 'correct_sdivSeg',
+// 'correct_sremSeg', 'correct_bvAndSeg', 'correct_bvOrSeg', and
+// 'correct_bvXorSeg'. We omit explicit Cryptol mirrors because the
+// implementations themselves (segment-wise division, Warren primitives,
+// etc.) are the spec — the corresponding @correct_*@ properties for the
+// public ops ('udiv', 'sdiv', 'and', 'or', etc.) already exercise them
+// indirectly.
+
+// ------------------------------------------------------------------
+// ** Construction
+
+singletonMember : {n} (fin n, n >= 2) => [n] -> Property
+singletonMember x = member (singleton x) x
+
+property p_singletonMember = singletonMember`{8}
+
+// ------------------------------------------------------------------
+// ** Queries
+
+complementMember : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+complementMember c x =
+  proper c ==> ~ isBottom c ==> ~ isTop c ==>
+    member c x != member (complement c) x
+
+subsetCorrect : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
+subsetCorrect a b x =
+  proper a ==> proper b ==>
+    subset a b ==> member a x ==> member b x
+
+subsetReflexive : {n} (fin n, n >= 2) => Domain n -> Property
+subsetReflexive a = proper a ==> subset a a
+
+pseudoJoinSound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
+pseudoJoinSound a b x =
+  proper a ==> proper b ==>
+    (member a x \/ member b x) ==>
+      member (pseudoJoin a b) x
+
+widenSound : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
+widenSound a b x =
+  proper a ==> proper b ==>
+    (member a x \/ member b x) ==>
+      member (widen a b) x
+
+property p_complementMember = complementMember`{8}
+property p_subsetCorrect    = subsetCorrect`{8}
+property p_subsetReflexive  = subsetReflexive`{8}
+property p_pseudoJoinSound  = pseudoJoinSound`{8}
+property p_widenSound       = widenSound`{8}
+
+// ------------------------------------------------------------------
+// ** Splits
+
+nsplitCovers : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+nsplitCovers c x =
+  proper c ==> member c x ==> splitMember (nsplit c) x
+
+nsplitNotStraddleNP : {n} (fin n, n >= 2) => Domain n -> Property
+nsplitNotStraddleNP c =
+  proper c ==> all noStraddle [s | s <- nsplit c]
+  where
+    noStraddle (present, d) = ~ present \/ d == northPole \/ ~ subset northPole d
+
+ssplitCovers : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+ssplitCovers c x =
+  proper c ==> member c x ==> splitMember (ssplit c) x
+
+ssplitNotStraddleSP : {n} (fin n, n >= 2) => Domain n -> Property
+ssplitNotStraddleSP c =
+  proper c ==> all noStraddle [s | s <- ssplit c]
+  where
+    noStraddle (present, d) = ~ present \/ d == southPole \/ ~ subset southPole d
+
+property p_nsplitCovers       = nsplitCovers`{8}
+property p_nsplitNotStraddleNP = nsplitNotStraddleNP`{8}
+property p_ssplitCovers       = ssplitCovers`{8}
+property p_ssplitNotStraddleSP = ssplitNotStraddleSP`{8}
+
+// ------------------------------------------------------------------
+// ** Arithmetic
+
+correct_neg : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+correct_neg a x = proper a ==> member a x ==> member (neg a) (- x)
+
+correct_add :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_add a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    member (add a b) (x + y)
+
+correct_sub :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_sub a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    member (sub a b) (x - y)
+
+property p_correct_neg = correct_neg`{4}
+property p_correct_add = correct_add`{4}
+property p_correct_sub = correct_sub`{4}
+
+// ------------------------------------------------------------------
+// ** Bitwise
+
+correct_not : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+correct_not a x = proper a ==> member a x ==> member (bnot a) (~ x)
+
+property p_correct_not = correct_not`{4}
