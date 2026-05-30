@@ -6,8 +6,10 @@
 module Strides (tests) where
 
 import qualified Test.Tasty as TT
+import qualified Test.Tasty.HUnit as TT
 
 import qualified Data.List as List
+import           Data.Maybe (fromJust)
 import           Data.Parameterized.NatRepr (NatRepr, addNat, addIsLeq, isPosNat, knownNat, someNat, testLeq, LeqProof(..), maxUnsigned)
 import           Data.Parameterized.Some (Some(..))
 import           GHC.TypeNats (type (<=))
@@ -284,6 +286,24 @@ tests = TT.testGroup "Strides"
   , genTest "correct_xor" $
       do SW n <- genWidth
          S.correct_xor n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_andPrecise" $
+      do SW n <- genWidth
+         S.correct_andPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_orPrecise" $
+      do SW n <- genWidth
+         S.correct_orPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "warrenAndLoCorrect" $
+      S.warrenAndLoCorrect <$> genNat <*> genNat <*> genNat <*> genNat
+                           <*> genNat <*> genNat <*> genWidthExp
+  , genTest "warrenAndHiCorrect" $
+      S.warrenAndHiCorrect <$> genNat <*> genNat <*> genNat <*> genNat
+                           <*> genNat <*> genNat <*> genWidthExp
+  , genTest "operandRangeCorrect" $
+      do SW n <- genWidth
+         S.operandRangeCorrect <$> S.genDomain n <*> genNatBV n
+  , genTest "andPreciseDominatesAnd" $
+      do SW n <- genWidth
+         S.andPreciseDominatesAnd n <$> S.genDomain n <*> S.genDomain n
 
   -- Concatenation, extension, selection, and truncation
   , genTest "correct_zero_ext" $
@@ -385,6 +405,26 @@ tests = TT.testGroup "Strides"
   -- , genTest "meetPreciseMonotone" $
   --     do SW n <- genWidth
   --        S.meetPreciseMonotone n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+
+  -- @S.andPrecise@ and the bitwise lift are /incomparable/ on the
+  -- 'leqExact' order: at @w = 4@, Z3 refutes both directions of dominance.
+  -- These manual counter-examples were extracted from those refutations.
+  , TT.testCase "andPrecise incomparable with bitwise lift" $
+      let w4 = knownNat @4
+          mk s st nn = S.mk w4 s st nn
+          liftBand a b =
+            fromJust (S.fromBitwise w4 (B.and (S.toBitwise a) (S.toBitwise b)))
+          -- Witness: @S.andPrecise a1 b1@ contains an element the lift does not.
+          a1 = mk 1 12 2
+          b1 = mk 1 1  0
+          -- Witness: lift contains an element @S.andPrecise a2 b2@ does not.
+          a2 = mk 2 4  2
+          b2 = mk 12 10 6
+      in do
+        TT.assertBool "andPrecise a1 b1 not <= lift a1 b1"
+          (not (S.leqExact (S.andPrecise w4 a1 b1) (liftBand a1 b1)))
+        TT.assertBool "lift a2 b2 not <= andPrecise a2 b2"
+          (not (S.leqExact (liftBand a2 b2) (S.andPrecise w4 a2 b2)))
 
   , Precision.tests
   , Internal.tests
