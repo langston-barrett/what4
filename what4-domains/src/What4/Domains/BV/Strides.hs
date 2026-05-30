@@ -327,7 +327,8 @@ module What4.Domains.BV.Strides
   , toList
   , size
   -- , asSingleton
-  -- , eq
+  , eq
+  , eqExact
   -- , ubounds
   -- , sbounds
   -- , ult
@@ -422,7 +423,16 @@ module What4.Domains.BV.Strides
   , leqExactReflexive
   , leqExactTransitive
   , sizeViaToList
-  -- , correct_eq
+  , correct_eq
+  , cosetsDisjointCorrect
+  , eqExactCorrect
+  , eqReflexive
+  , eqSymmetric
+  , eqTransitive
+  , eqExactReflexive
+  , eqExactSymmetric
+  , eqExactTransitive
+  , eqRefinesEqExact
   -- , correct_ubounds
   -- , correct_sbounds
   -- , correct_ult
@@ -579,6 +589,18 @@ lowestSetBit x = 1 `shiftL` countTrailingZerosOr0 (toInteger x)
 strideGcd :: Domain w -> Natural
 strideGcd Domain{stride} = lowestSetBit stride
 {-# INLINE strideGcd #-}
+
+-- | /O(w)/. Sufficient (but not necessary) condition that @a@ and @b@ share
+-- no values: @start a − start b@ is not a multiple of @min(strideGcd a,
+-- strideGcd b)@, so the cosets @start a + ⟨stride a⟩@ and @start b + ⟨stride
+-- b⟩@ in @Z\/2^w@ don't intersect at all (regardless of the orbit windows).
+-- The converse fails when the cosets agree but the orbit windows are
+-- disjoint, which this check doesn't see.
+cosetsDisjoint :: Domain w -> Domain w -> Bool
+cosetsDisjoint a b =
+  modSub (mask a) (start a) (start b) .&. (min (strideGcd a) (strideGcd b) - 1)
+    /= 0
+{-# INLINE cosetsDisjoint #-}
 
 -- | /O(w)/. @2^w \/ g@, where @mask = 2^w - 1@ and @g@ is a power-of-two
 -- divisor of @2^w@ (e.g. @gcd(stride, 2^w)@). Used to compute the orbit
@@ -1033,6 +1055,35 @@ size :: Domain w -> Natural
 size c@Domain{n} = assert (proper c) $ n + 1
 {-# INLINE size #-}
 
+-- | /O(w)/. Decide equality of two progressions: 'Just True' if both are
+-- the same singleton, 'Just False' if they share no values, 'Nothing' if
+-- they overlap but aren\'t both singletons.
+--
+-- Disjointness is detected by two cheap sufficient (not complete) checks:
+--
+--   * 'cosetsDisjoint' — the residue cosets in @Z\/2^w@ don\'t intersect,
+--     so the orbits share no values regardless of window;
+--   * 'A.domainsOverlap' on the arc 'hull's — the orbital windows
+--     @[start, start + n·stride]@ don\'t overlap as arithmetic intervals,
+--     so a fortiori the orbits themselves don\'t.
+--
+-- For an exact (but quadratic) decision procedure use 'eqExact'.
+eq :: Domain w -> Domain w -> Maybe Bool
+eq a b
+  | n a == 0, n b == 0          = Just (start a == start b)
+  | cosetsDisjoint a b          = Just False
+  | Prelude.not arcsOverlap     = Just False
+  | otherwise                   = Nothing
+  where
+    arcsOverlap = A.domainsOverlap (hull a) (hull b)
+
+-- | /O(w^2)/. Exact set-equality on progressions: 'True' iff @a@ and @b@
+-- denote the same set of bitvectors. Short-circuits on size mismatch (a
+-- necessary condition); otherwise checks 'leqExact' in one direction —
+-- equal cardinalities plus containment force set equality.
+eqExact :: Domain w -> Domain w -> Bool
+eqExact a b = size a == size b && leqExact a b
+
 -- ------------------------------------------------------------------
 -- * Lifted operations
 
@@ -1401,12 +1452,9 @@ meetStrides ::
   NatRepr w ->
   Domain w -> Domain w -> Maybe (Domain w)
 meetStrides w a b =
-  let g_a = strideGcd a
-      g_b = strideGcd b
-      delta = modSub (mask a) (start a) (start b)
-  in if delta .&. (min g_a g_b - 1) /= 0
-       then Nothing
-       else fromArith w (A.meet (hull a) (hull b))
+  if cosetsDisjoint a b
+    then Nothing
+    else fromArith w (A.meet (hull a) (hull b))
 
 -- | The arith hull of a progression: the arc @[start, start + n·stride]@.
 -- Saturates to top when @n·stride >= 2^w@ (i.e., on self-wrapping orbits).
@@ -1738,6 +1786,95 @@ leqExactTransitive a b c =
 sizeViaToList :: Domain w -> Property
 sizeViaToList c =
   proper c ==> property (size c == fromIntegral (length (toList c)))
+
+-- | Soundness of 'eq': @Just True@ pins members to the same value, @Just False@
+-- pins them to different values, and @Nothing@ is permissive.
+correct_eq ::
+  (1 <= w) =>
+  NatRepr w ->
+  (Domain w, Natural) -> (Domain w, Natural) -> Property
+correct_eq _w (a, x) (b, y) =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x' ==> member b y' ==>
+      case eq a b of
+        Just True  -> property (x' == y')
+        Just False -> property (x' /= y')
+        Nothing    -> property True
+  where
+    x' = modMask a x
+    y' = modMask b y
+
+-- | Soundness of 'cosetsDisjoint': if it returns 'True', then @a@ and @b@
+-- share no values. The contrapositive is the useful direction here — any
+-- shared element witnesses non-disjoint cosets.
+cosetsDisjointCorrect :: Domain w -> Domain w -> Natural -> Property
+cosetsDisjointCorrect a b x =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x' ==> member b x' ==>
+      property (Prelude.not (cosetsDisjoint a b))
+  where
+    x' = modMask a x
+
+-- | Soundness of 'eqExact': it agrees with set equality of the orbits.
+eqExactCorrect :: Domain w -> Domain w -> Property
+eqExactCorrect a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (eqExact a b == (Set.fromList (toList a) == Set.fromList (toList b)))
+
+-- | 'eqExact' is reflexive.
+eqExactReflexive :: Domain w -> Property
+eqExactReflexive a = proper a ==> property (eqExact a a)
+
+-- | 'eqExact' is symmetric.
+eqExactSymmetric :: Domain w -> Domain w -> Property
+eqExactSymmetric a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (eqExact a b == eqExact b a)
+
+-- | 'eqExact' is transitive.
+eqExactTransitive :: Domain w -> Domain w -> Domain w -> Property
+eqExactTransitive a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask b == mask c ==>
+      eqExact a b ==> eqExact b c ==> property (eqExact a c)
+
+-- | 'eq' is /reflexive on its definite answers/: it never reports a
+-- progression as unequal to itself. (For multi-element progressions @eq a a@
+-- returns 'Nothing': a witness pair @(x, y)@ drawn from @a × a@ is not in
+-- general the same value, so 'eq' can\'t soundly commit to 'Just True'.)
+eqReflexive :: Domain w -> Property
+eqReflexive a = proper a ==> property (eq a a /= Just False)
+
+-- | 'eq' is symmetric.
+eqSymmetric :: Domain w -> Domain w -> Property
+eqSymmetric a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (eq a b == eq b a)
+
+-- | 'eq' is /transitive on definite answers/: if @eq a b == Just True@ and
+-- @eq b c == Just True@, then @eq a c == Just True@; if @eq a b == Just
+-- True@ and @eq b c == Just False@, then @eq a c == Just False@. (Definite
+-- answers compose; 'Nothing' is permissive and so transitivity in the usual
+-- sense is vacuous when any operand returns 'Nothing'.)
+eqTransitive :: Domain w -> Domain w -> Domain w -> Property
+eqTransitive a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask b == mask c ==>
+      case (eq a b, eq b c) of
+        (Just True, Just True)   -> property (eq a c == Just True)
+        (Just True, Just False)  -> property (eq a c == Just False)
+        (Just False, Just True)  -> property (eq a c == Just False)
+        _                         -> property True
+
+-- | 'eqExact' refines 'eq': whenever 'eq' commits to a definite answer,
+-- 'eqExact' agrees.
+eqRefinesEqExact :: Domain w -> Domain w -> Property
+eqRefinesEqExact a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case eq a b of
+      Just True  -> property (eqExact a b)
+      Just False -> property (Prelude.not (eqExact a b))
+      Nothing    -> property True
 
 -- ------------------------------------------------------------------
 -- ** Conversion
