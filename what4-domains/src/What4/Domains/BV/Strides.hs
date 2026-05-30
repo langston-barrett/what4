@@ -323,6 +323,7 @@ module What4.Domains.BV.Strides
   , toBitwise
   , fromBitwise
   -- * Queries
+  , isSelfWrapping
   , member
   , leq
   , leqPrecise
