@@ -441,6 +441,69 @@ tests = TT.testGroup "Strides"
   , genTest "pseudoJoinPreciseTopAnnihilator" $
       do SW n <- genWidth
          S.pseudoJoinPreciseTopAnnihilator n <$> S.genDomain n
+  , genTest "correct_boundingBoxJoin" $
+      do SW n <- genWidth
+         S.correct_boundingBoxJoin n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "boundingBoxJoinCommutative" $
+      do SW n <- genWidth
+         S.boundingBoxJoinCommutative n <$> S.genDomain n <*> S.genDomain n
+  , genTest "boundingBoxJoinIdempotent" $
+      do SW n <- genWidth
+         S.boundingBoxJoinIdempotent n <$> S.genDomain n
+  , genTest "boundingBoxJoinTopAnnihilator" $
+      do SW n <- genWidth
+         S.boundingBoxJoinTopAnnihilator n <$> S.genDomain n
+  , genTest "boundingBoxJoinUpperBound" $
+      do SW n <- genWidth
+         S.boundingBoxJoinUpperBound n <$> S.genDomain n <*> S.genDomain n
+  , genTest "boundingBoxJoinAssociative" $
+      do SW n <- genWidth
+         S.boundingBoxJoinAssociative n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "boundingBoxJoinMonotone" $
+      do SW n <- genWidth
+         S.boundingBoxJoinMonotone n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoJoinDominatesBoundingBoxJoin" $
+      do SW n <- genWidth
+         S.pseudoJoinDominatesBoundingBoxJoin n <$> S.genDomain n <*> S.genDomain n
+  , genTest "lowerBoundDominatedByPseudoMeet" $
+      do SW n <- genWidth
+         S.lowerBoundDominatedByPseudoMeet n <$> S.genDomain n <*> S.genDomain n
+  , genTest "correct_lowerBound" $
+      do SW n <- genWidth
+         S.correct_lowerBound n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+  , genTest "lowerBoundLeqExactBoth" $
+      do SW n <- genWidth
+         S.lowerBoundLeqExactBoth n <$> S.genDomain n <*> S.genDomain n
+  , genTest "lowerBoundCommutative" $
+      do SW n <- genWidth
+         S.lowerBoundCommutative n <$> S.genDomain n <*> S.genDomain n
+  , genTest "lowerBoundIdempotent" $
+      do SW n <- genWidth
+         S.lowerBoundIdempotent n <$> S.genDomain n
+  , genTest "lowerBoundTopIdentity" $
+      do SW n <- genWidth
+         S.lowerBoundTopIdentity n <$> S.genDomain n
+  , genTest "lowerBoundIsLargestLowerBound" $
+      do SW n <- genWidth
+         S.lowerBoundIsLargestLowerBound n <$> S.genDomain n <*> S.genDomain n
+  , genTest "correct_lowerBounds" $
+      do SW n <- genWidth
+         S.correct_lowerBounds n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+  , genTest "lowerBoundsAllSubsets" $
+      do SW n <- genWidth
+         S.lowerBoundsAllSubsets n <$> S.genDomain n <*> S.genDomain n
+  , genTest "trimSelfWrapNotSelfWrapping" $
+      do SW n <- genWidth
+         S.trimSelfWrapNotSelfWrapping n <$> S.genDomain n
+  , genTest "trimSelfWrapSubset" $
+      do SW n <- genWidth
+         S.trimSelfWrapSubset n <$> S.genDomain n
+  , genTest "trimSelfWrapIdentity" $
+      do SW n <- genWidth
+         S.trimSelfWrapIdentity n <$> S.genDomain n
+  , genTest "trimSelfWrapIdempotent" $
+      do SW n <- genWidth
+         S.trimSelfWrapIdempotent n <$> S.genDomain n
   -- @S.andPrecise@ and the bitwise lift are /incomparable/ on the
   -- 'leqExact' order: at @w = 4@, Z3 refutes both directions of dominance.
   -- These manual counter-examples were extracted from those refutations.

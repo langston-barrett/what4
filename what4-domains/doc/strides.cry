@@ -813,11 +813,104 @@ pseudoJoinStrides a b =
     g      = if delta == 0
                then g0
                else (if g0 < lowestSetBit delta then g0 else lowestSetBit delta)
-    arc    = Arith::join (hull a) (hull b)
+    arc    = Arith::join (toArith a) (toArith b)
     off    = (a.start - arc.lo) % g
     startResult = arc.lo + off
     nResult     = (arc.sz - off) / g
 
+boundingBoxJoin : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+boundingBoxJoin a b = fromArith (Arith::range`{n} lo hi)
+  where
+    aBounds = Arith::ubounds (hull a)
+    bBounds = Arith::ubounds (hull b)
+    aLo = aBounds.0
+    aHi = aBounds.1
+    bLo = bBounds.0
+    bHi = bBounds.1
+    lo = if aLo <= bLo then aLo else bLo
+    hi = if aHi <= bHi then bHi else aHi
+
+lowerBound : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+lowerBound a b =
+  if a.n == 0 then
+    if member b a.start then Just a else Nothing
+  else if b.n == 0 then
+    if member a b.start then Just b else Nothing
+  else lowerBoundSplit (ssplit (trimSelfWrap a)) (ssplit (trimSelfWrap b))
+  where
+    lowerBoundSplit sa sb = case sa of
+      One pa -> case sb of
+        One pb -> arcMeetClosed pa pb
+        Two pb1 pb2 -> largestJust (arcMeetClosed pa pb1) (arcMeetClosed pa pb2)
+      Two pa1 pa2 -> case sb of
+        One pb -> largestJust (arcMeetClosed pa1 pb) (arcMeetClosed pa2 pb)
+        Two pb1 pb2 ->
+          largestJust
+            (largestJust (arcMeetClosed pa1 pb1) (arcMeetClosed pa1 pb2))
+            (largestJust (arcMeetClosed pa2 pb1) (arcMeetClosed pa2 pb2))
+
+// Multi-result analogue of `lowerBound`: returns the up-to-four arc-meet
+// candidates from `ssplit a × ssplit b`. Fixed-size 4 with `Nothing`
+// padding (Cryptol can't model variable-length lists).
+lowerBounds : {n} (fin n, n >= 2) => Domain n -> Domain n -> [4](Maybe (Domain n))
+lowerBounds a b =
+  if a.n == 0 then
+    [if member b a.start then Just a else Nothing, Nothing, Nothing, Nothing]
+  else if b.n == 0 then
+    [if member a b.start then Just b else Nothing, Nothing, Nothing, Nothing]
+  else
+    case ssplit (trimSelfWrap a) of
+      One pa -> case ssplit (trimSelfWrap b) of
+        One pb -> [arcMeetClosed pa pb, Nothing, Nothing, Nothing]
+        Two pb1 pb2 ->
+          [arcMeetClosed pa pb1, arcMeetClosed pa pb2, Nothing, Nothing]
+      Two pa1 pa2 -> case ssplit (trimSelfWrap b) of
+        One pb ->
+          [arcMeetClosed pa1 pb, arcMeetClosed pa2 pb, Nothing, Nothing]
+        Two pb1 pb2 ->
+          [ arcMeetClosed pa1 pb1, arcMeetClosed pa1 pb2
+          , arcMeetClosed pa2 pb1, arcMeetClosed pa2 pb2
+          ]
+
+// Drop a self-wrapping orbit to a non-self-wrapping sub-orbit. Picks the
+// longer of two laps:
+//   * Lap 0: indices [0, (mask - start) / stride]
+//   * Lap 1: indices after the first wrap
+trimSelfWrap : {n} (fin n, n >= 2) => Domain n -> Domain n
+trimSelfWrap c =
+  if ~ (isSelfWrapping c) then c
+  else if lap1Count > lap0Count then
+    mk (c.start + drop`{n + 1} lap1Start * c.stride) c.stride lap1Steps
+  else
+    mk c.start c.stride lap0End
+  where
+    lap0End : [n + 1]
+    lap0End = if zext lap0EndN < c.n then zext lap0EndN else c.n
+    lap0EndN : [n]
+    lap0EndN = ((~ 0 : [n]) - c.start) / c.stride
+    lap0Count : [n + 1]
+    lap0Count = lap0End + 1
+    lap1Start : [2 * n + 1]
+    lap1Start = ((zext (~ 0 : [n]) + 1 - zext c.start) + zext c.stride - 1) / zext c.stride
+    lap1EndRaw : [2 * n + 1]
+    lap1EndRaw = (2 * (zext (~ 0 : [n]) + 1) - 1 - zext c.start) / zext c.stride
+    lap1End : [n + 1]
+    lap1End = if lap1EndRaw < zext c.n then drop`{n} lap1EndRaw else c.n
+    lap1Steps : [n + 1]
+    lap1Steps = if lap1End >= drop`{n} lap1Start
+                  then lap1End - drop`{n} lap1Start
+                  else 0
+    lap1Count : [n + 1]
+    lap1Count = if lap1Start <= zext c.n /\ lap1End >= drop`{n} lap1Start
+                  then lap1Steps + 1
+                  else 0
+
+largestJust : {n} (fin n, n >= 2) => Maybe (Domain n) -> Maybe (Domain n) -> Maybe (Domain n)
+largestJust ma mb = case ma of
+  Nothing -> mb
+  Just a -> case mb of
+    Nothing -> ma
+    Just b -> if size a >= size b then Just a else Just b
 
 // ------------------------------------------------------------------
 // * Correctness properties
@@ -1465,6 +1558,174 @@ pseudoJoinPreciseTopAnnihilator a =
   proper a ==>
     leqExact (pseudoJoinPrecise a top) top /\ leqExact top (pseudoJoinPrecise a top)
 
+correct_boundingBoxJoin : {n} (fin n, n >= 2) => Domain n -> [n] -> Domain n -> Property
+correct_boundingBoxJoin a x b =
+  proper a ==> proper b ==> member a x ==>
+    member (boundingBoxJoin a b) x
+
+boundingBoxJoinCommutative : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+boundingBoxJoinCommutative a b =
+  proper a ==> proper b ==>
+    leqExact (boundingBoxJoin a b) (boundingBoxJoin b a) /\
+    leqExact (boundingBoxJoin b a) (boundingBoxJoin a b)
+
+// `boundingBoxJoin a a` collapses stride to 1 but represents the same set
+// as the stride-1 hull of @a@ -- when @a@ doesn't wrap mod 2^n. Wrapping
+// operands saturate to top.
+boundingBoxJoinIdempotent : {n} (fin n, n >= 2) => Domain n -> Property
+boundingBoxJoinIdempotent a =
+  proper a ==> ~ (wraps a) ==>
+    leqExact (boundingBoxJoin a a) hullA /\ leqExact hullA (boundingBoxJoin a a)
+  where
+    hullA = fromArith (hull a)
+
+boundingBoxJoinTopAnnihilator : {n} (fin n, n >= 2) => Domain n -> Property
+boundingBoxJoinTopAnnihilator a =
+  proper a ==>
+    leqExact (boundingBoxJoin a top) top /\ leqExact top (boundingBoxJoin a top)
+
+boundingBoxJoinUpperBound : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+boundingBoxJoinUpperBound a b =
+  proper a ==> proper b ==>
+    leqExact hullA (boundingBoxJoin a b) /\ leqExact hullB (boundingBoxJoin a b)
+  where
+    hullA = fromArith (hull a)
+    hullB = fromArith (hull b)
+
+boundingBoxJoinAssociative :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+boundingBoxJoinAssociative a b c =
+  proper a ==> proper b ==> proper c ==>
+    leqExact lhs rhs /\ leqExact rhs lhs
+  where
+    lhs = boundingBoxJoin (boundingBoxJoin a b) c
+    rhs = boundingBoxJoin a (boundingBoxJoin b c)
+
+// Monotone only when no operand wraps mod 2^n. `A.ubounds` collapses any
+// wrapping interval to (0, mask), so `hull` is non-monotone on wrapping
+// inputs; `boundingBoxJoin` inherits that gap.
+boundingBoxJoinMonotone :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+boundingBoxJoinMonotone a b c =
+  proper a ==> proper b ==> proper c ==>
+    ~ (wraps a) ==> ~ (wraps b) ==> ~ (wraps c) ==>
+      leqExact a b ==>
+        leqExact (boundingBoxJoin a c) (boundingBoxJoin b c)
+
+// Cardinality dominance: pseudoJoin's coset refinement makes its result no
+// larger than boundingBoxJoin's. Subset dominance does /not/ hold (they are
+// incomparable as sets when A.join inside pseudoJoin chooses the wrapping
+// arc and boundingBoxJoin chooses the non-wrapping bounding box).
+pseudoJoinDominatesBoundingBoxJoin :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+pseudoJoinDominatesBoundingBoxJoin a b =
+  proper a ==> proper b ==>
+    size (pseudoJoin a b) <= size (boundingBoxJoin a b)
+
+correct_lowerBound : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
+correct_lowerBound a b x =
+  proper a ==> proper b ==>
+    case lowerBound a b of
+      Nothing -> True
+      Just c -> ~ (member c x) \/ (member a x /\ member b x)
+
+lowerBoundLeqExactBoth : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+lowerBoundLeqExactBoth a b =
+  proper a ==> proper b ==>
+    case lowerBound a b of
+      Nothing -> True
+      Just c -> leqExact c a /\ leqExact c b
+
+lowerBoundCommutative : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+lowerBoundCommutative a b =
+  proper a ==> proper b ==>
+    eqMaybe (lowerBound a b) (lowerBound b a)
+
+lowerBoundIdempotent : {n} (fin n, n >= 2) => Domain n -> Property
+lowerBoundIdempotent a =
+  proper a ==> ~ (wraps a) ==>
+    case lowerBound a a of
+      Just c -> leqExact c a /\ leqExact a c
+      Nothing -> False
+
+lowerBoundTopIdentity : {n} (fin n, n >= 2) => Domain n -> Property
+lowerBoundTopIdentity a =
+  proper a ==> ~ (wraps a) ==>
+    case lowerBound a top of
+      Just c -> leqExact c a /\ leqExact a c
+      Nothing -> False
+
+// `lowerBound` returns the largest candidate from `lowerBounds` by `size`.
+lowerBoundIsLargestLowerBound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+lowerBoundIsLargestLowerBound a b =
+  proper a ==> proper b ==>
+    case lowerBound a b of
+      Nothing -> foldl (/\) True [isNothing mc | mc <- lowerBounds a b]
+      Just c -> size c >= maxSize
+  where
+    isNothing mc = case mc of
+      Just _ -> False
+      Nothing -> True
+    sizeOrZero mc = case mc of
+      Just c -> size c
+      Nothing -> 0
+    maxSize = foldl maxSz 0 (lowerBounds a b)
+    maxSz s mc = if sizeOrZero mc > s then sizeOrZero mc else s
+
+// Every result in `lowerBounds` is sound: every element is in both operands.
+correct_lowerBounds :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
+correct_lowerBounds a b x =
+  proper a ==> proper b ==>
+    foldl (/\) True
+      [ memberMaybe mc | mc <- lowerBounds a b ]
+  where
+    memberMaybe mc = case mc of
+      Just c -> ~ (member c x) \/ (member a x /\ member b x)
+      Nothing -> True
+
+// Every result in `lowerBounds` is contained in both operands under `leqExact`.
+lowerBoundsAllSubsets :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+lowerBoundsAllSubsets a b =
+  proper a ==> proper b ==>
+    foldl (/\) True
+      [ subsetMaybe mc | mc <- lowerBounds a b ]
+  where
+    subsetMaybe mc = case mc of
+      Just c -> leqExact c a /\ leqExact c b
+      Nothing -> True
+
+// `lowerBound` is contained in `pseudoMeet` when both are non-empty: they
+// bound the true intersection from opposite sides.
+lowerBoundDominatedByPseudoMeet :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+lowerBoundDominatedByPseudoMeet a b =
+  proper a ==> proper b ==>
+    case lowerBound a b of
+      Nothing -> True
+      Just lo -> case pseudoMeet a b of
+        Nothing -> False
+        Just up -> leqExact lo up
+
+trimSelfWrapNotSelfWrapping : {n} (fin n, n >= 2) => Domain n -> Property
+trimSelfWrapNotSelfWrapping a =
+  proper a ==> ~ (isSelfWrapping (trimSelfWrap a))
+
+trimSelfWrapSubset : {n} (fin n, n >= 2) => Domain n -> Property
+trimSelfWrapSubset a =
+  proper a ==> leqExact (trimSelfWrap a) a
+
+trimSelfWrapIdentity : {n} (fin n, n >= 2) => Domain n -> Property
+trimSelfWrapIdentity a =
+  proper a ==> ~ (isSelfWrapping a) ==>
+    trimSelfWrap a == a
+
+trimSelfWrapIdempotent : {n} (fin n, n >= 2) => Domain n -> Property
+trimSelfWrapIdempotent a =
+  proper a ==> trimSelfWrap (trimSelfWrap a) == trimSelfWrap a
+
 
 
 // Properties going through 'pseudoMeetStrides' unfold both 'solveLinearDiophantine'
@@ -1500,6 +1761,34 @@ property p_pseudoMeetTopIdentity            = pseudoMeetTopIdentity`{4}
 property p_pseudoMeetPreciseTopIdentity     = pseudoMeetPreciseTopIdentity`{4}
 property p_pseudoJoinTopAnnihilator         = pseudoJoinTopAnnihilator`{4}
 property p_pseudoJoinPreciseTopAnnihilator  = pseudoJoinPreciseTopAnnihilator`{4}
+
+property p_correct_boundingBoxJoin              = correct_boundingBoxJoin`{4}
+property p_boundingBoxJoinCommutative           = boundingBoxJoinCommutative`{4}
+property p_boundingBoxJoinIdempotent            = boundingBoxJoinIdempotent`{4}
+property p_boundingBoxJoinTopAnnihilator        = boundingBoxJoinTopAnnihilator`{4}
+property p_boundingBoxJoinUpperBound            = boundingBoxJoinUpperBound`{4}
+property p_boundingBoxJoinAssociative           = boundingBoxJoinAssociative`{4}
+property p_boundingBoxJoinMonotone              = boundingBoxJoinMonotone`{4}
+property p_pseudoJoinDominatesBoundingBoxJoin   = pseudoJoinDominatesBoundingBoxJoin`{4}
+
+// `lowerBound` goes through `arcMeetClosed`, which uses
+// `solveLinearDiophantine`, which symbolically unfolds the eGCD iteration
+// `4*n + 4` deep. Most properties that involve a Diophantine call on /both/
+// sides of the equation (commutative, topIdentity, soundness, leqExactBoth)
+// don't terminate within reasonable time even at w=2. Only
+// `lowerBoundIdempotent` is registered for proof — its `lowerBound a a`
+// short-circuits in the matching-bases branch of `arcMeetClosed` and
+// avoids the Diophantine path.
+//
+// The Haskell implementation has matching property tests that run via
+// Hedgehog at all widths up to 8; the @correct_lowerBound@ /under/-approx
+// soundness in particular is exhaustively covered there.
+property p_lowerBoundIdempotent                    = lowerBoundIdempotent`{2}
+
+property p_trimSelfWrapNotSelfWrapping              = trimSelfWrapNotSelfWrapping`{4}
+property p_trimSelfWrapSubset                       = trimSelfWrapSubset`{4}
+property p_trimSelfWrapIdentity                     = trimSelfWrapIdentity`{4}
+property p_trimSelfWrapIdempotent                   = trimSelfWrapIdempotent`{4}
 
 
 // ------------------------------------------------------------------

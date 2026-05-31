@@ -32,6 +32,7 @@ module PrecisionRegression.Common
   , scaleResult
   , latticeResult
   , latticeMaybeResult
+  , latticeUnderApproxMaybeResult
   , leqResult
     -- * Concrete operations
   , cAdd, cSub, cMul, cAnd, cOr, cXor
@@ -209,6 +210,34 @@ latticeMaybeResult de name absOp concOp = Result name absTot concTot
     absTot  = sum [ fromIntegral (maybe 0 (length . toL) (absOp a b))
                   | a <- reps, b <- reps ]
     concTot = sum [ fromIntegral (Set.size (concOp (toL a) (toL b)))
+                  | a <- reps, b <- reps ]
+
+-- | Like 'latticeMaybeResult', but for /under/-approximating lattice ops:
+-- the abstract result is contained in the true value, so the right precision
+-- question is \"what fraction of the truth did we capture?\".
+--
+-- The CSV columns are inverted relative to the over-approx convention to
+-- keep the @precision@ percentage in the @[0, 100]%@ range:
+--
+--   * @abs@   column holds the /true/ (concrete) cardinality (denominator).
+--   * @conc@  column holds the /abstract/ cardinality (numerator).
+--
+-- That way @precision = conc \/ abs = |abstract| \/ |true|@, which is the
+-- under-approx analogue of the over-approx @precision = |true| \/ |abstract|@.
+-- 100% means exact; lower means more witnesses dropped.
+latticeUnderApproxMaybeResult ::
+  DomainEnum a ->
+  String ->
+  (a -> a -> Maybe a) ->
+  ([Natural] -> [Natural] -> Set.Set Natural) ->
+  Result
+latticeUnderApproxMaybeResult de name absOp concOp = Result name trueTot absTot
+  where
+    reps = deReps de
+    toL  = deToList de
+    absTot  = sum [ fromIntegral (maybe 0 (length . toL) (absOp a b))
+                  | a <- reps, b <- reps ]
+    trueTot = sum [ fromIntegral (Set.size (concOp (toL a) (toL b)))
                   | a <- reps, b <- reps ]
 
 ------------------------------------------------------------------------

@@ -208,6 +208,11 @@ can represent this visually as @[*.*.*.*.*.*.*.*.]@. Then pointwise addition
 be @s + s = s@. This is what our 'add' yields on the equivalent progressions,
 whereas SASI would yield ⊤.
 
+=== Additional related work
+
+For more discussion of related work, see /Interval Analysis and Machine
+Arithmetic: Why Signedness Ignorance Is Bliss/.
+
 == Testing strategy
 
 === Soundness
@@ -378,6 +383,9 @@ module What4.Domains.BV.Strides
   , pseudoMeetPrecise
   , pseudoJoin
   , pseudoJoinPrecise
+  , boundingBoxJoin
+  , lowerBound
+  , lowerBounds
   -- * Properties
   -- ** Generators
   , genDomain
@@ -512,6 +520,27 @@ module What4.Domains.BV.Strides
   , pseudoMeetPreciseTopIdentity
   , pseudoJoinTopAnnihilator
   , pseudoJoinPreciseTopAnnihilator
+  , correct_boundingBoxJoin
+  , boundingBoxJoinCommutative
+  , boundingBoxJoinIdempotent
+  , boundingBoxJoinTopAnnihilator
+  , boundingBoxJoinUpperBound
+  , boundingBoxJoinAssociative
+  , boundingBoxJoinMonotone
+  , pseudoJoinDominatesBoundingBoxJoin
+  , lowerBoundDominatedByPseudoMeet
+  , correct_lowerBound
+  , lowerBoundLeqExactBoth
+  , lowerBoundCommutative
+  , lowerBoundIdempotent
+  , lowerBoundTopIdentity
+  , lowerBoundIsLargestLowerBound
+  , correct_lowerBounds
+  , lowerBoundsAllSubsets
+  , trimSelfWrapNotSelfWrapping
+  , trimSelfWrapSubset
+  , trimSelfWrapIdentity
+  , trimSelfWrapIdempotent
   ) where
 
 import           Control.Exception (assert)
@@ -1724,17 +1753,73 @@ ror w = liftBitwise2 w (B.rorAbstract w)
 --
 -- [Absorption] @∀ a b. a ⊓ (a ⊔ b) = a@ and @a ⊔ (a ⊓ b) = a@.
 --
--- 'pseudoMeet' (resp. 'pseudoJoin') satisfies:
+-- This module exports four pseudo-meet\/join operators sitting at different
+-- points in the precision\/structure trade-off. The table below summarizes
+-- which lattice axioms each one satisfies (y), fails (n), or satisfies only
+-- under a side condition (~).
 --
--- * Soundness (over-approximation): 'correct_pseudoMeet', 'correct_pseudoJoin'.
--- * Idempotence: 'pseudoMeetIdempotent', 'pseudoJoinIdempotent'.
--- * Commutativity: 'pseudoMeetCommutative', 'pseudoJoinCommutative'.
--- * Lower bound (resp. upper bound): 'pseudoMeetLowerBound',
---   'pseudoJoinUpperBound', /restricted/ to operands that don't wrap mod @2^w@.
--- * Top identity (resp. annihilator): 'pseudoMeetTopIdentity',
---   'pseudoJoinTopAnnihilator'.
+-- @
+--                        pseudoMeet  pseudoJoin  boundingBoxJoin  lowerBound
+-- Soundness                  y           y          y                y
+-- Idempotence                y           y          ~1               ~2
+-- Commutativity              y           y          y                y
+-- Lower\/Upper bound         ~3          ~3         y                y
+-- Associativity              n           n          y                n
+-- Monotonicity               n           n          ~4               n
+-- Top identity\/annihilator  y           y          y                ~2
+-- Absorption                 n           n          n                n
+-- @
 --
--- They do /not/ satisfy associativity, monotonicity, or absorption.
+-- Side-condition keys for @~@:
+--
+-- [@~1@] equality holds modulo collapsing the stride to 1 (e.g.
+--        @boundingBoxJoin a a@ has the same elements as @a@ but with stride 1).
+--
+-- [@~2@] axiom holds when the operand doesn't wrap mod @2^w@ as integers
+--        (i.e. @start + n·stride <= mask@).
+--
+-- [@~3@] axiom holds when neither operand self-wraps (i.e. @n·stride <= mask@).
+--
+-- [@~4@] axiom holds when no operand wraps mod @2^w@ (i.e.
+--        @start + n·stride <= mask@). 'A.ubounds' collapses any wrapping
+--        interval to @(0, mask)@, so 'hull' is non-monotone on wrapping
+--        inputs; 'boundingBoxJoin' inherits that gap.
+--
+-- Notes:
+--
+-- * Soundness for 'pseudoMeet', 'pseudoJoin', and 'boundingBoxJoin' is
+--   /over/-approximation: every concrete element of the intersection (resp.
+--   union) is in the result. Soundness for 'lowerBound' is
+--   /under/-approximation: every result element is in both operands (the
+--   converse may fail).
+--
+-- Trade-off summary:
+--
+-- * 'pseudoMeet' \/ 'pseudoJoin': precision-first. Preserve stride information
+--   by coset refinement (over the tightest 'toArith' cover of each operand,
+--   including coset arcs on self-wrapping inputs), at the cost of
+--   associativity and monotonicity.
+--
+-- * 'boundingBoxJoin': structure-first. Routes through 'A.range' on the @min@\/@max@
+--   of each operand's hull-based unsigned bounds — no shorter-arc heuristic,
+--   so the operator is /associative/ and /monotone/. Saturates to 'top'
+--   whenever either operand wraps mod @2^w@; pick this for fixpoint
+--   iteration or widening, where saturation on wrap is acceptable.
+--
+-- * 'lowerBound': sound /under/-approximation. The result's elements are
+--   guaranteed to be in both operands (the genuine lower-bound property),
+--   at the cost of dropping witnesses 'pseudoMeet' would keep. Use for
+--   path-condition refinement, where adding witnesses is unsound.
+--
+-- /Precision dominance:/ on the over-approximating join side, 'pseudoJoin'
+-- and 'boundingBoxJoin' are /incomparable as sets/ (because 'A.join' inside
+-- 'pseudoJoin' picks the shorter possibly-wrapping arc while 'boundingBoxJoin' always
+-- picks the non-wrapping bounding box), but 'pseudoJoin' is at least as precise
+-- by /cardinality/: @size (pseudoJoin a b) <= size (boundingBoxJoin a b)@. See
+-- 'pseudoJoinDominatesBoundingBoxJoin'. On the meet side, 'lowerBound' is below
+-- 'pseudoMeet' when both are non-empty under subset dominance (they bound
+-- the true intersection from opposite sides); see
+-- 'lowerBoundDominatedByPseudoMeet'.
 --
 -- To see that strides do not form a (semi-)lattice, consider that two
 -- progressions can have a set of common lower (resp. upper) bounds with no
@@ -1751,6 +1836,20 @@ ror w = liftBitwise2 w (B.rorAbstract w)
 -- Uses 'leq' (the cheap reflexive+transitive variant) for the containment
 -- short-circuits. See 'pseudoMeetPrecise' for the variant that uses 'leqExact'
 -- short-circuits.
+--
+-- /Lattice axioms:/
+--
+-- * Soundness (over-approximation): yes ('correct_pseudoMeet').
+-- * Idempotence: yes ('pseudoMeetIdempotent').
+-- * Commutativity: yes ('pseudoMeetCommutative').
+-- * Lower bound: yes when neither operand wraps mod @2^w@ ('pseudoMeetLowerBound').
+-- * Top identity: yes ('pseudoMeetTopIdentity').
+-- * Associativity: /no/.
+-- * Monotonicity: /no/.
+-- * Absorption: /no/.
+--
+-- /Precision:/ contains 'lowerBound' when both are non-empty
+-- ('lowerBoundDominatedByPseudoMeet').
 pseudoMeet ::
   (1 <= w) =>
   NatRepr w ->
@@ -1987,6 +2086,20 @@ fullCoset w c =
 --
 -- Uses 'leq' for the containment short-circuits. See 'pseudoJoinPrecise' for
 -- the variant that uses 'leqExact'.
+--
+-- /Lattice axioms:/
+--
+-- * Soundness (over-approximation): yes ('correct_pseudoJoin').
+-- * Idempotence: yes ('pseudoJoinIdempotent').
+-- * Commutativity: yes ('pseudoJoinCommutative').
+-- * Upper bound: yes when neither operand wraps mod @2^w@ ('pseudoJoinUpperBound').
+-- * Top annihilator: yes ('pseudoJoinTopAnnihilator').
+-- * Associativity: /no/.
+-- * Monotonicity: /no/.
+-- * Absorption: /no/.
+--
+-- /Precision:/ the most precise join — contained in 'boundingBoxJoin'
+-- ('pseudoJoinDominatesBoundingBoxJoin').
 pseudoJoin :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 pseudoJoin w a b
   | leq a b = b
@@ -2012,12 +2125,185 @@ pseudoJoinStrides w a b =
       -- Result coset stride: powers of two divide gcd-down to the min.
       !g0    = min (strideGcd a) (strideGcd b)
       !g     = if delta == 0 then g0 else min g0 (lowestSetBit delta)
-      !arc   = A.join (hull a) (hull b)
+      !arc   = A.join (toArith a) (toArith b)
   in case fromArith w arc of
        Nothing  -> mk w 0 1 (mask a)  -- shouldn't happen on proper inputs
        Just dom -> case restrictToCoset w dom (start a) g of
          Nothing  -> mk w 0 1 (mask a)
          Just dom' -> dom'
+
+-- | /O(w)/. Bounding-box join: 'A.range' on the @min@\/@max@ of each
+-- operand's unsigned bounds. Computed without going through 'A.join's
+-- shorter-arc heuristic, so the operator is associative and monotone.
+--
+-- Saturates to 'top' whenever either operand wraps mod @2^w@, since
+-- 'A.ubounds' on a wrapping interval reports @(0, mask)@.
+--
+-- Use when the lattice properties matter (fixpoint iteration, widening)
+-- and saturation on wrap is acceptable.
+--
+-- /Lattice axioms:/
+--
+-- * Soundness (over-approximation): yes ('correct_boundingBoxJoin').
+-- * Idempotence: yes, modulo collapsing the stride to 1 ('boundingBoxJoinIdempotent').
+-- * Commutativity: yes ('boundingBoxJoinCommutative').
+-- * Upper bound: yes ('boundingBoxJoinUpperBound'), unconditional.
+-- * Top annihilator: yes ('boundingBoxJoinTopAnnihilator').
+-- * Associativity: yes ('boundingBoxJoinAssociative'). 'min' and 'max' are
+--   associative, and that's the whole computation.
+-- * Monotonicity: yes /when no operand wraps mod @2^w@/
+--   ('boundingBoxJoinMonotone'); 'hull' is non-monotone on wrapping inputs
+--   (because 'A.ubounds' collapses them), and 'boundingBoxJoin' inherits
+--   that gap.
+-- * Absorption: /no/ (no corresponding meet that performs the dual).
+--
+-- /Precision:/ the coarsest join here — contains 'pseudoJoin'
+-- ('pseudoJoinDominatesBoundingBoxJoin').
+boundingBoxJoin ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w -> Domain w -> Domain w
+boundingBoxJoin w a b =
+  assert (proper a) $
+  assert (proper b) $
+  let (la, ha) = A.ubounds (hull a)
+      (lb, hb) = A.ubounds (hull b)
+  in case fromArith w (A.range w (min la lb) (max ha hb)) of
+       Just c  -> c
+       Nothing -> top w  -- 'A.range' of non-empty bounds is never bottom
+
+-- | /O(w)/. A strided lower bound on the intersection: a sound
+-- /under/-approximation. Note this is /not/ the greatest lower bound —
+-- the lattice of strided sets has no g.l.b. for incomparable elements (cf.
+-- 'pseudoMeet'). For any concrete value @x@, if @x@ is a member of @lowerBound
+-- a b@, then @x@ is a member of both @a@ and @b@. The converse may fail:
+-- 'lowerBound' may /miss/ witnesses that lie outside its strided shape, but it
+-- never invents any.
+--
+-- Returns the /largest/ candidate (by 'size') from 'lowerBounds'; use
+-- 'lowerBounds' directly when you need every sub-progression.
+--
+-- Distinct from 'pseudoMeet' (a sound /over/-approximation): 'lowerBound' is the
+-- right tool for path-condition refinement, where adding witnesses would be
+-- unsound.
+--
+-- /Lattice axioms:/
+--
+-- * Soundness (under-approximation): yes ('correct_lowerBound') — every
+--   element of the result is in both operands.
+-- * Lower bound (genuine): yes ('lowerBoundLeqExactBoth') — unconditional,
+--   unlike 'pseudoMeetLowerBound' which is restricted to non-wrapping operands.
+-- * Idempotence: yes when the operand is non-wrap-mod-@2^w@
+--   ('lowerBoundIdempotent'); otherwise the result is a strict subset.
+-- * Commutativity: yes ('lowerBoundCommutative').
+-- * Top identity: yes when the operand is non-wrap-mod-@2^w@
+--   ('lowerBoundTopIdentity').
+-- * Associativity: /no/ — picking the largest candidate makes the choice
+--   value-dependent, breaking compositionality.
+-- * Monotonicity: /no/ — 'lowerBound' may drop witnesses, and which witnesses
+--   are dropped depends on stride alignment.
+-- * Absorption: /no/.
+--
+-- /Precision:/ contained in 'pseudoMeet' (when both are non-empty); they
+-- bound the true intersection from opposite sides
+-- ('lowerBoundDominatedByPseudoMeet').
+--
+-- @
+-- a:      [*.*.*.*.*.......]   start 0,  stride 2, n 4: {0,2,4,6,8}
+-- b:      [*..*..*..*..*...]   start 0,  stride 3, n 4: {0,3,6,9,12}
+-- 'lowerBound':  [*.....*.........]   start 0,  stride 6, n 1: {0,6}
+-- @
+lowerBound ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  Domain w ->
+  Maybe (Domain w)
+-- Operands that wrap mod @2^w@ are handled by 'ssplit'-ing each into its
+-- non-wrapping pieces and returning the first non-empty arc-meet; this is
+-- still a sound under-approximation, since each piece is a subset of the
+-- corresponding operand. Self-wrapping operands (whose orbits revisit the
+-- starting point without exhausting the coset) are first dropped to their
+-- longest non-self-wrapping prefix @(start, stride, (mask - start)/stride)@
+-- — also a subset of the original orbit — and then handled the same way.
+lowerBound w a b =
+  assert (proper a) $
+  assert (proper b) $
+  assert (mask a == mask b) $
+  case lowerBounds w a b of
+    []     -> Nothing
+    (c:cs) -> Just (List.foldl' pickLarger c cs)
+  where
+    pickLarger x y = if size y > size x then y else x
+
+-- | /O(w)/. Like 'lowerBound', but returns /every/ valid sub-progression
+-- arc-meet found across the @ssplit@ pairing. Each element is a sound
+-- under-approximation of the intersection on its own; the union of all
+-- elements is exactly the (split-aware) intersection of @a@ and @b@. Use
+-- when the precision of a single 'lowerBound' result is insufficient.
+--
+-- The list is empty iff 'lowerBound' would return 'Nothing'. Since each
+-- operand 'ssplit's into at most two pieces, at most four candidates are
+-- returned; they may overlap or be individually mergeable, but are left
+-- separate here.
+lowerBounds ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  Domain w ->
+  [Domain w]
+lowerBounds w a b =
+  assert (proper a) $
+  assert (proper b) $
+  assert (mask a == mask b) $
+  case () of
+    _ | n a == 0 -> [a | member b (start a)]
+      | n b == 0 -> [b | member a (start b)]
+      -- Self-wrapping operands are first reduced to a non-self-wrapping
+      -- sub-progression via 'trimSelfWrap' (still a subset of the original
+      -- orbit, so the under-approximation contract is preserved).
+      | otherwise ->
+          let !aTrim = trimSelfWrap w a
+              !bTrim = trimSelfWrap w b
+              -- 'ssplit' partitions each operand into 1-or-2 non-wrap-mod-@2^w@
+              -- pieces /exactly/. 'arcMeetClosed' on each pair is exact;
+              -- collect every non-empty pair.
+              pairs = [ (pa, pb) | pa <- ssplit w aTrim, pb <- ssplit w bTrim ]
+          in [ c | (pa, pb) <- pairs, Just c <- [arcMeetClosed w pa pb] ]
+
+-- | /O(1)/. If @c@ self-wraps, drop to a non-self-wrapping sub-progression
+-- of @c@'s orbit. Otherwise return @c@ unchanged. Used by 'lowerBound' to
+-- extract a sound under-approximation from a self-wrapping operand.
+--
+-- Picks the longer of two segments:
+--
+-- * /Lap 0/: indices @[0, (mask - start)/stride]@ — the naive prefix from
+--   @start@ before the orbit first wraps past @mask@.
+-- * /Lap 1/: indices @[ceil((2^w - start)/stride), ...]@ — the segment
+--   immediately after the first wrap, which has fresh @[0, 2^w)@ runway and
+--   so is often longer when @start@ is close to @mask@.
+--
+-- Both are non-self-wrapping sub-orbits of @c@, so the result is a subset of
+-- @c@. Later laps could in principle be even longer, but lap 1's length
+-- already matches the maximum interior-lap length up to a single element,
+-- so going further is rarely worth the extra arithmetic.
+trimSelfWrap :: NatRepr w -> Domain w -> Domain w
+trimSelfWrap w c@Domain{start = s, stride = t, n = nn, mask = m}
+  | Prelude.not (isSelfWrapping c) = c
+  | lap1Count > lap0Count =
+      mk w ((s + lap1Start * t) .&. m) t (lap1End - lap1Start)
+  | otherwise = mk w s t lap0End
+  where
+    !modulus = m + 1
+    !lap0End   = min nn ((m - s) `Prelude.div` t)
+    !lap0Count = lap0End + 1
+    -- @lap1Start@: smallest @i ≥ 1@ with @s + i·t ≥ modulus@.
+    !lap1Start = ((modulus - s) + t - 1) `Prelude.div` t
+    -- @lap1End@: largest @i@ with @s + i·t < 2·modulus@, capped at @n@.
+    !lap1End   = min nn ((2 * modulus - 1 - s) `Prelude.div` t)
+    !lap1Count = if lap1Start <= nn && lap1Start <= lap1End
+                 then lap1End - lap1Start + 1
+                 else 0
 
 -- ------------------------------------------------------------------
 -- * Generators
@@ -3080,6 +3366,257 @@ pseudoJoinPreciseTopAnnihilator w a =
   proper a ==>
     let ab = pseudoJoinPrecise w a (top w)
     in property (leqExact ab (top w) && leqExact (top w) ab)
+
+
+-- | 'boundingBoxJoin' is sound: every element of either operand is in the result.
+correct_boundingBoxJoin ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_boundingBoxJoin w a x b _y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==>
+      property (member (boundingBoxJoin w a b) x)
+
+-- | 'boundingBoxJoin' is commutative.
+boundingBoxJoinCommutative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+boundingBoxJoinCommutative w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    let ab = boundingBoxJoin w a b
+        ba = boundingBoxJoin w b a
+    in property (leqExact ab ba && leqExact ba ab)
+
+-- | 'boundingBoxJoin' is idempotent up to 'leqExact' (collapses to the stride-1
+-- arith hull of the operand) when the operand doesn't wrap mod @2^w@.
+-- Wrapping operands saturate 'A.ubounds' to @(0, mask)@, so 'boundingBoxJoin' on
+-- two copies of a wrapping operand returns 'top', not the operand.
+boundingBoxJoinIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+boundingBoxJoinIdempotent w a =
+  proper a ==>
+    Prelude.not (start a + n a * stride a > mask a) ==>
+      let aa = boundingBoxJoin w a a
+      in property (leqExact aa (hullCover w a) && leqExact (hullCover w a) aa)
+
+-- | @boundingBoxJoin a top@ is 'top'.
+boundingBoxJoinTopAnnihilator ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+boundingBoxJoinTopAnnihilator w a =
+  proper a ==>
+    let ab = boundingBoxJoin w a (top w)
+    in property (leqExact ab (top w) && leqExact (top w) ab)
+
+-- | 'boundingBoxJoin' is an upper bound on the stride-1 hull of each operand.
+boundingBoxJoinUpperBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+boundingBoxJoinUpperBound w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    let ab = boundingBoxJoin w a b
+    in property (leqExact (hullCover w a) ab && leqExact (hullCover w b) ab)
+
+-- | 'boundingBoxJoin' is associative — the headline win over 'hullJoin' and 'pseudoJoin'.
+boundingBoxJoinAssociative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+boundingBoxJoinAssociative w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      let lhs = boundingBoxJoin w (boundingBoxJoin w a b) c
+          rhs = boundingBoxJoin w a (boundingBoxJoin w b c)
+      in property (leqExact lhs rhs && leqExact rhs lhs)
+
+-- | 'boundingBoxJoin' is monotone in the strides order /when no operand
+-- wraps mod @2^w@/ (i.e. @start + n·stride <= mask@). 'A.ubounds' collapses
+-- any wrapping interval to @(0, mask)@, so @hull@ is non-monotone on
+-- wrapping inputs; that gap leaks through 'boundingBoxJoin'.
+boundingBoxJoinMonotone ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+boundingBoxJoinMonotone w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      Prelude.not (wraps a) ==>
+        Prelude.not (wraps b) ==>
+          Prelude.not (wraps c) ==>
+            leqExact a b ==>
+              property (leqExact (boundingBoxJoin w a c) (boundingBoxJoin w b c))
+  where
+    wraps d = start d + n d * stride d > mask d
+
+-- | Precision dominance (cardinality only): the result of 'pseudoJoin' has
+-- no more elements than 'boundingBoxJoin'. Subset dominance does /not/ hold —
+-- 'A.join' inside 'pseudoJoin' picks the shorter (possibly-wrapping) arc
+-- while 'boundingBoxJoin' always picks the non-wrapping bounding box, and these can be
+-- incomparable as sets. They agree on size ordering because 'A.join' picks
+-- the /shorter/ of the two arcs and 'boundingBoxJoin' picks the (possibly longer)
+-- non-wrapping one, then 'pseudoJoin' further restricts to a coset.
+--
+-- Counterexample for subset dominance at @w=5@: @a={21}, b={0}@.
+-- @pseudoJoin@ wraps to @{21..31, 0}@ (12 elements); @boundingBoxJoin@ stays
+-- non-wrapping at @{0..21}@ (22 elements). Incomparable, but
+-- @|pseudoJoin| = 12 <= 22 = |boundingBoxJoin|@.
+pseudoJoinDominatesBoundingBoxJoin ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+pseudoJoinDominatesBoundingBoxJoin w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (size (pseudoJoin w a b) <= size (boundingBoxJoin w a b))
+
+-- | Precision dominance, cross-direction: 'lowerBound' is contained in
+-- 'pseudoMeet' (when both are non-empty). They bound the true intersection
+-- from opposite sides — 'lowerBound' from below (under-approx),
+-- 'pseudoMeet' from above (over-approx) — so any value in 'lowerBound a b'
+-- is in the true intersection, and hence in 'pseudoMeet a b'.
+--
+-- This implies @size (lowerBound a b) <= size (pseudoMeet a b)@.
+lowerBoundDominatedByPseudoMeet ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+lowerBoundDominatedByPseudoMeet w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case (lowerBound w a b, pseudoMeet w a b) of
+      (Nothing, _)        -> property True
+      (Just _, Nothing)   -> property False  -- lowerBound non-empty implies intersection non-empty
+      (Just lo, Just up)  -> property (leqExact lo up)
+
+-- | The stride-1 arith hull of @c@, embedded back into the strides domain.
+-- A helper for the upper-bound and idempotence properties of 'hullJoin' and
+-- 'boundingBoxJoin'.
+hullCover :: (1 <= w) => NatRepr w -> Domain w -> Domain w
+hullCover w c = case fromArith w (hull c) of
+  Just c' -> c'
+  Nothing -> c
+
+-- | 'lowerBound' is an /under/-approximation of intersection: every element of the
+-- result is a member of both operands.
+correct_lowerBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Natural -> Property
+correct_lowerBound w a b x =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case lowerBound w a b of
+      Nothing -> property True
+      Just c  -> member c x ==> property (member a x && member b x)
+
+-- | 'lowerBound' is a true lower bound: every element of the result is in both
+-- operands under 'leqExact'. Unlike 'pseudoMeetLowerBound' this holds
+-- unconditionally (no non-wrapping restriction), because 'lowerBound' bails out
+-- to 'Nothing' on wrapping inputs.
+lowerBoundLeqExactBoth ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+lowerBoundLeqExactBoth w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case lowerBound w a b of
+      Nothing -> property True
+      Just c  -> property (leqExact c a && leqExact c b)
+
+-- | 'lowerBound' is commutative.
+lowerBoundCommutative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+lowerBoundCommutative w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (eqMaybe (lowerBound w a b) (lowerBound w b a))
+
+-- | 'lowerBound' is idempotent on non-wrapping operands: @lowerBound a a == Just a@. (On
+-- wrapping operands 'lowerBound' returns 'Nothing' even when @a@ is non-empty —
+-- this is the under-approximation contract.)
+lowerBoundIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+lowerBoundIdempotent w a =
+  proper a ==>
+    Prelude.not (start a + n a * stride a > mask a) ==>
+      property (lowerBound w a a == Just a)
+
+-- | @lowerBound a top == Just a@ on non-wrapping operands.
+lowerBoundTopIdentity ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+lowerBoundTopIdentity w a =
+  proper a ==>
+    Prelude.not (start a + n a * stride a > mask a) ==>
+      case lowerBound w a (top w) of
+        Just c  -> property (leqExact c a && leqExact a c)
+        Nothing -> property False
+
+-- | 'lowerBound' returns the largest candidate from 'lowerBounds' by 'size'.
+-- This is the documented contract that distinguishes 'lowerBound' from a
+-- "first non-empty arc-meet" implementation.
+lowerBoundIsLargestLowerBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+lowerBoundIsLargestLowerBound w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case (lowerBound w a b, lowerBounds w a b) of
+      (Nothing, [])     -> property True
+      (Nothing, _)      -> property False
+      (Just _,  [])     -> property False
+      (Just c,  cs)     ->
+        property (size c == Prelude.maximum (map size cs))
+
+-- | 'lowerBounds' is sound: every element of every returned sub-progression
+-- is in both operands.
+correct_lowerBounds ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Natural -> Property
+correct_lowerBounds w a b x =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (Prelude.and
+                [ Prelude.not (member c x) || (member a x && member b x)
+                | c <- lowerBounds w a b
+                ])
+
+-- | Every result in 'lowerBounds' is contained in both operands under
+-- 'leqExact'. Stronger structural form of 'correct_lowerBounds'.
+lowerBoundsAllSubsets ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+lowerBoundsAllSubsets w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (Prelude.and [ leqExact c a && leqExact c b
+                          | c <- lowerBounds w a b
+                          ])
+
+-- | 'trimSelfWrap' produces a non-self-wrapping result.
+trimSelfWrapNotSelfWrapping ::
+  NatRepr w -> Domain w -> Property
+trimSelfWrapNotSelfWrapping w a =
+  proper a ==>
+    property (Prelude.not (isSelfWrapping (trimSelfWrap w a)))
+
+-- | 'trimSelfWrap' is sound as an under-approximation: the trimmed result
+-- is contained in the original orbit (every result element is in @a@).
+trimSelfWrapSubset ::
+  NatRepr w -> Domain w -> Property
+trimSelfWrapSubset w a =
+  proper a ==>
+    property (leqExact (trimSelfWrap w a) a)
+
+-- | 'trimSelfWrap' is the identity on non-self-wrapping inputs.
+trimSelfWrapIdentity ::
+  NatRepr w -> Domain w -> Property
+trimSelfWrapIdentity w a =
+  proper a ==>
+    Prelude.not (isSelfWrapping a) ==>
+      property (trimSelfWrap w a == a)
+
+-- | 'trimSelfWrap' is idempotent: applying it twice gives the same result
+-- as applying it once. Follows from 'trimSelfWrapNotSelfWrapping' (the
+-- result is non-self-wrapping) and 'trimSelfWrapIdentity' (a non-self-
+-- wrapping input is preserved).
+trimSelfWrapIdempotent ::
+  NatRepr w -> Domain w -> Property
+trimSelfWrapIdempotent w a =
+  proper a ==>
+    let !once  = trimSelfWrap w a
+        !twice = trimSelfWrap w once
+    in property (once == twice)
 
 -- | Equality of 'Maybe (Domain w)' under 'leqExact' (i.e., mutual containment).
 eqMaybe :: Maybe (Domain w) -> Maybe (Domain w) -> Bool
