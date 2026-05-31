@@ -92,12 +92,12 @@ precise_scale ::
 precise_scale w k c =
   S.proper c ==> sizeLeq w (S.scale w k c) (A.scale k (S.hull c))
 
--- Note: there is no @precise_mul@ (or @subset_mul@). Closed-form @mul@'s
--- cross-term @i·j·t1·t2@ walks the coset of @start'@ out of order, so
--- @n'@ overcounts when the walk revisits residues. The result is a coset
--- progression that is incomparable in cardinality (and as a set) with the
--- arith arc, even when both operands fit @[start, start + n·stride]@. The
--- principled fix is a reduced product Strides x Arith, which is future work.
+precise_mul ::
+  (1 <= w) =>
+  NatRepr w -> S.Domain w -> S.Domain w -> Property
+precise_mul w a b =
+  S.proper a ==> S.proper b ==>
+    sizeLeq w (S.mul w a b) (A.mul (S.hull a) (S.hull b))
 
 precise_udiv ::
   (1 <= w) =>
@@ -246,9 +246,13 @@ subset_sub w a b =
     Prelude.not (S.isSelfWrapping a) ==> Prelude.not (S.isSelfWrapping b) ==>
       subsetOf w (S.sub w a b) (A.add (S.toArith a) (A.negate (S.toArith b)))
 
--- Note: there is no @subset_mul@. Closed-form 'mul' walks the result coset
--- via the cross-term @i·j·t1·t2@ and lands outside the arith convex hull
--- even on non-self-wrapping inputs. See the @precise_mul@ note above.
+-- Note: there is no @subset_mul@. 'mulCorners' picks whichever anchor
+-- candidate has the smallest cardinality; when the winner isn't anchored
+-- at zbounds, the result lives on a coset offset from arith's arc, and
+-- the two over-approximations of the concrete product set diverge in
+-- incomparable directions (strides keeps coset structure, arith keeps
+-- arc structure). Empirically at @w = 4@, about 0.15% of non-self-wrap
+-- pairs are counterexamples.
 
 subset_scale ::
   (1 <= w) =>
@@ -390,6 +394,9 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
       do SW n <- genWidth
          precise_scale n <$> chooseInteger (0, maxUnsigned n)
                          <*> S.genDomain n
+  , genTest "precise_mul" $
+      do SW n <- genWidth
+         precise_mul n <$> S.genDomain n <*> S.genDomain n
   , genTest "precise_udiv" $
       do SW n <- genWidth
          precise_udiv n <$> S.genDomain n <*> S.genDomain n
