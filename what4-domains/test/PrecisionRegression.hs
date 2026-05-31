@@ -14,15 +14,16 @@ in turn. Setting @WHAT4_UPDATE_TEST_EXPECTATIONS=1@ refreshes both CSVs.
 module Main (main) where
 
 import           System.Environment (lookupEnv)
-import           System.Exit (exitFailure, exitSuccess)
 
+import           Test.Tasty (defaultMain, testGroup)
+
+import           PrecisionRegression.Common (domainTests)
 import qualified PrecisionRegression.Strides as StridesReg
-import           PrecisionRegression.Common (runDomain)
 import qualified PrecisionRegression.StridedInterval as SIReg
 
 main :: IO ()
 main = do
   update <- (== Just "1") <$> lookupEnv "WHAT4_UPDATE_TEST_EXPECTATIONS"
-  okStrides <- runDomain update StridesReg.csvPath StridesReg.results
-  okSi <- runDomain update SIReg.csvPath SIReg.results
-  if okStrides && okSi then exitSuccess else exitFailure
+  stridesTree <- domainTests update "Strides"         StridesReg.csvPath StridesReg.results
+  siTree      <- domainTests update "StridedInterval" SIReg.csvPath      SIReg.results
+  defaultMain $ testGroup "precision_regression" [stridesTree, siTree]
