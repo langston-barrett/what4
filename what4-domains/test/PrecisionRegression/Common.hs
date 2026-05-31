@@ -11,10 +11,11 @@ Shared infrastructure for the precision regression test:
   * Aggregator helpers ('unaryResult', 'binaryResult',
     'binaryResultFiltered', 'scaleResult', 'latticeResult') that turn an
     abstract op + a concrete op into a precision 'Result'.
-  * CSV rendering and the per-domain compare/update driver ('runDomain').
+  * CSV rendering and the per-domain compare/update driver ('domainTests').
 -}
 
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeApplications #-}
 
 module PrecisionRegression.Common
@@ -41,19 +42,25 @@ module PrecisionRegression.Common
   , cShl, cLshr, cAshr, cRol, cRor
   , cJoin, cMeet
     -- * Driver
-  , runDomain
+  , domainTests
   ) where
 
 import           Data.Bits ((.&.), shiftL, shiftR)
 import qualified Data.Bits as Bits
 import           Data.List (sort)
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import           Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
 import           Numeric.Natural (Natural)
-import           System.IO (hPutStrLn, stderr)
 
 import           Data.Parameterized.NatRepr (NatRepr, knownNat, maxUnsigned)
 
 import qualified What4.Domains.BV.Strides as S
+
+import           Test.Tasty (TestTree, testGroup)
+import           Test.Tasty.HUnit (testCase, (@?=))
 
 ------------------------------------------------------------------------
 -- Width 4
@@ -294,44 +301,61 @@ cMeet xs ys = Set.fromList xs `Set.intersection` Set.fromList ys
 ------------------------------------------------------------------------
 -- CSV rendering
 
-renderCsv :: [Result] -> String
-renderCsv rs = unlines ("op,abs,conc,precision" : map formatRow rs)
+renderCsv :: [Result] -> Text
+renderCsv rs = T.unlines (T.pack "op,abs,conc,precision" : map formatRow rs)
 
-formatRow :: Result -> String
+formatRow :: Result -> Text
 formatRow r =
-  resOp r ++ "," ++ show (resAbs r) ++ "," ++ show (resConc r)
-    ++ "," ++ formatPercent (resConc r) (resAbs r)
+  T.intercalate (T.singleton ',')
+    [ T.pack (resOp r)
+    , T.pack (show (resAbs r))
+    , T.pack (show (resConc r))
+    , formatPercent (resConc r) (resAbs r)
+    ]
 
 -- | @num \/ denom@ as a percentage to 1 decimal place.
-formatPercent :: Integer -> Integer -> String
+formatPercent :: Integer -> Integer -> Text
 formatPercent num denom
-  | denom == 0 = "0.0%"
+  | denom == 0 = T.pack "0.0%"
   | otherwise =
       let perMille = (num * 1000) `div` denom
           (whole, frac) = perMille `divMod` 10
-      in show whole ++ "." ++ show frac ++ "%"
+      in T.pack (show whole ++ "." ++ show frac ++ "%")
+
+------------------------------------------------------------------------
+-- CSV parsing
+
+-- | Parse a CSV into a map from op name to (abs, conc) row.  The header
+-- line and the precision column are ignored; only abs and conc are used
+-- so that floating-point formatting differences never cause false misses.
+parseCsv :: Text -> Map.Map Text (Integer, Integer)
+parseCsv txt = Map.fromList
+  [ (op, (read (T.unpack absT), read (T.unpack concT)))
+  | line <- drop 1 (T.lines txt)
+  , let cols = T.splitOn (T.singleton ',') line
+  , [op, absT, concT, _prec] <- [cols]
+  ]
 
 ------------------------------------------------------------------------
 -- Driver
 
--- | Compare or refresh one per-domain CSV. Returns 'True' on success.
-runDomain :: Bool -> FilePath -> [Result] -> IO Bool
-runDomain update path results =
-  let actual = renderCsv results in
+-- | Build a 'TestTree' for one domain.  In update mode the CSV is
+-- rewritten and every test trivially passes; in normal mode each op
+-- becomes one HUnit test that checks (abs, conc) against the stored row.
+domainTests :: Bool -> String -> FilePath -> [Result] -> IO TestTree
+domainTests update label path results =
   if update
     then do
-      writeFile path actual
+      TIO.writeFile path (renderCsv results)
       putStrLn ("Wrote " ++ path)
-      pure True
+      pure $ testGroup label
+        [ testCase (resOp r) (pure ()) | r <- results ]
     else do
-      expected <- readFile path
-      if expected == actual
-        then do
-          putStrLn ("OK: " ++ path ++ " is up to date")
-          pure True
-        else do
-          hPutStrLn stderr $
-            path ++ " is out of date. Expected:\n"
-            ++ expected ++ "\nActual:\n" ++ actual
-            ++ "\nRun with WHAT4_UPDATE_TEST_EXPECTATIONS=1 to refresh."
-          pure False
+      csv <- TIO.readFile path
+      let expected = parseCsv csv
+      pure $ testGroup label
+        [ testCase (resOp r) $
+            Map.lookup (T.pack (resOp r)) expected @?=
+              Just (resAbs r, resConc r)
+        | r <- results
+        ]
