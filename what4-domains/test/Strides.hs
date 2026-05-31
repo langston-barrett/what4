@@ -248,6 +248,36 @@ tests = TT.testGroup "Strides"
   , genTest "correct_mul" $
       do SW n <- genWidth
          S.correct_mul n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_mulCorners" $
+      do SW n <- genWidth
+         S.correct_mulCorners n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_mulNoStraddleU" $
+      do SW n <- genWidth
+         S.correct_mulNoStraddleU n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_mulNoStraddleS" $
+      do SW n <- genWidth
+         S.correct_mulNoStraddleS n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_scaleSingleton" $
+      do SW n <- genWidth
+         S.correct_scaleSingleton n <$> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "zboundsArcSameModular" $
+      do SW n <- genWidth
+         S.zboundsArcSameModular <$> S.genDomain n
+  , genTest "zboundsArcMinMidpoint" $
+      do SW n <- genWidth
+         S.zboundsArcMinMidpoint <$> S.genDomain n
+  , genTest "cornerArcEncloses" $
+      do SW n <- genWidth
+         S.cornerArcEncloses <$> S.genDomain n <*> S.genDomain n <*> genNatBV n <*> genNatBV n
+  , genTest "cornerProductStrideDivides" $
+      do SW n <- genWidth
+         S.cornerProductStrideDivides <$> S.genDomain n <*> S.genDomain n <*> genNatBV n <*> genNatBV n
+  , genTest "clpStepBoundSound" $
+      do SW n <- genWidth
+         S.clpStepBoundSound <$> S.genDomain n <*> S.genDomain n <*> genNatBV n <*> genNatBV n
+  , genTest "arcStepBoundSound" $
+      do SW n <- genWidth
+         S.arcStepBoundSound <$> S.genDomain n <*> S.genDomain n <*> genNatBV n <*> genNatBV n
   , genTest "correct_udiv" $
       do SW n <- genWidth
          S.correct_udiv n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n

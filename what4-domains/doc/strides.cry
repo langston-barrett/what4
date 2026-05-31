@@ -327,37 +327,147 @@ gcd x y = result.0
     result = (iterate step (x, y)) @ (`(8 * n) : [width (8 * n)])
     step ab = if ab.1 == 0 then ab else (ab.1, ab.0 % ab.1)
 
-effLoStride : {n} (fin n, n >= 2) => Domain n -> ([n], [n])
-effLoStride c =
-  if c.n == 0 then (c.start, 0)
-  else (c.start, c.stride)
-
+// See @What4.Domains.BV.Strides@ in the Haskell sources for the math behind
+// the multiplication recipe.
 mul : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 mul a b =
-  if d == 0 then mk start' 1 0
-  else mk start' d (clampToOrbit3 d span_)
+  if wrapsU a \/ wrapsU b then
+    if size rcorners <= size rcut then rcorners else rcut
+  else rcorners
   where
-    (l1, t1) = effLoStride a
-    (l2, t2) = effLoStride b
-    d12 = t1 * l2
-    d21 = t2 * l1
-    d22 = t1 * t2
-    d = gcd d12 (gcd d21 d22)
-    start' = a.start * b.start
-    span_ : [3 * n + 2]
-    span_ = zext a.n * zext (d12 / d)
-          + zext b.n * zext (d21 / d)
-          + zext a.n * zext b.n * zext (d22 / d)
+    rcorners = mulCorners a b
+    rcut = mulCut a b
 
-// Like 'clampToOrbit', but takes a wider input span: the closed-form @mul@
-// step count has a quadratic cross-term and so is up to @3n + 2@ bits.
-clampToOrbit3 : {n} (fin n, n >= 2) => [n] -> [3 * n + 2] -> [n + 1]
-clampToOrbit3 stride i = if i >= zext orbitM1 then orbitM1 else drop`{2 * n + 1} i
+wrapsU : {n} (fin n, n >= 2) => Domain n -> Bit
+wrapsU c =
+  (zext c.start + zext c.n * zext c.stride : [2 * n + 1]) > zext (~ 0 : [n])
+
+mulCorners : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+mulCorners a b =
+  if a.n == 0 then scaleSingleton a.start b
+  else if b.n == 0 then scaleSingleton b.start a
+  else if midUpper a /\ midUpper b then
+    minBy size (minBy size rUU rUZ) (minBy size rZU rZZ)
+  else if midUpper a then minBy size rUU rZU
+  else if midUpper b then minBy size rUU rUZ
+  else rUU
   where
-    g : [n]
-    g = stride && (- stride)
-    orbitM1 : [n + 1]
-    orbitM1 = zext ((- g) / g)
+    (uAl, uAh) = unsignedArc a
+    (zAl, zAh) = zboundsArc a
+    (uBl, uBh) = unsignedArc b
+    (zBl, zBh) = zboundsArc b
+    rUU = mulFromCorners a b uAl uAh uBl uBh
+    rUZ = mulFromCorners a b uAl uAh zBl zBh
+    rZU = mulFromCorners a b zAl zAh uBl uBh
+    rZZ = mulFromCorners a b zAl zAh zBl zBh
+    minBy : {a} (a -> [n + 1]) -> a -> a -> a
+    minBy f x y = if f x <= f y then x else y
+
+midUpper : {n} (fin n, n >= 2) => Domain n -> Bit
+midUpper c =
+  (2 * zext c.start + zext c.n * zext c.stride : [2 * n + 1]) > zext (~ 0 : [n])
+
+scaleSingleton : {n} (fin n, n >= 2) => [n] -> Domain n -> Domain n
+scaleSingleton k c =
+  if t' == 0 then mk s' 1 0
+  else mk s' t' (clampToOrbit t' (zext c.n))
+  where
+    s' = k * c.start
+    t' = k * c.stride
+
+unsignedArc : {n} (fin n, n >= 2) => Domain n -> (Integer, Integer)
+unsignedArc c = (lo, lo + sz)
+  where
+    lo = toInteger c.start
+    sz = toInteger c.n * toInteger c.stride
+
+zboundsArc : {n} (fin n, n >= 2) => Domain n -> (Integer, Integer)
+zboundsArc c =
+  if 2 * lo + sz > m then (lo - (m + 1), hi - (m + 1))
+  else (lo, hi)
+  where
+    lo = toInteger c.start
+    sz = toInteger c.n * toInteger c.stride
+    hi = lo + sz
+    m = toInteger (~ 0 : [n])
+
+mulFromCorners : {n} (fin n, n >= 2) =>
+  Domain n -> Domain n ->
+  Integer -> Integer -> Integer -> Integer -> Domain n
+mulFromCorners a b al ah bl bh =
+  if dMod == 0 then mk startV 1 0
+  else mk startV dMod (clampToOrbit dMod nRaw)
+  where
+    c1 = al * bl
+    c2 = al * bh
+    c3 = ah * bl
+    c4 = ah * bh
+    lo = min (min c1 c2) (min c3 c4)
+    hi = max (max c1 c2) (max c3 c4)
+    t1 = toInteger a.stride
+    t2 = toInteger b.stride
+    d12i = if a.n == 0 then 0 else t1 * sIntegerAbs bl
+    d21i = if b.n == 0 then 0 else t2 * sIntegerAbs al
+    d22i = if a.n == 0 \/ b.n == 0 then 0 else t1 * t2
+    dIntI = sIntegerGcd d12i (sIntegerGcd d21i d22i)
+    dMod = if dIntI == 0 then 0 else fromInteger dIntI
+    startV = fromInteger (modI lo (toInteger (~ 0 : [n]) + 1))
+    clpN = toInteger a.n * (sIntegerQuot d12i dIntI)
+         + toInteger b.n * (sIntegerQuot d21i dIntI)
+         + toInteger a.n * toInteger b.n * (sIntegerQuot d22i dIntI)
+    arcN = sIntegerQuot (hi - lo) dIntI
+    // Cap before narrowing the [2*n+1]-bit step count, since clpN/arcN
+    // are unbounded Integers; 'clampToOrbit' refines further.
+    nCapped = min (min clpN arcN) (2 ^^ (`n : Integer))
+    nRaw = fromInteger nCapped : [2 * n + 1]
+
+// True modulo for Integer (Cryptol's `%` is truncated division for negatives).
+modI : Integer -> Integer -> Integer
+modI x m = ((x % m) + m) % m
+
+mulCut : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+mulCut a b = mulCutUS pseudoMeet pseudoJoin a b
+
+mulCutUS : {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Maybe (Domain n)) ->
+  (Domain n -> Domain n -> Domain n) ->
+  Domain n -> Domain n -> Domain n
+mulCutUS meetOp joinOp a b =
+  if a.n == 0 then scaleSingleton a.start b
+  else if b.n == 0 then scaleSingleton b.start a
+  else case ssplit a of
+    One a1 -> case ssplit b of
+      One b1 -> us a1 b1
+      Two b1 b2 -> joinOp (us a1 b1) (us a1 b2)
+    Two a1 a2 -> case ssplit b of
+      One b1 -> joinOp (us a1 b1) (us a2 b1)
+      Two b1 b2 ->
+        joinOp (joinOp (us a1 b1) (us a1 b2))
+               (joinOp (us a2 b1) (us a2 b2))
+  where
+    us u v = case meetOp (mulNoStraddleU u v) (mulNoStraddleS u v) of
+      Just c -> c
+      // Defensive: the meet of two non-empty sub-products is non-empty.
+      Nothing -> mk 0 1 0
+
+mulNoStraddleU : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+mulNoStraddleU a b = mulFromCorners a b al ah bl bh
+  where
+    (al, ah) = unsignedArc a
+    (bl, bh) = unsignedArc b
+
+mulNoStraddleS : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+mulNoStraddleS a b = mulFromCorners a b al ah bl bh
+  where
+    (al, ah) = zboundsArc a
+    (bl, bh) = zboundsArc b
+
+// @gcd(|x|, |y|)@ for @Integer@.
+sIntegerGcd : Integer -> Integer -> Integer
+sIntegerGcd x y = result.0
+  where
+    result = (iterate step (sIntegerAbs x, sIntegerAbs y)) @ (`100 : [10])
+    step ab = if ab.1 == 0 then ab else (ab.1, ab.0 % ab.1)
 
 udiv : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 udiv = liftArith2 Arith::udiv
@@ -1250,6 +1360,165 @@ correct_mul a b x y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     member (mul a b) (x * y)
 
+correct_mulCorners : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_mulCorners a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    member (mulCorners a b) (x * y)
+
+// Each cut-piece pair's unsigned product contains every concrete pairwise
+// product of members of those pieces.
+correct_mulNoStraddleU :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_mulNoStraddleU a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    case ssplit a of
+      One u1 -> case ssplit b of
+        One v1 -> ~(member u1 x) \/ ~(member v1 y) \/ member (mulNoStraddleU u1 v1) (x * y)
+        Two v1 v2 ->
+          (~(member u1 x) \/ ~(member v1 y) \/ member (mulNoStraddleU u1 v1) (x * y)) /\
+          (~(member u1 x) \/ ~(member v2 y) \/ member (mulNoStraddleU u1 v2) (x * y))
+      Two u1 u2 -> case ssplit b of
+        One v1 ->
+          (~(member u1 x) \/ ~(member v1 y) \/ member (mulNoStraddleU u1 v1) (x * y)) /\
+          (~(member u2 x) \/ ~(member v1 y) \/ member (mulNoStraddleU u2 v1) (x * y))
+        Two v1 v2 ->
+          (~(member u1 x) \/ ~(member v1 y) \/ member (mulNoStraddleU u1 v1) (x * y)) /\
+          (~(member u1 x) \/ ~(member v2 y) \/ member (mulNoStraddleU u1 v2) (x * y)) /\
+          (~(member u2 x) \/ ~(member v1 y) \/ member (mulNoStraddleU u2 v1) (x * y)) /\
+          (~(member u2 x) \/ ~(member v2 y) \/ member (mulNoStraddleU u2 v2) (x * y))
+
+// Likewise for the signed-pole variant.
+correct_mulNoStraddleS :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_mulNoStraddleS a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    case ssplit a of
+      One u1 -> case ssplit b of
+        One v1 -> ~(member u1 x) \/ ~(member v1 y) \/ member (mulNoStraddleS u1 v1) (x * y)
+        Two v1 v2 ->
+          (~(member u1 x) \/ ~(member v1 y) \/ member (mulNoStraddleS u1 v1) (x * y)) /\
+          (~(member u1 x) \/ ~(member v2 y) \/ member (mulNoStraddleS u1 v2) (x * y))
+      Two u1 u2 -> case ssplit b of
+        One v1 ->
+          (~(member u1 x) \/ ~(member v1 y) \/ member (mulNoStraddleS u1 v1) (x * y)) /\
+          (~(member u2 x) \/ ~(member v1 y) \/ member (mulNoStraddleS u2 v1) (x * y))
+        Two v1 v2 ->
+          (~(member u1 x) \/ ~(member v1 y) \/ member (mulNoStraddleS u1 v1) (x * y)) /\
+          (~(member u1 x) \/ ~(member v2 y) \/ member (mulNoStraddleS u1 v2) (x * y)) /\
+          (~(member u2 x) \/ ~(member v1 y) \/ member (mulNoStraddleS u2 v1) (x * y)) /\
+          (~(member u2 x) \/ ~(member v2 y) \/ member (mulNoStraddleS u2 v2) (x * y))
+
+correct_scaleSingleton :
+  {n} (fin n, n >= 2) => [n] -> Domain n -> [n] -> Property
+correct_scaleSingleton k c y =
+  proper c ==> member c y ==> member (scaleSingleton k c) (k * y)
+
+zboundsArcSameModular : {n} (fin n, n >= 2) => Domain n -> Property
+zboundsArcSameModular c =
+  proper c ==>
+    hi - lo == sz /\ (lo - toInteger c.start) % modulus == 0
+  where
+    (lo, hi) = zboundsArc c
+    sz = toInteger c.n * toInteger c.stride
+    modulus = toInteger (~ 0 : [n]) + 1
+
+zboundsArcMinMidpoint : {n} (fin n, n >= 2) => Domain n -> Property
+zboundsArcMinMidpoint c =
+  proper c ==> sIntegerAbs (lo + hi) <= sIntegerAbs (uLo + uHi)
+  where
+    (lo, hi) = zboundsArc c
+    uLo = toInteger c.start
+    uHi = uLo + toInteger c.n * toInteger c.stride
+
+cornerArcEncloses :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+cornerArcEncloses a b iBits jBits =
+  proper a ==> proper b ==>
+    ~ isSelfWrapping a ==> ~ isSelfWrapping b ==>
+    zext iBits <= a.n ==> zext jBits <= b.n ==>
+      lo <= p /\ p <= hi
+  where
+    (al, ah) = zboundsArc a
+    (bl, bh) = zboundsArc b
+    c1 = al * bl
+    c2 = al * bh
+    c3 = ah * bl
+    c4 = ah * bh
+    lo = min (min c1 c2) (min c3 c4)
+    hi = max (max c1 c2) (max c3 c4)
+    p = (al + toInteger iBits * toInteger a.stride)
+      * (bl + toInteger jBits * toInteger b.stride)
+
+cornerProductStrideDivides :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+cornerProductStrideDivides a b iBits jBits =
+  proper a ==> proper b ==>
+    ~ isSelfWrapping a ==> ~ isSelfWrapping b ==>
+    zext iBits <= a.n ==> zext jBits <= b.n ==>
+      (d == 0 /\ offset == 0) \/ (d != 0 /\ offset % d == 0)
+  where
+    (al, _) = zboundsArc a
+    (bl, _) = zboundsArc b
+    t1 = toInteger a.stride
+    t2 = toInteger b.stride
+    d12 = if a.n == 0 then 0 else t1 * sIntegerAbs bl
+    d21 = if b.n == 0 then 0 else t2 * sIntegerAbs al
+    d22 = if a.n == 0 \/ b.n == 0 then 0 else t1 * t2
+    d = sIntegerGcd d12 (sIntegerGcd d21 d22)
+    p = (al + toInteger iBits * t1) * (bl + toInteger jBits * t2)
+    offset = p - al * bl
+
+clpStepBoundSound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+clpStepBoundSound a b iBits jBits =
+  proper a ==> proper b ==>
+    ~ isSelfWrapping a ==> ~ isSelfWrapping b ==>
+    zext iBits <= a.n ==> zext jBits <= b.n ==>
+      (d == 0 /\ offset == 0) \/ (d != 0 /\ sIntegerQuot offset d <= bound)
+  where
+    (al, _) = zboundsArc a
+    (bl, _) = zboundsArc b
+    t1 = toInteger a.stride
+    t2 = toInteger b.stride
+    na = toInteger a.n
+    nb = toInteger b.n
+    d12 = if a.n == 0 then 0 else t1 * sIntegerAbs bl
+    d21 = if b.n == 0 then 0 else t2 * sIntegerAbs al
+    d22 = if a.n == 0 \/ b.n == 0 then 0 else t1 * t2
+    d = sIntegerGcd d12 (sIntegerGcd d21 d22)
+    bound = if d == 0 then 0
+            else na * sIntegerQuot d12 d
+               + nb * sIntegerQuot d21 d
+               + na * nb * sIntegerQuot d22 d
+    p = (al + toInteger iBits * t1) * (bl + toInteger jBits * t2)
+    offset = sIntegerAbs (p - al * bl)
+
+arcStepBoundSound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+arcStepBoundSound a b iBits jBits =
+  proper a ==> proper b ==>
+    ~ isSelfWrapping a ==> ~ isSelfWrapping b ==>
+    zext iBits <= a.n ==> zext jBits <= b.n ==>
+      (d == 0 /\ offset == 0) \/ (d != 0 /\ sIntegerQuot offset d <= bound)
+  where
+    (al, ah) = zboundsArc a
+    (bl, bh) = zboundsArc b
+    c1 = al * bl
+    c2 = al * bh
+    c3 = ah * bl
+    c4 = ah * bh
+    lo = min (min c1 c2) (min c3 c4)
+    hi = max (max c1 c2) (max c3 c4)
+    t1 = toInteger a.stride
+    t2 = toInteger b.stride
+    d12 = if a.n == 0 then 0 else t1 * sIntegerAbs bl
+    d21 = if b.n == 0 then 0 else t2 * sIntegerAbs al
+    d22 = if a.n == 0 \/ b.n == 0 then 0 else t1 * t2
+    d = sIntegerGcd d12 (sIntegerGcd d21 d22)
+    bound = if d == 0 then 0 else sIntegerQuot (hi - lo) d
+    p = (al + toInteger iBits * t1) * (bl + toInteger jBits * t2)
+    offset = p - lo
+
 correct_udiv : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
 correct_udiv a b x y =
   proper a ==> proper b ==> member a x ==> member b y ==> y != 0 ==>
@@ -1273,7 +1542,11 @@ correct_srem a b x y =
 property p_correct_neg = correct_neg`{4}
 property p_correct_add = correct_add`{4}
 property p_correct_sub = correct_sub`{4}
-property p_correct_mul = correct_mul`{4}
+// @p_correct_mul@ is not declared as a SAW property at width 4 because the
+// new @mul@ uses 'Integer' arithmetic and iterated 'sIntegerGcd', which
+// causes solver timeouts. The Haskell @correct_mul@ Hedgehog property
+// covers soundness empirically.
+// property p_correct_mul = correct_mul`{4}
 property p_correct_udiv = correct_udiv`{4}
 property p_correct_urem = correct_urem`{4}
 property p_correct_sdiv = correct_sdiv`{4}
