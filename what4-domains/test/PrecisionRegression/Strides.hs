@@ -53,8 +53,10 @@ results =
   , binaryResult stridesEnum "ror"  (S.ror  w4) cRor
   , latticeMaybeResult stridesEnum "pseudoMeet" (S.pseudoMeet w4) cMeet
   , latticeMaybeResult stridesEnum "pseudoMeetPrecise" (S.pseudoMeetPrecise w4) cMeet
+  , latticeUnderApproxMaybeResult stridesEnum "lowerBound" (S.lowerBound w4) cMeet
   , latticeResult stridesEnum "pseudoJoin" (S.pseudoJoin w4) cJoin
   , latticeResult stridesEnum "pseudoJoinPrecise" (S.pseudoJoinPrecise w4) cJoin
+  , latticeResult stridesEnum "boundingBoxJoin" (S.boundingBoxJoin w4) cJoin
   ]
 
 csvPath :: FilePath
