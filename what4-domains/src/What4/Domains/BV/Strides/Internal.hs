@@ -27,7 +27,7 @@ import           Control.Exception (assert)
 -- such pair exists; when one does, returns the lex-least solution.
 --
 -- The cost is dominated by the 'eGCD' call. When called from
--- 'What4.Domains.BV.Strides.meet' on width-@w@ inputs, both
+-- 'What4.Domains.BV.Strides.pseudoMeet' on width-@w@ inputs, both
 -- @a@ and @b@ are bounded by @2^w@, giving /O(log(2^w)) = O(w)/.
 --
 -- == Proof of correctness

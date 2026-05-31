@@ -1,5 +1,5 @@
 -- | Direct property tests for the internal helpers underlying
--- 'What4.Domains.BV.Strides.meet'\'s Diophantine path. These pin down the
+-- 'What4.Domains.BV.Strides.pseudoMeet'\'s Diophantine path. These pin down the
 -- algebraic spec of 'eGCD', 'ceilDivPos'\/'floorDivPos', and
 -- 'solveLinearDiophantine' itself, which 'correct_meet' cannot exercise
 -- directly.
