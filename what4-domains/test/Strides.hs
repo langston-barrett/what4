@@ -363,49 +363,84 @@ tests = TT.testGroup "Strides"
          S.correct_ror n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
 
   -- Lattice operations
-  , genTest "correct_meet" $
+  , genTest "correct_pseudoMeet" $
       do SW n <- genWidth
-         S.correct_meet n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
-  , genTest "correct_meetPrecise" $
+         S.correct_pseudoMeet n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_pseudoMeetPrecise" $
       do SW n <- genWidth
-         S.correct_meetPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
-  , genTest "meetCommutative" $
+         S.correct_pseudoMeetPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "pseudoMeetLowerBound" $
       do SW n <- genWidth
-         S.meetCommutative n <$> S.genDomain n <*> S.genDomain n
-  , genTest "meetPreciseCommutative" $
+         S.pseudoMeetLowerBound n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoMeetPreciseLowerBound" $
       do SW n <- genWidth
-         S.meetPreciseCommutative n <$> S.genDomain n <*> S.genDomain n
-  , genTest "meetIdempotent" $
+         S.pseudoMeetPreciseLowerBound n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoMeetCommutative" $
       do SW n <- genWidth
-         S.meetIdempotent n <$> S.genDomain n
-  , genTest "meetPreciseIdempotent" $
+         S.pseudoMeetCommutative n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoMeetPreciseCommutative" $
       do SW n <- genWidth
-         S.meetPreciseIdempotent n <$> S.genDomain n
-  , genTest "meetPreciseRefinesMeet" $
+         S.pseudoMeetPreciseCommutative n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoMeetIdempotent" $
       do SW n <- genWidth
-         S.meetPreciseRefinesMeet n <$> S.genDomain n <*> S.genDomain n
-  -- TODO: more precise meet. The current hull-based 'meet' fails
-  -- 'meetAssociative', 'meetPreciseAssociative', 'meetMonotone',
-  -- 'meetPreciseMonotone' because the hull projection collapses to a
-  -- stride-1 progression, breaking the lattice structure on subsequent
-  -- meets. A reduced product Strides x Arith (or a true gcd-based
-  -- meet via 'solveLinearDiophantine') would recover these. Tests are
-  -- commented out, but the predicates remain in 'What4.Domains.BV.Strides'
-  -- so coverage checks pass.
-  --
-  -- , genTest "meetAssociative" $
-  --     do SW n <- genWidth
-  --        S.meetAssociative n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
-  -- , genTest "meetPreciseAssociative" $
-  --     do SW n <- genWidth
-  --        S.meetPreciseAssociative n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
-  -- , genTest "meetMonotone" $
-  --     do SW n <- genWidth
-  --        S.meetMonotone n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
-  -- , genTest "meetPreciseMonotone" $
-  --     do SW n <- genWidth
-  --        S.meetPreciseMonotone n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
-
+         S.pseudoMeetIdempotent n <$> S.genDomain n
+  , genTest "pseudoMeetPreciseIdempotent" $
+      do SW n <- genWidth
+         S.pseudoMeetPreciseIdempotent n <$> S.genDomain n
+  , genTest "pseudoMeetPreciseRefinesMeet" $
+      do SW n <- genWidth
+         S.pseudoMeetPreciseRefinesMeet n <$> S.genDomain n <*> S.genDomain n
+  , genTest "nsplitUnion" $
+      do SW n <- genWidth
+         S.nsplitUnion n <$> S.genDomain n <*> genNatBV n
+  , genTest "nsplitDisjoint" $
+      do SW n <- genWidth
+         S.nsplitDisjoint n <$> S.genDomain n <*> genNatBV n
+  , genTest "ssplitUnion" $
+      do SW n <- genWidth
+         S.ssplitUnion n <$> S.genDomain n <*> genNatBV n
+  , genTest "ssplitDisjoint" $
+      do SW n <- genWidth
+         S.ssplitDisjoint n <$> S.genDomain n <*> genNatBV n
+  , genTest "correct_pseudoJoin" $
+      do SW n <- genWidth
+         S.correct_pseudoJoin n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_pseudoJoinPrecise" $
+      do SW n <- genWidth
+         S.correct_pseudoJoinPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "pseudoJoinUpperBound" $
+      do SW n <- genWidth
+         S.pseudoJoinUpperBound n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoJoinPreciseUpperBound" $
+      do SW n <- genWidth
+         S.pseudoJoinPreciseUpperBound n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoJoinCommutative" $
+      do SW n <- genWidth
+         S.pseudoJoinCommutative n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoJoinPreciseCommutative" $
+      do SW n <- genWidth
+         S.pseudoJoinPreciseCommutative n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoJoinIdempotent" $
+      do SW n <- genWidth
+         S.pseudoJoinIdempotent n <$> S.genDomain n
+  , genTest "pseudoJoinPreciseIdempotent" $
+      do SW n <- genWidth
+         S.pseudoJoinPreciseIdempotent n <$> S.genDomain n
+  , genTest "pseudoJoinPreciseRefinesJoin" $
+      do SW n <- genWidth
+         S.pseudoJoinPreciseRefinesJoin n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoMeetTopIdentity" $
+      do SW n <- genWidth
+         S.pseudoMeetTopIdentity n <$> S.genDomain n
+  , genTest "pseudoMeetPreciseTopIdentity" $
+      do SW n <- genWidth
+         S.pseudoMeetPreciseTopIdentity n <$> S.genDomain n
+  , genTest "pseudoJoinTopAnnihilator" $
+      do SW n <- genWidth
+         S.pseudoJoinTopAnnihilator n <$> S.genDomain n
+  , genTest "pseudoJoinPreciseTopAnnihilator" $
+      do SW n <- genWidth
+         S.pseudoJoinPreciseTopAnnihilator n <$> S.genDomain n
   -- @S.andPrecise@ and the bitwise lift are /incomparable/ on the
   -- 'leqExact' order: at @w = 4@, Z3 refutes both directions of dominance.
   -- These manual counter-examples were extracted from those refutations.
