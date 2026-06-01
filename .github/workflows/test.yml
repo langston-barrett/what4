@@ -94,6 +94,33 @@ jobs:
         shell: bash
         run: $NS -c cabal haddock what4-domains
 
+      - name: Doctests
+        shell: bash
+        run: |
+          curl \
+            --fail \
+            --location \
+            --proto '=https' \
+            --show-error \
+            --silent \
+            --tlsv1.2 \
+            https://github.com/phadej/cabal-extras/releases/download/cabal-docspec-0.0.0.20250606/cabal-docspec-0.0.0.20250606-x86_64-linux.xz \
+            | xz -d > /usr/local/bin/cabal-docspec
+          chmod +x /usr/local/bin/cabal-docspec
+          # cabal-docspec reads store-dir from ~/.cabal/config (legacy path).
+          # Ask cabal directly where its store is; fall back to probing both
+          # the XDG and legacy paths if the cabal version is too old for
+          # `cabal path`.
+          mkdir -p ~/.cabal
+          touch ~/.cabal/config
+          STORE=$($NS -c cabal path --store-dir 2>/dev/null) \
+            || { GHC_VER=$($NS -c ghc --numeric-version)
+                 for dir in "$HOME/.local/state/cabal/store" "$HOME/.cabal/store"; do
+                   if [ -d "$dir/ghc-$GHC_VER" ]; then STORE=$dir; break; fi
+                 done; }
+          [ -n "$STORE" ] && echo "store-dir: $STORE" >> ~/.cabal/config
+          $NS -c cabal-docspec what4-domains
+
       - uses: actions/cache/save@v5
         name: Save cabal store cache
         if: always()

@@ -88,6 +88,9 @@ which you can load into a REPL with
 python3 -ic "$(awk '\/^def diagram\/,\/^    return/' src\/What4\/Domains\/BV\/Strides.hs)"
 @
 
+A Haskell equivalent is the exported 'diagram' function; see its doctests on
+'mk' for examples.
+
 == Complexity
 
 This domain uses unbounded integers internally, and supports analysis of
@@ -315,6 +318,8 @@ module What4.Domains.BV.Strides
   , mask
   , end
   , proper
+  , diagram
+  , display
   -- * Construction
   , mk
   , top
@@ -541,6 +546,14 @@ module What4.Domains.BV.Strides
   , trimSelfWrapSubset
   , trimSelfWrapIdentity
   , trimSelfWrapIdempotent
+    -- * Re-exports
+    --
+    -- | Re-exported so doctests (and downstream users) obtain @knownNat@\/@NatRepr@
+    -- from the same @parameterized-utils@ build that 'mk' and friends were
+    -- compiled against, avoiding spurious type mismatches when more than one
+    -- build is visible in a GHCi session.
+  , NatRepr
+  , knownNat
   ) where
 
 import           Control.Exception (assert)
@@ -554,7 +567,7 @@ import qualified Data.Bits as Bits
 import qualified Data.List as List
 import qualified Data.Set as Set
 
-import           Data.Parameterized.NatRepr (NatRepr, LeqProof(..), maxUnsigned)
+import           Data.Parameterized.NatRepr (NatRepr, LeqProof(..), knownNat, maxUnsigned)
 import qualified Data.Parameterized.NatRepr as NR
 import qualified What4.Domains.Arithmetic as Arith
 import           What4.Domains.Arithmetic (countTrailingZerosOr0, isPow2Natural)
@@ -562,6 +575,13 @@ import qualified What4.Domains.BV.Arith as A
 import qualified What4.Domains.BV.Bitwise as B
 import qualified What4.Domains.BV.Strides.Internal as SI
 import           What4.Domains.Verification (Property, property, (==>), Gen, chooseInteger)
+
+-- $setup
+-- >>> :set -XDataKinds -XTypeApplications
+-- >>> import Prelude hiding (negate, not, and, or, concat)
+-- >>> import Numeric.Natural (Natural)
+-- >>> let w4 = knownNat @4
+-- >>> let mk4 = mk (knownNat @4) :: Natural -> Natural -> Natural -> Domain 4
 
 -- | A 'Domain' represents the set
 --
@@ -603,6 +623,36 @@ proper Domain {start, stride, n, mask} =
      -- Full cosets (@n + 1 = orbit@): smallest start in coset, stride = @g@.
      , n + 1 < orbit || (start < g && stride == g)
      ]
+
+-- | /O(2^w \/ g)/. ASCII diagram of a progression in the style of the
+-- module-level visualization examples: @[@ followed by one @*@ per member value
+-- and one @.@ per non-member value, followed by @]@. Width is @mask + 1@ cells.
+--
+-- Useful in GHCi and in doctests to inspect progressions at a glance.
+--
+-- == Examples
+--
+-- Contiguous run:
+--
+-- >>> diagram (mk4 2 1 4)
+-- "[..*****.........]"
+--
+-- Stride-2 (even numbers only):
+--
+-- >>> diagram (mk4 0 2 7)
+-- "[*.*.*.*.*.*.*.*.]"
+--
+-- Wrap around 0:
+--
+-- >>> diagram (mk4 14 1 3)
+-- "[**............**]"
+diagram :: Domain w -> String
+diagram d = '[' : [ if member d v then '*' else '.' | v <- [0..mask d] ] ++ "]"
+
+-- | 'diagram' combined with 'toList': @diagram d ++ "  = " ++ show (toList d)@.
+-- Convenient for showing both the visual layout and the explicit element list.
+display :: Domain w -> String
+display d = diagram d ++ "  = " ++ show (toList d)
 
 -- ------------------------------------------------------------------
 -- * Internal helpers
@@ -815,6 +865,13 @@ isSelfWrapping Domain{stride, n, mask} = n * stride > mask
 --   * @n = 0@ (singleton): stride is forced to 1.
 --   * @n + 1 = 2^w \/ g@ (full coset): @start@ is reduced to its residue
 --     modulo @g@, stride is reduced to @g@.
+--
+-- == Examples
+--
+-- >>> diagram (mk4 2 2 3)
+-- "[..*.*.*.*.......]"
+-- >>> diagram (mk4 0 7 3)
+-- "[*....*.*......*.]"
 mk ::
   NatRepr w ->
   -- | @start@
@@ -991,6 +1048,16 @@ fromBitwise w b =
 -- * Queries
 
 -- | /O(w log w)/. Test if the given value is a member of the progression.
+--
+-- == Examples
+--
+-- >>> let evens = mk4 0 2 7
+-- >>> display evens
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+-- >>> member evens 4
+-- True
+-- >>> member evens 3
+-- False
 member :: Domain w -> Natural -> Bool
 -- References:
 --
@@ -1010,6 +1077,18 @@ member c v = assert (proper c) $
 -- | /O(w)/. Sound, reflexive, and transitive but coarse approximation of
 -- 'leqExact'. Use 'leqPrecise' for a finer (but non-transitive) check, or
 -- 'leqExact' for an exact (but quadratic) one.
+--
+-- == Examples
+--
+-- Every even is in @⊤@, but @⊤@ is not contained in the evens:
+--
+-- >>> let evens = mk4 0 2 7
+-- >>> display evens
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+-- >>> leq evens (top w4)
+-- True
+-- >>> leq (top w4) evens
+-- False
 leq :: Domain w -> Domain w -> Bool
 -- Writing @stride = 2^v · m@ for odd @m@, the subgroup @⟨stride⟩@ in
 -- @Z\/2^w@ is @⟨2^v⟩@. We accept @a ⊆ b@ if /any/ of:
@@ -1133,6 +1212,16 @@ toList c@Domain{start, stride, n} = assert (proper c) $ go 0 start
       | otherwise = v : go (i + 1) (modMask c (v + stride))
 
 -- | /O(w)/. The number of distinct values in the progression: @n + 1@.
+--
+-- == Examples
+--
+-- >>> let a = mk4 2 1 4
+-- >>> display a
+-- "[..*****.........]  = [2,3,4,5,6]"
+-- >>> size a
+-- 5
+-- >>> size (top w4)
+-- 16
 size :: Domain w -> Natural
 size c@Domain{n} = assert (proper c) $ n + 1
 {-# INLINE size #-}
@@ -1223,12 +1312,39 @@ liftBitwise2 w f a b =
 
 -- | /O(w)/. Negation: stride is preserved; the orbit reverses, so the new
 -- @start@ is the old @end@ negated. The step count @n@ is unchanged.
+--
+-- == Examples
+--
+-- >>> let a = mk4 2 1 4
+-- >>> display a
+-- "[..*****.........]  = [2,3,4,5,6]"
+-- >>> display (negate w4 a)
+-- "[..........*****.]  = [10,11,12,13,14]"
 negate :: (1 <= w) => NatRepr w -> Domain w -> Domain w
 negate w c@Domain{stride, n = nn, mask} =
   assert (proper c) $
   mk w (modNeg mask (end c)) stride nn
 
 -- | /O(w)/. Addition.
+--
+-- == Examples
+--
+-- >>> let a = mk4 2 3 2; b = mk4 2 1 2
+-- >>> display a
+-- "[..*..*..*.......]  = [2,5,8]"
+-- >>> display b
+-- "[..***...........]  = [2,3,4]"
+-- >>> display (add w4 a b)
+-- "[....*********...]  = [4,5,6,7,8,9,10,11,12]"
+-- >>> diagram (add w4 (top w4) (top w4))
+-- "[****************]"
+--
+-- Adding the evens to themselves stays the evens (stride is preserved as
+-- @gcd(2, 2) = 2@):
+--
+-- >>> let evens = mk4 0 2 7
+-- >>> display (add w4 evens evens)
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
 add :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
@@ -1258,6 +1374,16 @@ add w a b =
     start' = modMask a (start a + start b)
 
 -- | /O(w)/. Subtraction.
+--
+-- == Examples
+--
+-- >>> let a = mk4 4 1 4; b = mk4 1 1 2
+-- >>> display a
+-- "[....*****.......]  = [4,5,6,7,8]"
+-- >>> display b
+-- "[.***............]  = [1,2,3]"
+-- >>> display (sub w4 a b)
+-- "[.*******........]  = [1,2,3,4,5,6,7]"
 sub :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 sub w a b =
   assert (proper a) $
@@ -1483,6 +1609,16 @@ warrenAndHi m alo ahi blo bhi =
 -- ** Definitions
 
 -- | /O(w)/. Bitwise complement.
+--
+-- == Examples
+--
+-- Flipping all bits in each even value gives the odds (stride is preserved):
+--
+-- >>> let evens = mk4 0 2 7
+-- >>> display evens
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+-- >>> display (not w4 evens)
+-- "[.*.*.*.*.*.*.*.*]  = [1,3,5,7,9,11,13,15]"
 not :: (1 <= w) => NatRepr w -> Domain w -> Domain w
 -- References:
 --
@@ -1495,6 +1631,17 @@ not w c@Domain{stride, n = nn, mask} =
   mk w (mask - end c) stride nn
 
 -- | /O(w)/. Bitwise AND. See also 'andPrecise'.
+--
+-- == Examples
+--
+-- AND of evens with evens stays in the evens coset (the stride-2 alignment is
+-- preserved):
+--
+-- >>> let evens = mk4 0 2 7
+-- >>> display evens
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+-- >>> display (and w4 evens evens)
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
 and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
@@ -1587,6 +1734,19 @@ select i n _w c =
 -- * Shifts and rotations
 
 -- | /O(w)/. Left shift.
+--
+-- == Examples
+--
+-- Shifting @{1,2}@ left by @{1,2}@ yields @{2,4,6,8}@ (stride
+-- @gcd(1, 1) · 2^1 = 2@ is preserved across the range of shift amounts):
+--
+-- >>> let a = mk4 1 1 1; b = mk4 1 1 1
+-- >>> display a
+-- "[.**.............]  = [1,2]"
+-- >>> display b
+-- "[.**.............]  = [1,2]"
+-- >>> display (shl w4 a b)
+-- "[..*.*.*.*.......]  = [2,4,6,8]"
 shl :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
@@ -1633,6 +1793,27 @@ shl w a b
     arithResult = liftArith2 w (A.shl w) a b
 
 -- | /O(w)/. Logical right shift.
+--
+-- == Examples
+--
+-- A singleton shift preserves the stride; a non-singleton shift falls back
+-- to stride 1:
+--
+-- >>> let a = mk4 4 1 3; b = mk4 1 1 0
+-- >>> display a
+-- "[....****........]  = [4,5,6,7]"
+-- >>> display b
+-- "[.*..............]  = [1]"
+-- >>> display (lshr w4 a b)
+-- "[..**............]  = [2,3]"
+--
+-- With a non-singleton shift @{1,2}@, the result widens to stride 1:
+--
+-- >>> let b2 = mk4 1 1 1
+-- >>> display b2
+-- "[.**.............]  = [1,2]"
+-- >>> display (lshr w4 a b2)
+-- "[.***............]  = [1,2,3]"
 lshr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
@@ -1850,6 +2031,26 @@ ror w = liftBitwise2 w (B.rorAbstract w)
 --
 -- /Precision:/ contains 'lowerBound' when both are non-empty
 -- ('lowerBoundDominatedByPseudoMeet').
+--
+-- == Examples
+--
+-- @⊤@ intersected with a stride-2 progression returns that progression:
+--
+-- >>> let evens = mk4 0 2 7
+-- >>> display evens
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+-- >>> fmap display (pseudoMeet w4 (top w4) evens)
+-- Just "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+--
+-- Progressions from disjoint cosets share no values:
+--
+-- >>> let a = mk4 0 4 3; b = mk4 2 4 3
+-- >>> display a
+-- "[*...*...*...*...]  = [0,4,8,12]"
+-- >>> display b
+-- "[..*...*...*...*.]  = [2,6,10,14]"
+-- >>> pseudoMeet w4 a b
+-- Nothing
 pseudoMeet ::
   (1 <= w) =>
   NatRepr w ->
@@ -2100,6 +2301,18 @@ fullCoset w c =
 --
 -- /Precision:/ the most precise join — contained in 'boundingBoxJoin'
 -- ('pseudoJoinDominatesBoundingBoxJoin').
+--
+-- == Examples
+--
+-- Joining complementary stride-4 progressions covers all even values:
+--
+-- >>> let a = mk4 0 4 3; b = mk4 2 4 3
+-- >>> display a
+-- "[*...*...*...*...]  = [0,4,8,12]"
+-- >>> display b
+-- "[..*...*...*...*.]  = [2,6,10,14]"
+-- >>> display (pseudoJoin w4 a b)
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
 pseudoJoin :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 pseudoJoin w a b
   | leq a b = b
