@@ -214,6 +214,18 @@ haskellOnly = Set.fromList
   -- 'floorSum' is a Haskell-only Euclidean-recursion helper used by
   -- 'leqExact'; the Cryptol mirror states 'leqExact' declaratively.
   , "floorSumCorrect"
+  -- 'compactify' merges adjacent progressions when their union is itself a
+  -- progression. Mirroring the Haskell fixed-point iteration in Cryptol
+  -- is impractical for symbolic verification.
+  , "correct_compactify"
+  -- 'exactJoin' and 'exactMeet' are partial operators built on
+  -- 'compactify'; they share the same Cryptol-mirroring difficulty.
+  , "correct_exactJoin"
+  , "exactJoinCommutative", "exactJoinIdempotent", "exactJoinUpperBound"
+  , "exactJoinTopAnnihilator", "exactJoinAssociative"
+  , "correct_exactMeet"
+  , "exactMeetCommutative", "exactMeetIdempotent", "exactMeetLowerBound"
+  , "exactMeetTopIdentity", "exactMeetAssociative"
   ]
 
 cryptolCorrespondenceTests :: TT.TestTree
