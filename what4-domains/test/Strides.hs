@@ -465,6 +465,42 @@ tests = TT.testGroup "Strides"
   , genTest "pseudoJoinDominatesBoundingBoxJoin" $
       do SW n <- genWidth
          S.pseudoJoinDominatesBoundingBoxJoin n <$> S.genDomain n <*> S.genDomain n
+  , genTest "correct_exactJoin" $
+      do SW n <- genWidth
+         S.correct_exactJoin n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+  , genTest "exactJoinCommutative" $
+      do SW n <- genWidth
+         S.exactJoinCommutative n <$> S.genDomain n <*> S.genDomain n
+  , genTest "exactJoinIdempotent" $
+      do SW n <- genWidth
+         S.exactJoinIdempotent n <$> S.genDomain n
+  , genTest "exactJoinUpperBound" $
+      do SW n <- genWidth
+         S.exactJoinUpperBound n <$> S.genDomain n <*> S.genDomain n
+  , genTest "exactJoinTopAnnihilator" $
+      do SW n <- genWidth
+         S.exactJoinTopAnnihilator n <$> S.genDomain n
+  , genTest "exactJoinAssociative" $
+      do SW n <- genWidth
+         S.exactJoinAssociative n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "correct_exactMeet" $
+      do SW n <- genWidth
+         S.correct_exactMeet n <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
+  , genTest "exactMeetCommutative" $
+      do SW n <- genWidth
+         S.exactMeetCommutative n <$> S.genDomain n <*> S.genDomain n
+  , genTest "exactMeetIdempotent" $
+      do SW n <- genWidth
+         S.exactMeetIdempotent n <$> S.genDomain n
+  , genTest "exactMeetLowerBound" $
+      do SW n <- genWidth
+         S.exactMeetLowerBound n <$> S.genDomain n <*> S.genDomain n
+  , genTest "exactMeetTopIdentity" $
+      do SW n <- genWidth
+         S.exactMeetTopIdentity n <$> S.genDomain n
+  , genTest "exactMeetAssociative" $
+      do SW n <- genWidth
+         S.exactMeetAssociative n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
   , genTest "lowerBoundDominatedByPseudoMeet" $
       do SW n <- genWidth
          S.lowerBoundDominatedByPseudoMeet n <$> S.genDomain n <*> S.genDomain n
@@ -492,6 +528,12 @@ tests = TT.testGroup "Strides"
   , genTest "lowerBoundsAllSubsets" $
       do SW n <- genWidth
          S.lowerBoundsAllSubsets n <$> S.genDomain n <*> S.genDomain n
+  -- Uses 'toList' to compare element sets, so capped at small widths.
+  , genTest "correct_compactify" $
+      do SW n <- genWidthSmall
+         k <- chooseInt (0, 4)
+         cs <- mapM (const (S.genDomain n)) [1 .. k]
+         pure (S.correct_compactify n cs)
   , genTest "trimSelfWrapNotSelfWrapping" $
       do SW n <- genWidth
          S.trimSelfWrapNotSelfWrapping n <$> S.genDomain n

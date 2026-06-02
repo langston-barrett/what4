@@ -384,6 +384,8 @@ module What4.Domains.BV.Strides
   , pseudoJoin
   , pseudoJoinPrecise
   , boundingBoxJoin
+  , exactJoin
+  , exactMeet
   , lowerBound
   , lowerBounds
   -- * Properties
@@ -528,6 +530,18 @@ module What4.Domains.BV.Strides
   , boundingBoxJoinAssociative
   , boundingBoxJoinMonotone
   , pseudoJoinDominatesBoundingBoxJoin
+  , correct_exactJoin
+  , exactJoinCommutative
+  , exactJoinIdempotent
+  , exactJoinUpperBound
+  , exactJoinTopAnnihilator
+  , exactJoinAssociative
+  , correct_exactMeet
+  , exactMeetCommutative
+  , exactMeetIdempotent
+  , exactMeetLowerBound
+  , exactMeetTopIdentity
+  , exactMeetAssociative
   , lowerBoundDominatedByPseudoMeet
   , correct_lowerBound
   , lowerBoundLeqExactBoth
@@ -537,6 +551,7 @@ module What4.Domains.BV.Strides
   , lowerBoundIsLargestLowerBound
   , correct_lowerBounds
   , lowerBoundsAllSubsets
+  , correct_compactify
   , trimSelfWrapNotSelfWrapping
   , trimSelfWrapSubset
   , trimSelfWrapIdentity
@@ -1753,21 +1768,37 @@ ror w = liftBitwise2 w (B.rorAbstract w)
 --
 -- [Absorption] @∀ a b. a ⊓ (a ⊔ b) = a@ and @a ⊔ (a ⊓ b) = a@.
 --
--- This module exports four pseudo-meet\/join operators sitting at different
--- points in the precision\/structure trade-off. The table below summarizes
+-- This module exports five pseudo-meet\/join operators sitting at different
+-- points in the precision\/structure trade-off. The tables below summarize
 -- which lattice axioms each one satisfies (y), fails (n), or satisfies only
 -- under a side condition (~).
 --
+-- /Meets:/
+--
 -- @
---                        pseudoMeet  pseudoJoin  boundingBoxJoin  lowerBound
--- Soundness                  y           y          y                y
--- Idempotence                y           y          ~1               ~2
--- Commutativity              y           y          y                y
--- Lower\/Upper bound         ~3          ~3         y                y
--- Associativity              n           n          y                n
--- Monotonicity               n           n          ~4               n
--- Top identity\/annihilator  y           y          y                ~2
--- Absorption                 n           n          n                n
+--                          pseudoMeet  exactMeet  lowerBound
+-- Soundness                    y          y          y
+-- Idempotence                  y          ~2         ~2
+-- Commutativity                y          y          y
+-- Lower bound                  ~3         ~5         y
+-- Associativity                n          ~6         n
+-- Monotonicity                 n          n          n
+-- Top identity                 y          ~2         ~2
+-- Absorption                   n          n          n
+-- @
+--
+-- /Joins:/
+--
+-- @
+--                          pseudoJoin  boundingBoxJoin  exactJoin
+-- Soundness                    y          y                y
+-- Idempotence                  y          ~1               ~2
+-- Commutativity                y          y                y
+-- Upper bound                  ~3         y                ~5
+-- Associativity                n          y                ~6
+-- Monotonicity                 n          ~4               n
+-- Top annihilator              y          y                ~2
+-- Absorption                   n          n                n
 -- @
 --
 -- Side-condition keys for @~@:
@@ -1785,13 +1816,25 @@ ror w = liftBitwise2 w (B.rorAbstract w)
 --        interval to @(0, mask)@, so 'hull' is non-monotone on wrapping
 --        inputs; 'boundingBoxJoin' inherits that gap.
 --
+-- [@~5@] axiom holds /when @exactJoin@ returns @Just@/. 'exactJoin' is a
+--        partial operator: it returns 'Nothing' when the union isn't
+--        exactly representable as a single progression, and the result
+--        is undefined in that case.
+--
+-- [@~6@] axiom holds /when both nested computations return @Just@/.
+--        'exactJoin' association orders can disagree on success: one
+--        order may produce a single progression while another fails
+--        because an intermediate union isn't a progression. When both
+--        orders succeed, they produce the same result.
+--
 -- Notes:
 --
--- * Soundness for 'pseudoMeet', 'pseudoJoin', and 'boundingBoxJoin' is
---   /over/-approximation: every concrete element of the intersection (resp.
---   union) is in the result. Soundness for 'lowerBound' is
---   /under/-approximation: every result element is in both operands (the
---   converse may fail).
+-- * Soundness for 'pseudoMeet', 'pseudoJoin', 'boundingBoxJoin', and
+--   'exactJoin' is /over/-approximation: every concrete element of the
+--   intersection (resp. union) is in the result. 'exactJoin' is uniquely
+--   /exact/ when it returns @Just@ — neither under nor over-approximating.
+--   Soundness for 'lowerBound' is /under/-approximation: every result
+--   element is in both operands (the converse may fail).
 --
 -- Trade-off summary:
 --
@@ -1805,6 +1848,12 @@ ror w = liftBitwise2 w (B.rorAbstract w)
 --   so the operator is /associative/ and /monotone/. Saturates to 'top'
 --   whenever either operand wraps mod @2^w@; pick this for fixpoint
 --   iteration or widening, where saturation on wrap is acceptable.
+--
+-- * 'exactJoin' \/ 'exactMeet': partial, exact. Return @Just c@ only when
+--   the union (resp. intersection) is itself representable as a single
+--   progression; @Nothing@ otherwise. Let callers distinguish "the
+--   operation compactifies cleanly" from "any single-progression cover
+--   would either over- or under-approximate".
 --
 -- * 'lowerBound': sound /under/-approximation. The result's elements are
 --   guaranteed to be in both operands (the genuine lower-bound property),
@@ -1860,7 +1909,7 @@ pseudoMeet w a b =
   case () of
     _ | leq a b -> Just a
       | leq b a -> Just b
-      | otherwise -> pseudoMeetStrides w a b
+      | otherwise -> pseudoMeetStridesBy compactify w a b
 
 -- | /O(w^2)/. Like 'pseudoMeet', but uses 'leqExact' for the containment
 -- short-circuits. This preserves the smaller operand exactly when one is
@@ -1875,12 +1924,14 @@ pseudoMeetPrecise w a b =
   case () of
     _ | leqExact a b -> Just a
       | leqExact b a -> Just b
-      | otherwise -> pseudoMeetStrides w a b
+      | otherwise -> pseudoMeetStridesBy compactifyPrecise w a b
 
--- | /O(w)/. Sound (over-approximating) intersection of two progressions, used
--- as the general (non-short-circuit) path of 'pseudoMeet' and 'pseudoMeetPrecise'.
-pseudoMeetStrides ::
+-- | The shared structure of 'pseudoMeet' and 'pseudoMeetPrecise', parameterized
+-- over the compactify variant.
+pseudoMeetStridesBy ::
   (1 <= w) =>
+  -- | 'compactify' or 'compactifyPrecise'
+  (NatRepr w -> [Domain w] -> [Domain w]) ->
   NatRepr w ->
   Domain w ->
   Domain w ->
@@ -1888,23 +1939,29 @@ pseudoMeetStrides ::
 -- References:
 --
 -- * CLP 4.1 Set Operations
-pseudoMeetStrides w a b
-  -- Neither operand self-wraps → 'ssplit' each into non-wrapping pieces, run
-  -- the closed-form Diophantine on each pair, take the union of sub-meets.
-  -- When neither operand even wraps mod @2^w@ this collapses to a single
-  -- 'arcMeetClosed' call (the exact intersection); when one or both wrap,
-  -- the union over-approximates.
-  | Prelude.not (isSelfWrapping a || isSelfWrapping b)
-  = case [ c | ai <- ssplit w a
-             , bj <- ssplit w b
-             , Just c <- [arcMeetClosed w ai bj]
-         ] of
-      []     -> Nothing
-      (c:cs) -> Just (Prelude.foldr (pseudoJoin w) c cs)
+pseudoMeetStridesBy compactifyOp w a b
   | cosetsDisjoint a b
   = Nothing
+  -- Neither operand self-wraps → 'ssplit' each into non-wrapping pieces, run
+  -- 'arcMeetClosed' on each pair, take the union of sub-meets. When neither
+  -- operand even wraps mod @2^w@ this collapses to a single 'arcMeetClosed'
+  -- call (the exact intersection); when one or both wrap, the union
+  -- over-approximates.
+  | Prelude.not (isSelfWrapping a || isSelfWrapping b)
+  = case compactifyOp w
+           [ c | ai <- ssplit w a
+               , bj <- ssplit w b
+               , Just c <- [arcMeetClosed w ai bj]
+           ] of
+      []     -> Nothing
+      (c:cs) -> Just (Prelude.foldr (pseudoJoin w) c cs)
   | otherwise = do
-      arith <- fromArith w (A.meet (hull a) (hull b))
+      -- 'toArith' (rather than 'hull') gives a tighter starting interval
+      -- on self-wrapping operands: a self-wrapping orbit with even stride
+      -- has 'toArith' return its coset arc rather than saturating to 'top'.
+      -- Mirrors what 'pseudoJoinStrides' does on the same wrap-handling
+      -- path.
+      arith <- fromArith w (A.meet (toArith a) (toArith b))
       -- Refine arith to the coset shared by both operands.
       --
       -- Each operand's orbit lies in @start + ⟨g⟩@ as a subset of
@@ -2172,6 +2229,86 @@ boundingBoxJoin w a b =
        Just c  -> c
        Nothing -> top w  -- 'A.range' of non-empty bounds is never bottom
 
+-- | /O(w^2)/. Exact union: returns @Just c@ when the union of @a@ and @b@'s
+-- element sets is itself representable as a single progression; @Nothing@
+-- otherwise. Distinguishes the (common) case where @a ∪ b@ stays inside a
+-- single arithmetic progression from the (also common) case where it
+-- doesn't and any single-progression cover would over-approximate.
+--
+-- /Lattice axioms:/
+--
+-- * Soundness (when @Just@): the result is /exact/, equal to @a ∪ b@ —
+--   neither under nor over-approximating ('correct_exactJoin').
+-- * Idempotence: @exactJoin a a == Just a@ for non-wrap-mod-@2^w@ operands
+--   ('exactJoinIdempotent').
+-- * Commutativity: yes ('exactJoinCommutative').
+-- * Upper bound: when @Just c@, both operands are subsets of @c@
+--   ('exactJoinUpperBound').
+-- * Top identity: @exactJoin a top == Just top@
+--   ('exactJoinTopAnnihilator') for non-wrap-mod-@2^w@ operands.
+-- * Associativity: yes /when both nested computations return @Just@/
+--   ('exactJoinAssociative'). One association can succeed while another
+--   fails (each intermediate must itself be a single progression), so
+--   the property only constrains the @Just@\/@Just@ case.
+-- * Monotonicity: /no/ — adding elements can break exact representability,
+--   so a larger operand can take @Just@ to @Nothing@.
+exactJoin ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w -> Domain w -> Maybe (Domain w)
+exactJoin w a b =
+  assert (proper a) $
+  assert (proper b) $
+  assert (mask a == mask b) $
+  case compactifyPrecise w [a, b] of
+    [c] -> Just c
+    _   -> Nothing
+
+-- | /O(w^2)/. Exact intersection: returns @Just c@ when the intersection
+-- of @a@ and @b@'s element sets is itself representable as a single
+-- progression; @Nothing@ otherwise. Mirror of 'exactJoin'.
+--
+-- Distinct from 'pseudoMeet' (sound /over/-approximation, always returns
+-- some progression) and 'lowerBound' (sound /under/-approximation, may
+-- drop witnesses): 'exactMeet' returns 'Just' /exactly/ when neither
+-- approximation is needed.
+--
+-- /Lattice axioms:/
+--
+-- * Soundness (when @Just@): the result is /exact/, equal to @a ∩ b@ —
+--   neither under nor over-approximating ('correct_exactMeet').
+-- * Idempotence: @exactMeet a a == Just a@ for non-wrap-mod-@2^w@ operands
+--   ('exactMeetIdempotent').
+-- * Commutativity: yes ('exactMeetCommutative').
+-- * Lower bound: when @Just c@, @c@ is contained in both operands
+--   ('exactMeetLowerBound').
+-- * Top identity: @exactMeet a top == Just a@ for non-wrap-mod-@2^w@ @a@
+--   ('exactMeetTopIdentity').
+-- * Associativity: yes /when both nested computations return @Just@/
+--   ('exactMeetAssociative'). Same partial-operator caveat as 'exactJoin':
+--   one association can succeed while another fails.
+-- * Monotonicity: /no/ — removing elements can break exact representability.
+exactMeet ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w -> Domain w -> Maybe (Domain w)
+exactMeet w a b =
+  assert (proper a) $
+  assert (proper b) $
+  assert (mask a == mask b) $
+  if isSelfWrapping a || isSelfWrapping b
+    then Nothing
+    else
+      let arcMeets =
+            [ c
+            | ai <- ssplit w a
+            , bj <- ssplit w b
+            , Just c <- [arcMeetClosed w ai bj]
+            ]
+      in case compactifyPrecise w arcMeets of
+           [c] -> Just c
+           _   -> Nothing
+
 -- | /O(w)/. A strided lower bound on the intersection: a sound
 -- /under/-approximation. Note this is /not/ the greatest lower bound —
 -- the lattice of strided sets has no g.l.b. for incomparable elements (cf.
@@ -2269,7 +2406,196 @@ lowerBounds w a b =
               -- pieces /exactly/. 'arcMeetClosed' on each pair is exact;
               -- collect every non-empty pair.
               pairs = [ (pa, pb) | pa <- ssplit w aTrim, pb <- ssplit w bTrim ]
-          in [ c | (pa, pb) <- pairs, Just c <- [arcMeetClosed w pa pb] ]
+              raw = [ c | (pa, pb) <- pairs, Just c <- [arcMeetClosed w pa pb] ]
+          in compactify w raw
+
+-- | /O(m^2 · w)/, where @m@ is the input list length. Merges any pair of
+-- progressions whose union is /exactly/ representable as a single
+-- progression. Iterates until no more merges apply.
+--
+-- Uses 'leq', see 'compactifyPrecise' for the variant that uses 'leqExact'.
+compactify :: (1 <= w) => NatRepr w -> [Domain w] -> [Domain w]
+compactify = compactifyBy leq
+
+-- | /O(m^2 · w^2)/. Like 'compactify' but uses 'leqExact' for the
+-- containment check, catching all merges at the cost of a higher per-merge
+-- complexity.
+compactifyPrecise :: (1 <= w) => NatRepr w -> [Domain w] -> [Domain w]
+compactifyPrecise = compactifyBy leqExact
+
+-- | The shared structure of 'compactify' and 'compactifyPrecise',
+-- parameterized over the containment check used by 'tryMergeBy'.
+compactifyBy ::
+  (1 <= w) =>
+  -- | 'leq' or 'leqExact'
+  (Domain w -> Domain w -> Bool) ->
+  NatRepr w ->
+  [Domain w] ->
+  [Domain w]
+compactifyBy leqOp w cs0 =
+  assert (Prelude.all proper cs0) $
+  assert (Prelude.all (\c -> mask c == integerToNatural (maxUnsigned w)) cs0) $
+  -- Iterate to a fixed point. A single pass would miss merges where an
+  -- early head is non-mergeable until /after/ a later pair merges, leaving
+  -- the result order-dependent (and so non-commutative for callers like
+  -- 'exactJoin' that compare result lengths).
+  fixedPoint cs0
+  where
+    fixedPoint cs =
+      let cs' = onePass cs
+      in if Prelude.length cs' == Prelude.length cs
+           then cs'
+           else fixedPoint cs'
+
+    onePass []     = []
+    onePass (c:cs) =
+      case tryMergeWithBy leqOp w c cs of
+        Just (merged, rest) -> merged : onePass rest
+        Nothing             -> c : onePass cs
+
+-- | /O(m · w)/, where @m@ is the length of @xs@. Find the first @x@ in
+-- @xs@ such that @c@ and @x@ merge exactly into a single progression. If
+-- found, return the merged progression and the remaining list with @x@
+-- removed. Uses 'leq'; see 'tryMergeWithPrecise' for the 'leqExact'
+-- variant.
+tryMergeWith ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  [Domain w] ->
+  Maybe (Domain w, [Domain w])
+tryMergeWith = tryMergeWithBy leq
+
+-- | /O(m · w^2)/. Like 'tryMergeWith', but uses 'leqExact'.
+tryMergeWithPrecise ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  [Domain w] ->
+  Maybe (Domain w, [Domain w])
+tryMergeWithPrecise = tryMergeWithBy leqExact
+
+-- | The shared structure of 'tryMergeWith' and 'tryMergeWithPrecise'.
+tryMergeWithBy ::
+  (1 <= w) =>
+  (Domain w -> Domain w -> Bool) ->
+  NatRepr w ->
+  Domain w ->
+  [Domain w] ->
+  Maybe (Domain w, [Domain w])
+tryMergeWithBy leqOp w c = \case
+  [] -> Nothing
+  (x:xs) ->
+    case tryMergeBy leqOp w c x of
+      Just merged -> Just (merged, xs)
+      Nothing -> case tryMergeWithBy leqOp w c xs of
+        Just (merged, rest) -> Just (merged, x : rest)
+        Nothing             -> Nothing
+
+-- | /O(w)/. Try to merge two progressions into a single progression
+-- representing /exactly/ their union. Returns 'Nothing' if the union
+-- isn't itself a progression.
+--
+-- Operands may wrap mod @2^w@ or self-wrap. Each progression is a
+-- contiguous arc on the cyclic index circle of its coset (no element
+-- repeats — see 'toListNoDuplicates'). If the union is a progression
+-- with @k = |c1| + |c2| - |c1 ∩ c2|@ elements, its anchor must be one
+-- of the four operand endpoints @{s1, s1 + n c1 · stride c1, s2,
+-- s2 + n c2 · stride c2}@ and its stride is determined by the anchor's
+-- cyclic span: @t = span / (k - 1)@. See 'mergeCandidates'.
+--
+-- Verifies each candidate via @leqOp@ that both operands are subsets,
+-- and via 'intersectionSize' that the candidate's size equals @k@.
+tryMergeBy ::
+  (1 <= w) =>
+  -- | 'leq' or 'leqExact'
+  (Domain w -> Domain w -> Bool) ->
+  NatRepr w ->
+  Domain w ->
+  Domain w ->
+  Maybe (Domain w)
+tryMergeBy leqOp w c1 c2 =
+  assert (proper c1) $
+  assert (proper c2) $
+  assert (mask c1 == mask c2) $
+  let !overlap   = intersectionSize w c1 c2
+      !unionSize = size c1 + size c2 - overlap
+      cands = mergeCandidates w c1 c2 unionSize
+      ok cand =
+        leqOp c1 cand && leqOp c2 cand && size cand == unionSize
+  in case List.find ok cands of
+       Just c  -> Just c
+       Nothing -> Nothing
+
+-- | /O(w)/. Build the merge candidates for 'tryMergeBy'.
+--
+-- The merged progression — if one exists — has @unionSize@ elements
+-- equally spaced around @Z\/2^w@. Its stride is determined by its anchor
+-- (any one element) and span (cyclic distance to the farthest element):
+-- @t = span / (unionSize - 1)@. Each operand contributes two natural
+-- anchors (its @start@ and @end = start + n · stride@), giving up to
+-- four candidates. The caller verifies each via 'leqOp' and a cardinality
+-- check.
+mergeCandidates ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Natural -> [Domain w]
+mergeCandidates w c1 c2 unionSize
+  | n c1 == 0 && n c2 == 0 && start c1 == start c2 = [c1]
+  | unionSize == 0 = []
+  -- Singleton union after merging two equal-element-set operands.
+  | unionSize == 1 = [mk w (start c1) 1 0]
+  | otherwise =
+      let !m       = mask c1
+          !s1      = start c1
+          !s2      = start c2
+          !end1    = (s1 + n c1 * stride c1) .&. m
+          !end2    = (s2 + n c2 * stride c2) .&. m
+          !nMerge  = unionSize - 1
+          -- For a candidate AP anchored at @a@ with @unionSize@ elements,
+          -- its stride is @span(a) / nMerge@ where @span(a)@ is the cyclic
+          -- distance from @a@ to the farthest other endpoint of either
+          -- operand. We try each endpoint as anchor; non-integer
+          -- @span / nMerge@ rules the anchor out.
+          endpoints = [s1, end1, s2, end2]
+          tryAnchor a =
+            let !d1 = modSub m s1   a
+                !d2 = modSub m end1 a
+                !d3 = modSub m s2   a
+                !d4 = modSub m end2 a
+                !sp = max (max d1 d2) (max d3 d4)
+            in if sp `Prelude.mod` nMerge /= 0
+                 then Nothing
+                 else
+                   let !t = sp `Prelude.div` nMerge
+                       -- 'mk' will reject @t == 0@ (singleton fallback) or
+                       -- @t > mask@; either signals an invalid candidate.
+                   in if t == 0 || t > m || nMerge >= orbitLenOf m (lowestSetBit t)
+                        then Nothing
+                        else Just (mk w a t nMerge)
+      in [c | a <- endpoints, Just c <- [tryAnchor a]]
+
+-- | /O(w^2)/. An upper bound on the size of @c1 ∩ c2@. Splits each
+-- operand's wrap and self-wrap structure with 'ssplit', runs
+-- 'arcMeetClosed' on each pair of non-wrapping pieces, and sums their
+-- sizes; clamps the result at @min |c1| |c2|@.
+--
+-- The bound is exact when neither operand self-wraps (then 'ssplit' pieces
+-- partition each operand). On self-wrapping inputs, 'ssplit' returns the
+-- /full coset/, which over-approximates the operand's element set. The
+-- clamp keeps the result usable as a value to subtract from
+-- @|c1| + |c2|@ without underflow; any over-estimate leads to a smaller
+-- @unionSize@ and a tighter cardinality check, which 'tryMergeBy' rejects
+-- via @size cand == unionSize@ rather than accepting a wrong merge.
+intersectionSize ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural
+intersectionSize w c1 c2 =
+  let !pieces1 = ssplit w c1
+      !pieces2 = ssplit w c2
+      !raw = List.foldl' (+) 0
+               [ size c
+               | a <- pieces1, b <- pieces2, Just c <- [arcMeetClosed w a b]
+               ]
+  in min raw (min (size c1) (size c2))
 
 -- | /O(1)/. If @c@ self-wraps, drop to a non-self-wrapping sub-progression
 -- of @c@'s orbit. Otherwise return @c@ unchanged. Used by 'lowerBound' to
@@ -3177,17 +3503,29 @@ pseudoMeetPreciseIdempotent w a =
   proper a ==> property (pseudoMeetPrecise w a a == Just a)
 
 
--- | 'pseudoMeetPrecise' refines 'pseudoMeet': anything 'pseudoMeetPrecise' contains, 'pseudoMeet'
--- contains too (modulo emptiness).
+-- | When neither operand contains the other under 'leqExact',
+-- 'pseudoMeetPrecise' refines 'pseudoMeet': anything 'pseudoMeetPrecise'
+-- contains, 'pseudoMeet' contains too.
+--
+-- The precondition rules out the case where 'pseudoMeetPrecise''s
+-- @leqExact@ short-circuit fires while 'pseudoMeet''s @leq@ short-circuit
+-- doesn't (since 'leq' implies 'leqExact' but not vice versa). In that
+-- case 'pseudoMeetPrecise' returns the smaller operand directly while
+-- 'pseudoMeet' falls through to the strides path, which can produce a
+-- result whose stride structure doesn't refine the operand's. Outside
+-- that case, both functions take the same code path and 'pseudoMeetPrecise'
+-- merges strictly more pieces in 'compactifyPrecise', yielding a refined
+-- result.
 pseudoMeetPreciseRefinesMeet ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 pseudoMeetPreciseRefinesMeet w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    case (pseudoMeet w a b, pseudoMeetPrecise w a b) of
-      (Just cM, Just cP) -> property (leqExact cP cM)
-      (_, Nothing)       -> property True
-      (Nothing, Just _)  -> property False  -- pseudoMeetPrecise tighter, so this shouldn't happen
+    Prelude.not (leqExact a b || leqExact b a) ==>
+      case (pseudoMeet w a b, pseudoMeetPrecise w a b) of
+        (Just cM, Just cP) -> property (leqExact cP cM)
+        (_, Nothing)       -> property True
+        (Nothing, Just _)  -> property False  -- pseudoMeetPrecise tighter, so this shouldn't happen
 
 -- | 'nsplit' is a sound cover: every member of @a@ lies in some piece. (When
 -- @a@ self-wraps, pieces may also contain values outside @a@, since the split
@@ -3466,6 +3804,148 @@ pseudoJoinDominatesBoundingBoxJoin w a b =
   proper a ==> proper b ==> mask a == mask b ==>
     property (size (pseudoJoin w a b) <= size (boundingBoxJoin w a b))
 
+-- | When 'exactJoin' returns @Just c@, @c@ is the /exact/ union: every
+-- element of either operand is in @c@, and every element of @c@ is in one
+-- of the operands.
+correct_exactJoin ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Natural -> Property
+correct_exactJoin w a b x =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case exactJoin w a b of
+      Nothing -> property True
+      Just c  -> property (member c x == (member a x || member b x))
+
+-- | 'exactJoin' is commutative.
+exactJoinCommutative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+exactJoinCommutative w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (eqMaybe (exactJoin w a b) (exactJoin w b a))
+
+-- | 'exactJoin' is idempotent on non-wrap-mod-@2^w@ operands:
+-- @exactJoin a a == Just a@. Wrapping operands return 'Nothing' (their
+-- 'ssplit' pieces don't recompose into a single progression after
+-- 'compactifyPrecise').
+exactJoinIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+exactJoinIdempotent w a =
+  proper a ==>
+    Prelude.not (start a + n a * stride a > mask a) ==>
+      property (exactJoin w a a == Just a)
+
+-- | When 'exactJoin' returns @Just c@, @c@ is an upper bound: both
+-- operands are subsets of @c@ under 'leqExact'.
+exactJoinUpperBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+exactJoinUpperBound w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case exactJoin w a b of
+      Nothing -> property True
+      Just c  -> property (leqExact a c && leqExact b c)
+
+-- | @exactJoin a top@ exists iff the union @a ∪ top@ is a single
+-- progression, which means @top@ itself. Holds for non-wrap-mod-@2^w@ @a@.
+exactJoinTopAnnihilator ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+exactJoinTopAnnihilator w a =
+  proper a ==>
+    Prelude.not (start a + n a * stride a > mask a) ==>
+      case exactJoin w a (top w) of
+        Just c  -> property (leqExact c (top w) && leqExact (top w) c)
+        Nothing -> property False
+
+-- | 'exactJoin' is associative /when both nested computations succeed/:
+-- if @LHS = Just x@ and @RHS = Just y@, then @x ≡ y@. The other-side-fails
+-- case is real and unavoidable: one association order can succeed while
+-- another fails, since each intermediate must itself be a single
+-- progression.
+--
+-- Counterexample at @w=3@: @a={1}, b={2}, c={0,3}@. @(a⊔b)⊔c = {0..3}@
+-- but @b⊔c = {0,2,3}@ isn't a progression, so @a⊔(b⊔c) = Nothing@.
+exactJoinAssociative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+exactJoinAssociative w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      let lhs = exactJoin w a b >>= exactJoin w c
+          rhs = exactJoin w b c >>= exactJoin w a
+      in case (lhs, rhs) of
+           (Just x, Just y) -> property (leqExact x y && leqExact y x)
+           _                -> property True
+
+-- | When 'exactMeet' returns @Just c@, @c@ is the /exact/ intersection:
+-- @x ∈ c@ iff @x ∈ a ∧ x ∈ b@.
+correct_exactMeet ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Natural -> Property
+correct_exactMeet w a b x =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case exactMeet w a b of
+      Nothing -> property True
+      Just c  -> property (member c x == (member a x && member b x))
+
+-- | 'exactMeet' is commutative.
+exactMeetCommutative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+exactMeetCommutative w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (eqMaybe (exactMeet w a b) (exactMeet w b a))
+
+-- | 'exactMeet' is idempotent on non-wrap-mod-@2^w@ operands:
+-- @exactMeet a a == Just a@.
+exactMeetIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+exactMeetIdempotent w a =
+  proper a ==>
+    Prelude.not (start a + n a * stride a > mask a) ==>
+      property (exactMeet w a a == Just a)
+
+-- | When 'exactMeet' returns @Just c@, @c@ is a lower bound: @c@ is
+-- contained in both operands under 'leqExact'.
+exactMeetLowerBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+exactMeetLowerBound w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case exactMeet w a b of
+      Nothing -> property True
+      Just c  -> property (leqExact c a && leqExact c b)
+
+-- | @exactMeet a top == Just a@ for non-wrap-mod-@2^w@ @a@.
+exactMeetTopIdentity ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+exactMeetTopIdentity w a =
+  proper a ==>
+    Prelude.not (start a + n a * stride a > mask a) ==>
+      case exactMeet w a (top w) of
+        Just c  -> property (leqExact c a && leqExact a c)
+        Nothing -> property False
+
+-- | 'exactMeet' is associative /when both nested computations return @Just@/.
+-- Same partial-operator caveat as 'exactJoinAssociative': one association
+-- can succeed while another fails because an intermediate intersection
+-- isn't itself a single progression.
+exactMeetAssociative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+exactMeetAssociative w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      let lhs = exactMeet w a b >>= exactMeet w c
+          rhs = exactMeet w b c >>= exactMeet w a
+      in case (lhs, rhs) of
+           (Just x, Just y) -> property (leqExact x y && leqExact y x)
+           _                -> property True
+
 -- | Precision dominance, cross-direction: 'lowerBound' is contained in
 -- 'pseudoMeet' (when both are non-empty). They bound the true intersection
 -- from opposite sides — 'lowerBound' from below (under-approx),
@@ -3582,6 +4062,28 @@ lowerBoundsAllSubsets w a b =
     property (Prelude.and [ leqExact c a && leqExact c b
                           | c <- lowerBounds w a b
                           ])
+
+-- | 'compactify' preserves the union of element sets exactly: every input
+-- element is in some output progression, and every output element is in
+-- some input progression.
+--
+-- 'compactify' assumes all inputs are non-wrap-mod-@2^w@
+-- (@start + n·stride <= mask@), which the property guards.
+correct_compactify ::
+  (1 <= w) =>
+  NatRepr w -> [Domain w] -> Property
+correct_compactify w cs =
+  Prelude.and [ proper c | c <- cs ] ==>
+    sameWidth ==>
+      Prelude.and [ Prelude.not (wrapsMod c) | c <- cs ] ==>
+        let inUnion  = Set.fromList (concatMap toList cs)
+            outUnion = Set.fromList (concatMap toList (compactify w cs))
+        in property (inUnion == outUnion)
+  where
+    sameWidth = case cs of
+      []     -> True
+      (c:cs') -> Prelude.and [ mask c == mask c' | c' <- cs' ]
+    wrapsMod c = start c + n c * stride c > mask c
 
 -- | 'trimSelfWrap' produces a non-self-wrapping result.
 trimSelfWrapNotSelfWrapping ::
