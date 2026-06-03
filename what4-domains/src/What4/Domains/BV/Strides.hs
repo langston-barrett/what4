@@ -361,6 +361,7 @@ module What4.Domains.BV.Strides
   -- , overlap
   -- * Arithmetic
   , negate
+  , reverseD
   , add
   , sub
   , scale
@@ -480,10 +481,16 @@ module What4.Domains.BV.Strides
   -- , correct_overlap
   -- ** Arithmetic
   , correct_neg
+  , reverseDSameSet
   , correct_add
   , correct_sub
   , correct_scale
   , correct_mul
+  , addRobustDominatesRaw
+  , subRobustDominatesRaw
+  , mulRobustDominatesRaw
+  , addSubSizeCorrect
+  , addRobustClosedFormAgrees
   , correct_mulCorners
   , correct_mulNoStraddleU
   , correct_mulNoStraddleS
@@ -1546,7 +1553,19 @@ negate w c@Domain{stride, n = nn, mask} =
 -- >>> let evens = mk4 0 2 7
 -- >>> display (add w4 evens evens)
 -- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+--
+-- 'add' is /orientation-robust/ ('orientRobustAddSub'): the cross-operand
+-- integer gcd that fixes the result stride is sensitive to whether each operand
+-- is represented forwards or via its 'reverseD'. We pick the tightest
+-- orientation (via the closed-form 'addSubSize'), which never loses to and
+-- sometimes beats the raw single-orientation 'addRaw' (see
+-- 'addRobustDominatesRaw').
 add :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+add w = orientRobustAddSub w (addRaw w)
+
+-- | /O(w)/. The single-orientation addition kernel (see 'add' for the
+-- orientation-robust wrapper that should be preferred).
+addRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
 -- * CLP 4.2 Arithmetic Operations
@@ -1565,13 +1584,12 @@ add :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- orbit may overshoot the available step count (e.g. when summing two full
 -- cosets @span'@ doubles); 'clampToOrbit' caps it, and 'mk' canonicalizes
 -- the saturated case to the full coset of @start'@.
-add w a b =
+addRaw w a b =
   assert (proper a) $
   assert (proper b) $
   mk w start' d (clampToOrbit (mask a) d n')
   where
-    d = strideGcd2 a b
-    n' = n a * (stride a `div` d) + n b * (stride b `div` d)
+    (d, n') = addSubStrideAndSteps (n a) (stride a) (n b) (stride b)
     start' = modMask a (start a + start b)
 
 -- | /O(w)/. Subtraction.
@@ -1585,25 +1603,156 @@ add w a b =
 -- "[.***............]  = [1,2,3]"
 -- >>> display (sub w4 a b)
 -- "[.*******........]  = [1,2,3,4,5,6,7]"
+--
+-- Like 'add', 'sub' is orientation-robust ('orientRobustAddSub'): it scores
+-- both representatives of each operand with the closed-form 'addSubSize' and
+-- materializes the tightest.
 sub :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-sub w a b =
+sub w = orientRobustAddSub w (subRaw w)
+
+-- | /O(w)/. The single-orientation subtraction kernel (see 'sub' for the
+-- orientation-robust wrapper that should be preferred).
+subRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+subRaw w a b =
   assert (proper a) $
   assert (proper b) $
   mk w start' d (clampToOrbit (mask a) d n')
   where
-    d = strideGcd2 a b
-    n' = n a * (stride a `div` d) + n b * (stride b `div` d)
+    (d, n') = addSubStrideAndSteps (n a) (stride a) (n b) (stride b)
     start' = modSub (mask a) (start a) (end b)
 
--- | Result stride for 'add'\/'sub': @gcd(stride a, stride b)@, with singleton
--- operands skipped (their stride is the dummy value @1@, which would otherwise
--- collapse the result stride).
-strideGcd2 :: Domain w -> Domain w -> Natural
-strideGcd2 a b = case (n a, n b) of
-  (0, 0) -> 1
-  (0, _) -> stride b
-  (_, 0) -> stride a
-  _      -> Prelude.gcd (stride a) (stride b)
+-- | Shared scalar kernel for 'addRaw'\/'subRaw' and the closed-form
+-- 'addSubSize': compute the result stride @d@ and step count @n'@ from just the
+-- operand step counts and strides.
+addSubStrideAndSteps ::
+  Natural {- ^ @n_a@ -} -> Natural {- ^ @stride a@ -} ->
+  Natural {- ^ @n_b@ -} -> Natural {- ^ @stride b@ -} ->
+  (Natural, Natural)
+addSubStrideAndSteps na sa nb sb = (d, n')
+  where
+    d = case (na, nb) of
+          (0, 0) -> 1
+          (0, _) -> sb
+          (_, 0) -> sa
+          _      -> Prelude.gcd sa sb
+    n' = na * (sa `div` d) + nb * (sb `div` d)
+
+-- | /O(w)/. The /reverse orientation/ of a progression: the same set walked
+-- backwards. The new @start@ is the old 'end', the stride becomes its modular
+-- additive inverse @2^w - stride@, and the step count @n@ is unchanged.
+--
+-- Unlike 'negate', this denotes /exactly the same set/ as the input (verified
+-- by 'reverseDSameSet'): @{start + i·stride}@ and @{end + i·(2^w − stride)}@
+-- enumerate the same values in opposite order. Singletons and full cosets are
+-- their own reverse after 'mk' canonicalization.
+--
+-- The point is precision, not the set: @stride@ and @2^w − stride@ share the
+-- same 'strideGcd' (lowest set bit) but are different /integers/, so they feed
+-- different cross-operand integer gcds into 'add'\/'sub'\/'mul'. Trying both
+-- orientations and keeping the tighter result is what 'orientRobust' exploits.
+reverseD :: NatRepr w -> Domain w -> Domain w
+reverseD w c@Domain{stride, n = nn, mask} =
+  assert (proper c) $
+  mk w (end c) (modNeg mask stride) nn
+
+-- | Run a sound binary operation at all (up to four) orientation combinations
+-- of its operands and keep the smallest result.
+--
+-- Each of @a@, @b@ has two interchangeable representatives as a set — itself
+-- and its 'reverseD' — that nonetheless feed different integer strides into the
+-- cross-operand gcd inside 'add'\/'sub'\/'mul'. Since every orientation denotes
+-- the same set, every candidate is a sound abstraction of the same true
+-- result; taking the cardinality-minimum is therefore sound and /dominates/ the
+-- single-orientation result (which is among the candidates). See
+-- 'addRobustDominatesRaw'. Cost is /O(w)/ — a 4x constant factor, no
+-- asymptotic change.
+--
+-- Orientations that coincide after 'mk' canonicalization (singletons, full
+-- cosets) are deduplicated, so degenerate operands incur no extra work.
+--
+-- Used directly by 'mul', whose result size is /not/ a closed-form function of
+-- the operand strides (it threads through corner products and a non-monotone
+-- 'pseudoJoin'), so the result really must be materialized at each orientation.
+-- 'add'\/'sub' instead use 'orientRobustAddSub', which scores orientations with
+-- the closed-form 'addSubSize' and materializes only the winner.
+orientRobust ::
+  NatRepr w ->
+  (Domain w -> Domain w -> Domain w) ->
+  Domain w -> Domain w -> Domain w
+orientRobust w op a b =
+  List.foldl1' minBySize
+    [ op ai bj | ai <- orientations a, bj <- orientations b ]
+  where
+    orientations c = let r = reverseD w c in if r == c then [c] else [c, r]
+    minBySize x y = if size x <= size y then x else y
+
+-- | The exact result size of @addRaw@\/@subRaw@ on operands with the given step
+-- counts and strides, /without/ materializing the result.
+--
+-- Writing @s = 2^v · μ@ (μ odd), 'addRaw' walks @n' + 1@ values in stride
+-- @d = gcd(s_a, s_b)@ (singletons skipped by 'addSubStrideAndSteps'), saturating at
+-- the orbit length @2^w / lowestSetBit d@:
+--
+-- @
+-- size = min(n' + 1, 2^w \/ lowestSetBit d),   n' = n_a·(s_a\/d) + n_b·(s_b\/d)
+-- @
+--
+-- The @start'@ of the result (the only thing distinguishing 'addRaw' from
+-- 'subRaw') never enters this count, so 'addSubSize' scores /both/ operations
+-- and /all/ orientations. The orbit length is itself orientation-invariant
+-- (@lowestSetBit@ ignores the odd part that reversal flips); only @n'@ — through
+-- the cross-operand @gcd@ of the odd parts — actually moves. See
+-- 'addSubSizeCorrect'.
+addSubSize ::
+  Natural {- ^ @mask = 2^w - 1@ -} ->
+  Natural {- ^ @n_a@ -} -> Natural {- ^ @stride a@ -} ->
+  Natural {- ^ @n_b@ -} -> Natural {- ^ @stride b@ -} ->
+  Natural
+addSubSize m na sa nb sb =
+  min (n' + 1) (orbitLenOf m (lowestSetBit d))
+  where
+    (d, n') = addSubStrideAndSteps na sa nb sb
+
+-- | The (≤2) distinct orientation strides of an operand, for scoring with
+-- 'addSubSize'. Reversal flips the stride to its modular additive inverse, but
+-- leaves the size formula unchanged for degenerate operands:
+--
+--   * /Singleton/ (@n = 0@): its stride is the dummy @1@, which 'addSubSize'
+--     skips anyway, so the orientation is irrelevant.
+--   * /Full coset/ (@n + 1 = orbitLen@): 'reverseD' canonicalizes back to the
+--     same progression, so there is genuinely only one orientation.
+--
+-- Otherwise the two orientations @{stride, 2^w − stride}@ are distinct (they
+-- coincide only at @stride = 2^{w-1}@, which forces a singleton or full coset),
+-- and 'reverseD' leaves the reversed stride uncanonicalized at @2^w − stride@.
+strideOrientations :: Domain w -> [Natural]
+strideOrientations c
+  | n c == 0              = [stride c]
+  | n c + 1 == orbitLen c = [stride c]
+  | otherwise             = [stride c, modNeg (mask c) (stride c)]
+
+-- | Orientation-robust 'add'\/'sub' (see 'orientRobust' for the rationale).
+--
+-- Where the generic 'orientRobust' materializes the result at every orientation
+-- and takes the cardinality-minimum, this scores each of the (≤4) orientation
+-- pairs with the closed-form 'addSubSize' — a couple of scalar gcd\/mults — and
+-- materializes the winning orientation /once/. The two agree exactly
+-- ('addRobustClosedFormAgrees'), since 'addSubSize' /is/ @size . op@.
+orientRobustAddSub ::
+  NatRepr w ->
+  (Domain w -> Domain w -> Domain w) ->
+  Domain w -> Domain w -> Domain w
+orientRobustAddSub w op a b =
+  op (pick a saBest) (pick b sbBest)
+  where
+    m = mask a
+    (saBest, sbBest) =
+      fst $ List.foldl1' minBySize
+        [ ((sa, sb), addSubSize m (n a) sa (n b) sb)
+        | sa <- strideOrientations a, sb <- strideOrientations b ]
+    minBySize x y = if snd x <= snd y then x else y
+    -- Materialize only the chosen orientation; 'reverseD' only when it wins.
+    pick c s = if s == stride c then c else reverseD w c
 
 -- | The progression whose elements are exactly those of @arith@ that lie in the
 -- @g@-coset of @start'@, where @g = lowestSetBit d@. Strictly tighter than
@@ -1793,7 +1942,17 @@ scale w k = liftArith1 w (A.scale k)
 -- @w = 4@ the @O(w^2)@ variant is incomparable with this @O(w)@ one
 -- (sometimes wins, often ties, sometimes loses), and we don't pay the
 -- @w@-factor cost for an unreliable improvement.
+--
+-- Like 'add'\/'sub', 'mul' is orientation-robust ('orientRobust'): the corner
+-- products and the cut\'s integer strides both depend on operand orientation,
+-- so trying both representatives of each operand and keeping the tightest
+-- result is a sound, cheap precision win (see 'mulRobustDominatesRaw').
 mul :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+mul w = orientRobust w (mulRaw w)
+
+-- | /O(w)/. The single-orientation multiplication kernel (see 'mul' for the
+-- orientation-robust wrapper that should be preferred).
+mulRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
 -- * WI 3.2 Analysing expressions
@@ -1806,7 +1965,7 @@ mul :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- take the cardinality min. Empirically at w=4: corners ≤ cut on 100% of
 -- non-wrap pairs (so the dispatch loses no precision), and the cut is
 -- strictly tighter on 1.0% of wrap pairs (justifying its cost there).
-mul w a b
+mulRaw w a b
   | wrapsU a || wrapsU b =
       let !rcorners = mulCorners w a b
           !rcut = mulCutUS pseudoMeet pseudoJoin w a b
@@ -4142,6 +4301,14 @@ correct_neg w c x =
   proper c ==> member c x ==>
     property (member (negate w c) (asN w (Prelude.negate (toInteger x))))
 
+-- | 'reverseD' denotes exactly the same set as its argument: the orbit walked
+-- backwards visits the same values. This is what makes the orientation-robust
+-- 'add'\/'sub'\/'mul' sound — both representatives abstract the same set.
+reverseDSameSet :: (1 <= w) => NatRepr w -> Domain w -> Property
+reverseDSameSet w c =
+  proper c ==>
+    property (Set.fromList (toList (reverseD w c)) == Set.fromList (toList c))
+
 correct_add ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
@@ -4169,6 +4336,61 @@ correct_mul ::
 correct_mul w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (mul w a b) (asN w (toInteger x * toInteger y)))
+
+-- | The orientation-robust 'add' is never larger than the single-orientation
+-- 'addRaw': trying both representatives and keeping the cardinality-minimum can
+-- only help.
+addRobustDominatesRaw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addRobustDominatesRaw w a b =
+  proper a ==> proper b ==>
+    property (size (add w a b) <= size (addRaw w a b))
+
+-- | The orientation-robust 'sub' is never larger than the single-orientation
+-- 'subRaw'.
+subRobustDominatesRaw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+subRobustDominatesRaw w a b =
+  proper a ==> proper b ==>
+    property (size (sub w a b) <= size (subRaw w a b))
+
+-- | The orientation-robust 'mul' is never larger than the single-orientation
+-- 'mulRaw'.
+mulRobustDominatesRaw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+mulRobustDominatesRaw w a b =
+  proper a ==> proper b ==>
+    property (size (mul w a b) <= size (mulRaw w a b))
+
+-- | The closed-form 'addSubSize' equals the materialized size of 'addRaw' (and,
+-- since @start'@ doesn\'t affect the count, of 'subRaw') at /every/ orientation
+-- pair. This is what lets 'orientRobustAddSub' score orientations without
+-- building each candidate.
+addSubSizeCorrect ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addSubSizeCorrect w a b =
+  proper a ==> proper b ==>
+    property (Prelude.and
+      [ addSubSize (mask a) (n ai) (stride ai) (n bj) (stride bj)
+          == size (addRaw w ai bj)
+        && addSubSize (mask a) (n ai) (stride ai) (n bj) (stride bj)
+          == size (subRaw w ai bj)
+      | ai <- orientationsOf a, bj <- orientationsOf b ])
+  where
+    orientationsOf c = let r = reverseD w c in if r == c then [c] else [c, r]
+
+-- | The closed-form orientation picker 'orientRobustAddSub' produces a result
+-- of the same size as the brute-force 'orientRobust' (which materializes all
+-- four orientations). Sizes — not the domains themselves — because distinct
+-- orientations can tie on size while differing in @start@; 'add' breaks the tie
+-- toward the forward orientation, 'orientRobust' toward whichever 'foldl1''
+-- visits first, and both are equally precise.
+addRobustClosedFormAgrees ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addRobustClosedFormAgrees w a b =
+  proper a ==> proper b ==>
+    property (size (add w a b) == size (orientRobust w (addRaw w) a b)
+           && size (sub w a b) == size (orientRobust w (subRaw w) a b))
 
 
 correct_mulCorners ::

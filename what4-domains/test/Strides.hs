@@ -259,12 +259,27 @@ tests = TT.testGroup "Strides"
   , genTest "correct_neg" $
       do SW n <- genWidth
          (\c x -> S.correct_neg n c x) <$> S.genDomain n <*> genNatBV n
+  , genTest "reverseDSameSet" $
+      do SW n <- genWidthSmall
+         S.reverseDSameSet n <$> S.genDomain n
   , genTest "correct_add" $
       do SW n <- genWidth
          S.correct_add n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "addRobustDominatesRaw" $
+      do SW n <- genWidth
+         S.addRobustDominatesRaw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "addSubSizeCorrect" $
+      do SW n <- genWidth
+         S.addSubSizeCorrect n <$> S.genDomain n <*> S.genDomain n
+  , genTest "addRobustClosedFormAgrees" $
+      do SW n <- genWidth
+         S.addRobustClosedFormAgrees n <$> S.genDomain n <*> S.genDomain n
   , genTest "correct_sub" $
       do SW n <- genWidth
          S.correct_sub n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "subRobustDominatesRaw" $
+      do SW n <- genWidth
+         S.subRobustDominatesRaw n <$> S.genDomain n <*> S.genDomain n
   , genTest "correct_scale" $
       do SW n <- genWidth
          S.correct_scale n <$> chooseInteger (0, maxUnsigned n)
@@ -272,6 +287,9 @@ tests = TT.testGroup "Strides"
   , genTest "correct_mul" $
       do SW n <- genWidth
          S.correct_mul n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "mulRobustDominatesRaw" $
+      do SW n <- genWidth
+         S.mulRobustDominatesRaw n <$> S.genDomain n <*> S.genDomain n
   , genTest "correct_mulCorners" $
       do SW n <- genWidth
          S.correct_mulCorners n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n

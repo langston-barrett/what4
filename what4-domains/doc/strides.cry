@@ -370,17 +370,40 @@ clampToOrbit stride i = if i >= zext orbitM1 then orbitM1 else drop`{n} i
     orbitM1 : [n + 1]
     orbitM1 = zext ((- g) / g)
 
-add : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-add a b = mk start' d (clampToOrbit d spanAB)
+reverseD : {n} (fin n, n >= 2) => Domain n -> Domain n
+reverseD c = mk (end c) (modNeg c.stride) c.n
+
+addSubSize : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n + 1]
+addSubSize a b = size (mk 0 d (clampToOrbit d spanAB))
+  where (d, spanAB) = combineSpans a b
+
+orientRobustAddSub : {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Domain n) -> Domain n -> Domain n -> Domain n
+orientRobustAddSub op a b = op (orient best.0 a) (orient best.1 b)
+  where
+    cands = [ ((revA, revB), addSubSize (orient revA a) (orient revB b))
+            | revA <- [False, True], revB <- [False, True] ]
+    best = (foldl minBySize (head cands) (tail cands)).0
+    minBySize x y = if x.1 <= y.1 then x else y
+    orient rev c = if rev then reverseD c else c
+
+addRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+addRaw a b = mk start' d (clampToOrbit d spanAB)
   where
     (d, spanAB) = combineSpans a b
     start' = a.start + b.start
 
-sub : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-sub a b = mk start' d (clampToOrbit d spanAB)
+subRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+subRaw a b = mk start' d (clampToOrbit d spanAB)
   where
     (d, spanAB) = combineSpans a b
     start' = a.start - end b
+
+add : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+add = orientRobustAddSub addRaw
+
+sub : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+sub = orientRobustAddSub subRaw
 
 gcd : {n} (fin n, n >= 1) => [n] -> [n] -> [n]
 gcd x y = result.0
@@ -392,6 +415,15 @@ gcd x y = result.0
 // the multiplication recipe.
 mul : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 mul a b =
+  foldl minBySize (mulRaw a b)
+    [ mulRaw (orient revA a) (orient revB b)
+    | revA <- [False, True], revB <- [False, True] ]
+  where
+    minBySize x y = if size x <= size y then x else y
+    orient rev c = if rev then reverseD c else c
+
+mulRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+mulRaw a b =
   if wrapsU a \/ wrapsU b then
     if size rcorners <= size rcut then rcorners else rcut
   else rcorners
@@ -1887,10 +1919,48 @@ ultExactFalseSeparated : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 ultExactFalseSeparated a b =
   nonWrapping a /\ nonWrapping b /\ end b <= a.start ==> allNotUltPairs a b
 
+reverseDSameSet : {n} (fin n, n >= 2) => Domain n -> Property
+reverseDSameSet a = proper a ==> eqExact (reverseD a) a
+
+addSubSizeCorrect : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+addSubSizeCorrect a b =
+  proper a ==> proper b ==>
+    addSubSize a b == size (addRaw a b) /\ addSubSize a b == size (subRaw a b)
+
+addRobustClosedFormAgrees : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+addRobustClosedFormAgrees a b =
+  proper a ==> proper b ==>
+    size (add a b) == bruteAdd /\ size (sub a b) == bruteSub
+  where
+    bruteAdd = foldl mn (size (addRaw a b)) [ size (addRaw (o ra a) (o rb b))
+                                            | ra <- [False, True], rb <- [False, True] ]
+    bruteSub = foldl mn (size (subRaw a b)) [ size (subRaw (o ra a) (o rb b))
+                                            | ra <- [False, True], rb <- [False, True] ]
+    mn x y = if x <= y then x else y
+    o rev c = if rev then reverseD c else c
+
+addRobustDominatesRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+addRobustDominatesRaw a b = proper a ==> proper b ==> size (add a b) <= size (addRaw a b)
+
+subRobustDominatesRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+subRobustDominatesRaw a b = proper a ==> proper b ==> size (sub a b) <= size (subRaw a b)
+
+mulRobustDominatesRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+mulRobustDominatesRaw a b = proper a ==> proper b ==> size (mul a b) <= size (mulRaw a b)
 property p_correct_neg = correct_neg`{4}
 property p_correct_add = correct_add`{4}
 property p_correct_sub = correct_sub`{4}
-// @p_correct_mul@ is not declared as a SAW property at width 4 because the
+property p_reverseDSameSet = reverseDSameSet`{4}
+property p_addSubSizeCorrect = addSubSizeCorrect`{4}
+property p_addRobustClosedFormAgrees = addRobustClosedFormAgrees`{4}
+property p_addRobustDominatesRaw = addRobustDominatesRaw`{4}
+property p_subRobustDominatesRaw = subRobustDominatesRaw`{4}
+// @p_mulRobustDominatesRaw@ is not declared as a property at width 4 for the
+// same reason as @p_correct_mul@: @mul@ uses 'Integer' arithmetic and iterated
+// gcd, which causes solver timeouts. The Haskell Hedgehog property covers it
+// empirically.
+// property p_mulRobustDominatesRaw = mulRobustDominatesRaw`{4}
+// @p_correct_mul@ is not declared as a property at width 4 because the
 // new @mul@ uses 'Integer' arithmetic and iterated 'sIntegerGcd', which
 // causes solver timeouts. The Haskell @correct_mul@ Hedgehog property
 // covers soundness empirically.

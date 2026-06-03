@@ -216,29 +216,16 @@ subset_negate :: (1 <= w) => NatRepr w -> S.Domain w -> Property
 subset_negate w c =
   S.proper c ==> subsetOf w (S.negate w c) (A.negate (S.toArith c))
 
-subset_add ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-subset_add w a b =
-  S.proper a ==> S.proper b ==>
-    Prelude.not (S.isSelfWrapping a) ==> Prelude.not (S.isSelfWrapping b) ==>
-      subsetOf w (S.add w a b) (A.add (S.toArith a) (S.toArith b))
-
-subset_sub ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-subset_sub w a b =
-  S.proper a ==> S.proper b ==>
-    Prelude.not (S.isSelfWrapping a) ==> Prelude.not (S.isSelfWrapping b) ==>
-      subsetOf w (S.sub w a b) (A.add (S.toArith a) (A.negate (S.toArith b)))
-
--- Note: there is no @subset_mul@. 'mulCorners' picks whichever anchor
--- candidate has the smallest cardinality; when the winner isn't anchored
--- at zbounds, the result lives on a coset offset from arith's arc, and
--- the two over-approximations of the concrete product set diverge in
--- incomparable directions (strides keeps coset structure, arith keeps
--- arc structure). Empirically at @w = 4@, about 0.15% of non-self-wrap
--- pairs are counterexamples.
+-- Note: there is no @subset_add@, @subset_sub@, or @subset_mul@. All three
+-- ops are orientation-robust ('S.add'\/'S.sub'\/'S.mul'): they pick whichever
+-- operand orientation gives the smallest-cardinality result. When the winner
+-- isn't the forward orientation, the result walks a coset offset from arith's
+-- arc — the two over-approximations of the concrete result then diverge in
+-- incomparable directions (strides keeps coset structure, arith keeps arc
+-- structure), so neither contains the other. The cardinality-precision
+-- properties 'precise_add'\/'precise_sub'\/'precise_mul' still hold (strides is
+-- never /larger/ than arith); only containment is forfeited, which is the price
+-- of the orientation-robust precision win. See @GCD.md@ at the repo root.
 
 subset_scale ::
   (1 <= w) =>
@@ -437,12 +424,6 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
   , genTest "subset_negate" $
       do SW n <- genWidth
          subset_negate n <$> S.genDomain n
-  , genTest "subset_add" $
-      do SW n <- genWidth
-         subset_add n <$> S.genDomain n <*> S.genDomain n
-  , genTest "subset_sub" $
-      do SW n <- genWidth
-         subset_sub n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_scale" $
       do SW n <- genWidth
          subset_scale n <$> chooseInteger (0, maxUnsigned n)
