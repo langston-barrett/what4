@@ -214,6 +214,10 @@ haskellOnly = Set.fromList
   -- 'floorSum' is a Haskell-only Euclidean-recursion helper used by
   -- 'leqExact'; the Cryptol mirror states 'leqExact' declaratively.
   , "floorSumCorrect"
+  -- 'leqExactWindow' is the Haskell-only 'floorSum'-based window count behind
+  -- 'leqExact'\''s fallback; the Cryptol 'leqExact' oracle covers that case
+  -- declaratively, so this validates the Haskell branch only.
+  , "leqExactWindowAgrees"
   -- 'compactify' merges adjacent progressions when their union is itself a
   -- progression. Mirroring the Haskell fixed-point iteration in Cryptol
   -- is impractical for symbolic verification.
