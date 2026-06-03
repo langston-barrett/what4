@@ -338,6 +338,7 @@ module What4.Domains.BV.Strides
   , member
   , leq
   , leqPrecise
+  , leqExactPartial
   , leqExact
   , toList
   , size
@@ -445,6 +446,7 @@ module What4.Domains.BV.Strides
   , leqExactComplete
   , leqExactReflexive
   , leqExactTransitive
+  , leqExactPartialAgrees
   , sizeViaToList
   , correct_eq
   , cosetsDisjointCorrect
@@ -1147,9 +1149,11 @@ leqPrecise a b = assert (proper a) $ assert (proper b) $
     aStepInB      = stride a `Prelude.div` stride b
     aFitsInsideB i = i + n a * aStepInB <= n b
 
--- | /O(w^2)/. Partial order on progressions: @leqExact a b@ iff every element
--- of @a@ is in @b@.
-leqExact :: Domain w -> Domain w -> Bool
+-- | /O(w log w)/. Like 'leqExact', but never runs the quadratic window count:
+-- returns @Just@ the exact answer on the sub-domain it can decide cheaply, and
+-- 'Nothing' on the one case (a large window over a non-full @b@) that genuinely
+-- needs 'leqExact'\''s 'floorSum'. Exact wherever it is defined.
+leqExactPartial :: Domain w -> Domain w -> Maybe Bool
 -- Writing @stride = 2^v · m@ for odd @m@, the subgroup of @Z\/2^w@ generated
 -- by @stride@ is @⟨2^v⟩@ — the odd factor @m@ is invertible mod @2^w\/2^v@
 -- and so doesn\'t change which subgroup is generated. The check is then:
@@ -1162,38 +1166,75 @@ leqExact :: Domain w -> Domain w -> Bool
 --       | 0 ≤ i ≤ n a }@ all lie in @[0, n b]@, where
 --       @aStep = stride a · stride b^{-1} mod orbitLen b@ in @b@\'s index space.
 --
--- The window count uses 'floorSum' to compute, in @O(w log w)@, how many of
--- the @n a + 1@ visited indices fall in @[0, n b]@.
-leqExact a b = assert (proper a) $ assert (proper b) $
+-- All of (1), (2), and the easy shapes of (3) — @a@ a singleton, @b@ full, or
+-- @b@\'s window spanning at most half its orbit — are @O(w)@. In the small-
+-- window case @a@\'s visited indices can fit @[0, n b]@ in at most one
+-- orientation — running forward (no wrap) or backward (from the last index) —
+-- so 'monoFits' decides (3) with two unwrapped comparisons and no Euclidean
+-- descent. (The @Maybe@-valued counterpart and its exactness — wherever it
+-- commits, it equals the oracle 'leqExact' — are proven in Cryptol at @w = 4@,
+-- with @w = 8@ corroborated by randomized testing; see @doc/strides.cry@,
+-- @leqExactPartial@\/@leqExactPartialAgrees@.) Only the /large window/
+-- (non-full @b@, window over half the orbit) is left to the caller as
+-- 'Nothing': there @a@ may fit by wrapping, which needs a count.
+leqExactPartial a b = assert (proper a) $ assert (proper b) $
   case valueIndexMaybe b (start a) of
-    Nothing -> False                             -- (1) fails: start a off coset
+    Nothing -> Just False                            -- (1) fails: start a off coset
     Just iAStart
-      | aIsSingleton          -> iAStart <= n b  -- (1) ok; (2)/(3) vacuous
-      | Prelude.not subgroupContained -> False   -- (2) fails
-      | bIsFull               -> True            -- (3) vacuous: full orbit
-      | otherwise             -> windowFits iAStart  -- (3)
+      | aIsSingleton          -> Just (iAStart <= n b)  -- (1) ok; (2)/(3) vacuous
+      | Prelude.not subgroupContained -> Just False     -- (2) fails
+      | bIsFull               -> Just True              -- (3) vacuous: full orbit
+      | smallWindow           -> Just (monoFits iAStart) -- (3) O(w) fast path
+      | otherwise             -> Nothing                -- (3) needs floorSum
   where
     gB :: Natural
     gB = strideGcd b
     mB :: Natural
     mB = orbitLen b
-    aIsSingleton, subgroupContained, bIsFull :: Bool
+    aIsSingleton, subgroupContained, bIsFull, smallWindow :: Bool
     aIsSingleton      = n a == 0
     subgroupContained = stride a `mod` gB == 0   -- (2)
     bIsFull           = n b + 1 == mB
+    smallWindow       = (n b + 1) * 2 <= mB
     -- @a@'s stride translated to @b@-index space, modulo b's orbit length.
     invSB, aStep :: Natural
     invSB = invModPow2 (stride b `divByPow2` gB) mB
     aStep = ((stride a `divByPow2` gB) * invSB) .&. (mB - 1)
-    -- (3): of the @n a + 1@ visited @b@-indices, count how many fall in
-    -- @[0, n b]@; the AP fits iff that count is @n a + 1@.
-    windowFits :: Natural -> Bool
-    windowFits iAStart =
-      let nA1     = n a + 1
-          wWidth  = n b + 1
-          hits    = nA1 + floorSum nA1 mB aStep iAStart
-                        - floorSum nA1 mB aStep (iAStart + mB - wWidth)
-      in hits == nA1
+    -- (3), small-window fast path: @a@'s indices fit @[0, n b]@ iff they fit
+    -- without wrapping in some orientation. Forward: @iAStart + n a · aStep@
+    -- never exceeds @n b@. Backward: from the last index, stepping by
+    -- @mB - aStep@, the reach never exceeds @n b@. (Exact only when
+    -- 'smallWindow' holds, so a window cannot fit by wrapping.)
+    monoFits :: Natural -> Bool
+    monoFits iAStart =
+      let nA       = n a
+          forward  = iAStart + nA * aStep
+          iEnd     = forward `mod` mB
+          backward = iEnd + nA * (mB - aStep)
+      in iAStart <= n b && (forward <= n b || backward <= n b)
+
+-- | /O(w log w)/ when @b@\'s window spans at most half its orbit, /O(w^2)/
+-- otherwise. Partial order on progressions: @leqExact a b@ iff every element
+-- of @a@ is in @b@.
+leqExact :: Domain w -> Domain w -> Bool
+-- 'leqExactPartial' decides everything but the large-window, non-full @b@ case
+-- in @O(w)@. That remaining case is the only one where @a@ can fit @b@\'s
+-- window by wrapping, so it needs the @O(w^2)@ 'floorSum' window count:
+-- of the @n a + 1@ visited @b@-indices, how many fall in @[0, n b]@? The AP
+-- fits iff that count is @n a + 1@.
+leqExact a b = case leqExactPartial a b of
+  Just r  -> r
+  Nothing ->
+    let gB     = strideGcd b
+        mB     = orbitLen b
+        invSB  = invModPow2 (stride b `divByPow2` gB) mB
+        aStep  = ((stride a `divByPow2` gB) * invSB) .&. (mB - 1)
+        iAStart = valueIndex b (start a)
+        nA1    = n a + 1
+        wWidth = n b + 1
+        hits   = nA1 + floorSum nA1 mB aStep iAStart
+                     - floorSum nA1 mB aStep (iAStart + mB - wWidth)
+    in hits == nA1
 
 -- | /O(2^w \/ g)/, where @g = gcd(stride, 2^w)@. Concretization function.
 --
@@ -2835,6 +2876,16 @@ leqExactTransitive a b c =
   proper a ==> proper b ==> proper c ==>
     mask a == mask b ==> mask b == mask c ==>
       leqExact a b ==> leqExact b c ==> property (leqExact a c)
+
+-- | 'leqExactPartial' is exact wherever it is defined: when it returns
+-- @Just r@, that @r@ agrees with 'leqExact'. (On 'Nothing' the partial check
+-- declines, and 'leqExact' falls back to the 'floorSum' window count.)
+leqExactPartialAgrees :: Domain w -> Domain w -> Property
+leqExactPartialAgrees a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case leqExactPartial a b of
+      Just r  -> property (r == leqExact a b)
+      Nothing -> property True
 
 -- | 'size' agrees with the length of 'toList'.
 sizeViaToList :: Domain w -> Property
