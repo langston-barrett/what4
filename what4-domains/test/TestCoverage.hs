@@ -211,6 +211,9 @@ haskellOnly = Set.fromList
   , "firstCosetMemberCorrect"
   -- 'orbitLenViaToList' relies on 'toList' which has no direct Cryptol spec.
   , "orbitLenViaToList"
+  -- 'canonHashRespectsEq' checks the 'Hashable' law for the 'Canonical'
+  -- newtype; Cryptol has no 'Hashable', so this is Haskell-only.
+  , "canonHashRespectsEq"
   -- 'floorSum' is a Haskell-only Euclidean-recursion helper used by
   -- 'leqExact'; the Cryptol mirror states 'leqExact' declaratively.
   , "floorSumCorrect"

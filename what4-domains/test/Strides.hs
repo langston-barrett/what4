@@ -46,6 +46,16 @@ genWidthSmall =
          | Just LeqProof <- isPosNat n -> pure (SW n)
        _ -> error "test panic! genWidthSmall"
 
+-- | Capped at 5, for tests whose reference enumerates all @(stride, start, n)@
+-- triples (@O(2^{3w})@), which is intractable past small widths.
+genWidthTiny :: Gen SomeWidth
+genWidthTiny =
+  do x <- chooseInt (1, 5)
+     case someNat (fromIntegral x :: Natural) of
+       Just (Some n)
+         | Just LeqProof <- isPosNat n -> pure (SW n)
+       _ -> error "test panic! genWidthTiny"
+
 genNatBV :: NatRepr w -> Gen Natural
 genNatBV w = fromInteger <$> chooseInteger (0, maxUnsigned w)
 
@@ -174,26 +184,12 @@ tests = TT.testGroup "Strides"
   , genTest "sizeViaToList" $
       do SW n <- genWidthSmall
          S.sizeViaToList <$> S.genDomain n
-  , genTest "correct_eq" $
-      do SW n <- genWidth
-         S.correct_eq n <$>
-           ((,) <$> S.genDomain n <*> genNatBV n) <*>
-           ((,) <$> S.genDomain n <*> genNatBV n)
   , genTest "cosetsDisjointCorrect" $
       do SW n <- genWidth
          S.cosetsDisjointCorrect <$> S.genDomain n <*> S.genDomain n <*> genNatBV n
   , genTest "eqExactCorrect" $
       do SW n <- genWidthSmall
          S.eqExactCorrect <$> S.genDomain n <*> S.genDomain n
-  , genTest "eqReflexive" $
-      do SW n <- genWidth
-         S.eqReflexive <$> S.genDomain n
-  , genTest "eqSymmetric" $
-      do SW n <- genWidth
-         S.eqSymmetric <$> S.genDomain n <*> S.genDomain n
-  , genTest "eqTransitive" $
-      do SW n <- genWidth
-         S.eqTransitive <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
   , genTest "eqExactReflexive" $
       do SW n <- genWidth
          S.eqExactReflexive <$> S.genDomain n
@@ -203,9 +199,31 @@ tests = TT.testGroup "Strides"
   , genTest "eqExactTransitive" $
       do SW n <- genWidth
          S.eqExactTransitive <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
-  , genTest "eqRefinesEqExact" $
+  , genTest "canonLossless" $
       do SW n <- genWidthSmall
-         S.eqRefinesEqExact <$> S.genDomain n <*> S.genDomain n
+         S.canonLossless <$> S.genDomain n
+  , genTest "canonProper" $
+      do SW n <- genWidth
+         S.canonProper <$> S.genDomain n
+  , genTest "canonUnique" $
+      do SW n <- genWidthSmall
+         S.canonUnique <$> S.genDomain n <*> S.genDomain n
+  , genTest "canonIdempotent" $
+      do SW n <- genWidth
+         S.canonIdempotent <$> S.genDomain n
+  , genTest "eqCorrect" $
+      do SW n <- genWidthSmall
+         S.eqCorrect <$> S.genDomain n <*> S.genDomain n
+  , genTest "canonForwardOriented" $
+      do SW n <- genWidth
+         S.canonForwardOriented <$> S.genDomain n
+  -- Reference enumerates all (stride, start, n) triples, so cap the width.
+  , genTest "canonMatchesSearch" $
+      do SW n <- genWidthTiny
+         S.canonMatchesSearch n <$> S.genDomain n
+  , genTest "canonHashRespectsEq" $
+      do SW n <- genWidth
+         S.canonHashRespectsEq <$> S.genDomain n <*> S.genDomain n
   , genTest "toArithCorrect" $
       do SW n <- genWidth
          S.toArithCorrect n <$> S.genDomain n <*> genNatBV n

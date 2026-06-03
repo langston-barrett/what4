@@ -307,15 +307,43 @@ leqExactPartial a b =
 size : {n} (fin n, n >= 2) => Domain n -> [n + 1]
 size c = c.n + 1
 
-eq : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe Bit
-eq a b =
-  if a.n == 0 /\ b.n == 0 then Just (a.start == b.start)
-  else if cosetsDisjoint a b then Just False
-  else if ~ (Arith::overlap (hull a) (hull b)) then Just False
-  else Nothing
-
 eqExact : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
 eqExact a b = size a == size b /\ leqExact a b
+
+// ------------------------------------------------------------------
+// ** Canonicalization
+//
+// See @What4.Domains.BV.Strides@ in the Haskell sources for the math behind
+// the canonical form and the argument for why it is opt-in.
+
+canonicalize : {n} (fin n, n >= 2) => Domain n -> Domain n
+canonicalize c =
+  if c.n + 1 == orbitLen c then c
+   else if c.n == 0         then c
+   else if c.n + 2 == orbitLen c then
+     { start = c.start - c.stride + g, stride = g, n = c.n }
+   else if c.stride <= - c.stride then c
+   else { start = end c, stride = - c.stride, n = c.n }
+  where g = strideGcd c
+
+eq : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+eq a b = canonicalize a == canonicalize b
+
+canonicalizeSearch : {n} (fin n, n >= 2) => Domain n -> Domain n
+canonicalizeSearch c = foldl pick c reps
+  where
+    pick best d =
+      if proper d /\ eqExact d c /\ lexLt d best then d else best
+    reps = [ { start = s, stride = st, n = nv }
+           | st <- ([0 .. 2^^n - 1] : [_][n])
+           , s  <- ([0 .. 2^^n - 1] : [_][n])
+           , nv <- ([0 .. 2^^(n + 1) - 1] : [_][n + 1]) ]
+
+lexLt : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+lexLt x y =
+  x.stride < y.stride \/
+  (x.stride == y.stride /\
+    (x.start < y.start \/ (x.start == y.start /\ x.n < y.n)))
 
 // ------------------------------------------------------------------
 // * Arithmetic
@@ -1384,13 +1412,6 @@ leqExactPartialAgrees a b =
       Just r  -> r == leqExact a b
       Nothing -> True
 
-correct_eq : {n} (fin n, n >= 2) => Domain n -> [n] -> Domain n -> [n] -> Property
-correct_eq a x b y =
-  proper a ==> proper b ==> member a x ==> member b y ==>
-    case eq a b of
-      Just r  -> if r then x == y else x != y
-      Nothing -> True
-
 cosetsDisjointCorrect : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
 cosetsDisjointCorrect a b x =
   proper a ==> proper b ==> member a x ==> member b x ==>
@@ -1413,44 +1434,38 @@ eqExactTransitive a b c =
   proper a ==> proper b ==> proper c ==>
     eqExact a b ==> eqExact b c ==> eqExact a c
 
-eqMaybeEq : Maybe Bit -> Maybe Bit -> Bit
-eqMaybeEq m1 m2 = case m1 of
-  Nothing -> case m2 of
-    Nothing -> True
-    Just _  -> False
-  Just x  -> case m2 of
-    Nothing -> False
-    Just y  -> x == y
+// `canonicalize` denotes the same set as its input.
+canonLossless : {n} (fin n, n >= 2) => Domain n -> Property
+canonLossless c = proper c ==> eqExact (canonicalize c) c
 
-eqReflexive : {n} (fin n, n >= 2) => Domain n -> Property
-eqReflexive a = proper a ==> ~ (eqMaybeEq (eq a a) (Just False))
+// `canonicalize` produces a `proper` representation.
+canonProper : {n} (fin n, n >= 2) => Domain n -> Property
+canonProper c = proper c ==> proper (canonicalize c)
 
-eqSymmetric : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-eqSymmetric a b = proper a ==> proper b ==> eqMaybeEq (eq a b) (eq b a)
+// The hash-consing property: equal sets have equal canonical forms. This is
+// what makes O(1) equality (`eq`) sound.
+canonUnique : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+canonUnique a b =
+  proper a ==> proper b ==> eqExact a b ==> canonicalize a == canonicalize b
 
-eqTransitive : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
-eqTransitive a b c =
-  proper a ==> proper b ==> proper c ==>
-    case eq a b of
-      Nothing -> True
-      Just rab ->
-        case eq b c of
-          Nothing  -> True
-          Just rbc ->
-            // Definite answers compose: T,T -> T; T,F -> F; F,T -> F.
-            // The F,F case is vacuous in the usual sense (both pairs are
-            // unequal but tell us nothing about a vs c).
-            if rab /\ rbc then eqMaybeEq (eq a c) (Just True)
-            else if rab /\ ~ rbc then eqMaybeEq (eq a c) (Just False)
-            else if ~ rab /\ rbc then eqMaybeEq (eq a c) (Just False)
-            else True
+// `canonicalize` is idempotent.
+canonIdempotent : {n} (fin n, n >= 2) => Domain n -> Property
+canonIdempotent c = proper c ==> canonicalize (canonicalize c) == canonicalize c
 
-eqRefinesEqExact : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-eqRefinesEqExact a b =
-  proper a ==> proper b ==>
-    case eq a b of
-      Just r  -> if r then eqExact a b else ~ (eqExact a b)
-      Nothing -> True
+// `eq` decides exact set equality.
+eqCorrect : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+eqCorrect a b = proper a ==> proper b ==> eq a b == eqExact a b
+
+// The minimal-stride rule subsumes a separate orientation tie-break: the
+// canonical form never has stride strictly greater than its reverse.
+canonForwardOriented : {n} (fin n, n >= 2) => Domain n -> Property
+canonForwardOriented c =
+  proper c ==> cc.stride <= - cc.stride \/ cc.n + 1 == orbitLen cc
+  where cc = canonicalize c
+
+// The O(w) formula agrees with the exhaustive search-based reference.
+canonMatchesSearch : {n} (fin n, n >= 2) => Domain n -> Property
+canonMatchesSearch c = proper c ==> canonicalize c == canonicalizeSearch c
 
 property p_startMember               = startMember`{8}
 property p_endMember                 = endMember`{8}
@@ -1470,18 +1485,25 @@ property p_leqExactCorrect           = leqExactCorrect`{4}
 property p_leqExactReflexive         = leqExactReflexive`{4}
 // property p_leqExactTransitive        = leqExactTransitive`{4}
 property p_leqExactPartialAgrees     = leqExactPartialAgrees`{4}
-property p_correct_eq                = correct_eq`{4}
 property p_cosetsDisjointCorrect     = cosetsDisjointCorrect`{4}
 property p_eqExactCorrect            = eqExactCorrect`{4}
-property p_eqReflexive               = eqReflexive`{4}
-property p_eqSymmetric               = eqSymmetric`{4}
-property p_eqTransitive              = eqTransitive`{4}
 property p_eqExactReflexive          = eqExactReflexive`{4}
 property p_eqExactSymmetric          = eqExactSymmetric`{4}
 // `eqExactTransitive` reduces to the same expensive exact-set reasoning as the
 // disabled `leqExact` transitivity/completeness lemmas above.
 // property p_eqExactTransitive         = eqExactTransitive`{4}
-property p_eqRefinesEqExact          = eqRefinesEqExact`{4}
+
+property p_canonLossless             = canonLossless`{4}
+property p_canonProper               = canonProper`{4}
+property p_canonUnique               = canonUnique`{4}
+property p_canonIdempotent           = canonIdempotent`{4}
+property p_eqCorrect                 = eqCorrect`{4}
+property p_canonForwardOriented      = canonForwardOriented`{3}
+// `canonMatchesSearch` enumerates all (stride, start, n) triples as its
+// reference; symbolically that is @2^(3w)@ cases, so even @w = 3@ makes the
+// whole-file `:prove` time out in CI. Pinned at @w = 2@; the Haskell
+// property test exercises it at larger widths.
+property p_canonMatchesSearch        = canonMatchesSearch`{2}
 
 // ------------------------------------------------------------------
 // ** Conversion

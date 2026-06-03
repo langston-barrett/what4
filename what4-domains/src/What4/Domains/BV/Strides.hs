@@ -339,6 +339,10 @@ module What4.Domains.BV.Strides
   , fromArith
   , toBitwise
   , fromBitwise
+  -- ** Canonicalization
+  , Canonical
+  , getCanonical
+  , canonicalize
   -- * Queries
   , isSelfWrapping
   , member
@@ -350,7 +354,6 @@ module What4.Domains.BV.Strides
   , size
   -- , asSingleton
   , eq
-  , eqExact
   -- , ubounds
   -- , sbounds
   -- , ult
@@ -457,16 +460,19 @@ module What4.Domains.BV.Strides
   , leqExactPartialAgrees
   , leqExactWindowAgrees
   , sizeViaToList
-  , correct_eq
   , cosetsDisjointCorrect
   , eqExactCorrect
-  , eqReflexive
-  , eqSymmetric
-  , eqTransitive
   , eqExactReflexive
   , eqExactSymmetric
   , eqExactTransitive
-  , eqRefinesEqExact
+  , canonLossless
+  , canonProper
+  , canonUnique
+  , canonIdempotent
+  , eqCorrect
+  , canonForwardOriented
+  , canonMatchesSearch
+  , canonHashRespectsEq
   -- , correct_ubounds
   -- , correct_sbounds
   -- , correct_ult
@@ -600,6 +606,7 @@ module What4.Domains.BV.Strides
 
 import           Control.Exception (assert)
 import           Data.Bits ((.&.), popCount, shiftL, shiftR)
+import           Data.Hashable (Hashable(..), hash)
 import           Data.Maybe (fromMaybe)
 import           GHC.TypeNats (Nat, type (+), type (<=))
 import           Numeric.Natural (Natural)
@@ -969,6 +976,126 @@ fromAscEltList w =
       in Just (mk w x (fromInteger d) nn)
 
 -- ------------------------------------------------------------------
+-- ** Canonicalization
+
+-- | A progression in canonical form: the unique representative its set gets
+-- from 'canonicalize'. The constructor is hidden, so the only way to obtain a
+-- @Canonical@ is via 'canonicalize'; that is what makes its instances sound:
+--
+--   * @'Eq' ('Canonical' w)@ /is/ set equality (see 'eqCorrect'),
+--   * @'Ord'@ and @'Hashable'@ are likewise functions of the denoted set,
+--
+-- so @Canonical@ values are safe to use directly as @Map@\/@Set@ keys, as
+-- hash-cons or memo keys, and for dedup. Recover the underlying 'Domain' with
+-- 'getCanonical'.
+newtype Canonical w = Canonical (Domain w)
+  deriving (Eq, Ord, Show)
+
+-- | The underlying canonical 'Domain'. It is 'proper', and equal denoted sets
+-- give structurally-equal results.
+getCanonical :: Canonical w -> Domain w
+getCanonical (Canonical c) = c
+{-# INLINE getCanonical #-}
+
+-- | Hashes the denoted set: two 'Canonical' values are equal iff their sets
+-- are, so this agrees with 'Eq' as a hashing key requires.
+instance Hashable (Canonical w) where
+  hashWithSalt salt (Canonical Domain{start, stride, n, mask}) =
+    salt `hashWithSalt` start `hashWithSalt` stride
+         `hashWithSalt` n `hashWithSalt` mask
+
+-- | /O(w)/. Lossless canonical form: the unique 'proper' representative of a
+-- progression's /set/, wrapped in 'Canonical'. Two progressions denote the same
+-- set iff their 'canonicalize' results are equal (the @'Eq' 'Canonical'@
+-- instance), so consumers who want @O(1)@ equality — hash-consing, dedup, memo
+-- keys — can 'canonicalize' on demand and then use the derived @Eq@\/@Ord@\/
+-- @Hashable@.
+--
+-- Among the 'proper' representations of a set this picks the one with the
+-- smallest stride, tie-broken by smallest start. It is @O(w)@ rather than a
+-- number-theoretic search because the only representational freedom left to
+-- collapse on a non-saturated progression is /orientation/: a progression and
+-- its reverse denote the same set with strides @t@ and @2^w − t@, so the
+-- minimal stride is just @min(t, 2^w − t)@. (@g = 'strideGcd'@ is fixed by the
+-- set, and on a non-saturated progression so is the step count @n@.) The
+-- /saturated/ regimes carry extra freedom that 'mk'\/'proper' already pin, so
+-- 'canonicalize' leaves them alone:
+--
+--   * /full coset/ (@n + 1 = orbitLen@): the orbit is the whole subgroup, so
+--     any stride generating @⟨g⟩@ and any @n ≥ orbitLen − 1@ denote the same
+--     set; 'mk' pins @stride = g@, @start < g@, @n = orbitLen − 1@.
+--   * /singleton/ (@n = 0@): a one-point set has no stride; 'mk' pins it to 1.
+--   * /coset minus one point/ (@n + 2 = orbitLen@): every unit stride
+--     represents the set, so the minimum collapses to @g@ with the start
+--     shifted one step back.
+--
+-- == Why this is opt-in rather than part of 'proper'
+--
+-- The split is /computational/, not about precision (operations are
+-- orientation-/representation-robust, so deferring any normalization costs no
+-- precision). The load-bearing 'proper' invariant is the cardinality clause
+-- @n < orbitLen@: operations read @'size' = n + 1@ as the true element count
+-- (e.g. 'eqExact'\'s size short-circuit, the union\/intersection sizes in
+-- 'compactify'), which holds only when the step count isn\'t inflated past the
+-- orbit. That clause /must/ be maintained, and 'mk' does. The remaining
+-- 'proper' pins — full-coset @stride = g@\/@start < g@, singleton @stride = 1@ —
+-- are representational like orientation, but 'mk' establishes them for free on
+-- every construction, so there is no reason /not/ to. Orientation is the one
+-- normalization that is /not/ free to maintain: making it a 'proper' invariant
+-- would add a @min(t, 2^w − t)@ flip plus a result re-normalization to every
+-- operation, and (since 'strideGcd', 'orbitLen', 'size', and membership are all
+-- already orientation-invariant) no operation reads anything it would enable.
+-- Its sole consumer is equality, so it is deferred here and paid only when an
+-- @O(1)@-equality key is actually wanted.
+--
+-- == Examples
+--
+-- A large stride reverses to its minimal orientation. At @w = 4@, walking
+-- stride 11 from 1 visits @{1, 12, 7, 2}@; the same set is the stride-@16 − 11
+-- = 5@ progression from 2, and 'canonicalize' picks the smaller stride:
+--
+-- >>> let a = mk4 1 11 3
+-- >>> display a
+-- "[.**....*....*...]  = [1,12,7,2]"
+-- >>> display (getCanonical (canonicalize a))
+-- "[.**....*....*...]  = [2,7,12,1]"
+-- >>> canonicalize a == canonicalize (mk4 2 5 3)
+-- True
+canonicalize :: Domain w -> Canonical w
+canonicalize c@Domain{start = s, stride = t, n = nn, mask = m} = Canonical $
+  case () of
+    _ | nn + 1 == orbitLen c -> c                  -- full coset: already canonical
+      | nn == 0              -> c                   -- singleton: stride already 1
+      | nn + 2 == orbitLen c ->                     -- coset minus a single point
+          mkChecked ((s + modNeg m t + g) .&. m) g nn
+      | t <= modNeg m t      -> c                   -- already the smaller orientation
+      | otherwise            -> mkChecked (end c) (modNeg m t) nn  -- reverse
+  where
+    g = strideGcd c
+    -- Build a 'Domain' with the stored mask, asserting the result is 'proper'.
+    -- The orientation flip preserves 'strideGcd' (and hence 'orbitLen'), and the
+    -- coset-minus-one rewrite uses @stride = g@ with @n@ unchanged, so neither
+    -- branch needs the saturation handling that 'mk' applies.
+    mkChecked s' t' n' =
+      let d = Domain { start = s', stride = t', n = n', mask = m }
+      in assert (proper d) d
+
+-- | /O(w)/. Exact set-equality: 'True' iff @a@ and @b@ denote the same set.
+-- This is literally @'canonicalize' a == 'canonicalize' b@ — 'canonicalize' is
+-- a lossless normal form, so structural equality of canonical forms /is/ set
+-- equality (see 'eqCorrect'). At @O(w)@ it dominates the @O(w^2)@ 'eqExact'
+-- oracle it is checked against.
+--
+-- == Examples
+--
+-- >>> eq (mk4 1 11 3) (mk4 2 5 3)   -- same set {1,2,7,12}, different strides
+-- True
+-- >>> eq (mk4 0 2 7) (mk4 0 4 3)    -- evens vs {0,4,8,12}
+-- False
+eq :: Domain w -> Domain w -> Bool
+eq a b = canonicalize a == canonicalize b
+
+-- ------------------------------------------------------------------
 -- * Conversion
 
 -- | /O(w)/. Convert a progression to an arithmetic domain (wrapped interval).
@@ -1317,32 +1444,15 @@ size :: Domain w -> Natural
 size c@Domain{n} = assert (proper c) $ n + 1
 {-# INLINE size #-}
 
--- | /O(w)/. Decide equality of two progressions: @Just True@ if both are
--- the same singleton, @Just False@ if they share no values, 'Nothing' if
--- they overlap but aren\'t both singletons.
---
--- Disjointness is detected by two cheap sufficient (not complete) checks:
---
---   * 'cosetsDisjoint' — the residue cosets in @Z\/2^w@ don\'t intersect,
---     so the orbits share no values regardless of window;
---   * 'A.domainsOverlap' on the arc 'hull's — the orbital windows
---     @[start, start + n·stride]@ don\'t overlap as arithmetic intervals,
---     so a fortiori the orbits themselves don\'t.
---
--- For an exact (but quadratic) decision procedure use 'eqExact'.
-eq :: Domain w -> Domain w -> Maybe Bool
-eq a b
-  | n a == 0, n b == 0          = Just (start a == start b)
-  | cosetsDisjoint a b          = Just False
-  | Prelude.not arcsOverlap     = Just False
-  | otherwise                   = Nothing
-  where
-    arcsOverlap = A.domainsOverlap (hull a) (hull b)
-
 -- | /O(w^2)/. Exact set-equality on progressions: 'True' iff @a@ and @b@
 -- denote the same set of bitvectors. Short-circuits on size mismatch (a
 -- necessary condition); otherwise checks 'leqExact' in one direction —
 -- equal cardinalities plus containment force set equality.
+--
+-- Internal: the public equality test is 'eq' (@O(w)@ via 'canonicalize'). This
+-- @leqExact@-based decision is retained as an independent oracle that 'eq' is
+-- checked against (see 'eqCorrect'); 'eqExactCorrect' in turn ties it to the
+-- 'toList' ground truth, so the two algorithms cross-check each other.
 eqExact :: Domain w -> Domain w -> Bool
 eqExact a b = size a == size b && leqExact a b
 
@@ -3839,23 +3949,6 @@ sizeViaToList :: Domain w -> Property
 sizeViaToList c =
   proper c ==> property (size c == fromIntegral (length (toList c)))
 
--- | Soundness of 'eq': @Just True@ pins members to the same value, @Just False@
--- pins them to different values, and @Nothing@ is permissive.
-correct_eq ::
-  (1 <= w) =>
-  NatRepr w ->
-  (Domain w, Natural) -> (Domain w, Natural) -> Property
-correct_eq _w (a, x) (b, y) =
-  proper a ==> proper b ==> mask a == mask b ==>
-    member a x' ==> member b y' ==>
-      case eq a b of
-        Just True  -> property (x' == y')
-        Just False -> property (x' /= y')
-        Nothing    -> property True
-  where
-    x' = modMask a x
-    y' = modMask b y
-
 -- | Soundness of 'cosetsDisjoint': if it returns 'True', then @a@ and @b@
 -- share no values. The contrapositive is the useful direction here — any
 -- shared element witnesses non-disjoint cosets.
@@ -3890,43 +3983,84 @@ eqExactTransitive a b c =
     mask a == mask b ==> mask b == mask c ==>
       eqExact a b ==> eqExact b c ==> property (eqExact a c)
 
--- | 'eq' is /reflexive on its definite answers/: it never reports a
--- progression as unequal to itself. (For multi-element progressions @eq a a@
--- returns 'Nothing': a witness pair @(x, y)@ drawn from @a × a@ is not in
--- general the same value, so 'eq' can\'t soundly commit to 'Just True'.)
-eqReflexive :: Domain w -> Property
-eqReflexive a = proper a ==> property (eq a a /= Just False)
+-- ------------------------------------------------------------------
+-- ** Canonicalization
 
--- | 'eq' is symmetric.
-eqSymmetric :: Domain w -> Domain w -> Property
-eqSymmetric a b =
+-- | 'canonicalize' denotes the same set as its input.
+canonLossless :: Domain w -> Property
+canonLossless c = proper c ==> property (eqExact (getCanonical (canonicalize c)) c)
+
+-- | 'canonicalize' produces a 'proper' representation.
+canonProper :: Domain w -> Property
+canonProper c = proper c ==> property (proper (getCanonical (canonicalize c)))
+
+-- | The hash-consing property: equal sets have equal canonical forms. This is
+-- what makes 'eq' (O(1)\/O(w) equality after canonicalization) sound.
+canonUnique :: Domain w -> Domain w -> Property
+canonUnique a b =
+  proper a ==> proper b ==> mask a == mask b ==> eqExact a b ==>
+    property (canonicalize a == canonicalize b)
+
+-- | 'canonicalize' is idempotent (re-canonicalizing the underlying form is a
+-- no-op).
+canonIdempotent :: Domain w -> Property
+canonIdempotent c =
+  proper c ==>
+    property (canonicalize (getCanonical (canonicalize c)) == canonicalize c)
+
+-- | 'eq' (canonical-form equality) agrees with the 'eqExact' oracle, hence
+-- decides exact set equality.
+eqCorrect :: Domain w -> Domain w -> Property
+eqCorrect a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    property (eq a b == eq b a)
+    property (eq a b == eqExact a b)
 
--- | 'eq' is /transitive on definite answers/: if @eq a b == Just True@ and
--- @eq b c == Just True@, then @eq a c == Just True@; if @eq a b == Just
--- True@ and @eq b c == Just False@, then @eq a c == Just False@. (Definite
--- answers compose; 'Nothing' is permissive and so transitivity in the usual
--- sense is vacuous when any operand returns 'Nothing'.)
-eqTransitive :: Domain w -> Domain w -> Domain w -> Property
-eqTransitive a b c =
-  proper a ==> proper b ==> proper c ==>
-    mask a == mask b ==> mask b == mask c ==>
-      case (eq a b, eq b c) of
-        (Just True, Just True)   -> property (eq a c == Just True)
-        (Just True, Just False)  -> property (eq a c == Just False)
-        (Just False, Just True)  -> property (eq a c == Just False)
-        _                         -> property True
+-- | The minimal-stride rule subsumes a separate orientation tie-break: the
+-- canonical form never has stride strictly greater than its reverse (except in
+-- the full-coset regime, which 'mk' already pins).
+canonForwardOriented :: Domain w -> Property
+canonForwardOriented c =
+  proper c ==>
+    property (stride cc <= modNeg (mask cc) (stride cc)
+              || n cc + 1 == orbitLen cc)
+  where cc = getCanonical (canonicalize c)
 
--- | 'eqExact' refines 'eq': whenever 'eq' commits to a definite answer,
--- 'eqExact' agrees.
-eqRefinesEqExact :: Domain w -> Domain w -> Property
-eqRefinesEqExact a b =
+-- | The @O(w)@ 'canonicalize' formula agrees with an exhaustive search over all
+-- 'proper' representations (lex-least by stride, then start, then n).
+canonMatchesSearch :: (1 <= w) => NatRepr w -> Domain w -> Property
+canonMatchesSearch w c =
+  proper c ==> property (getCanonical (canonicalize c) == canonicalizeSearch w c)
+
+-- | The 'Hashable' instance for 'Canonical' respects its 'Eq': equal canonical
+-- forms (i.e. equal denoted sets) hash equally, the law required for
+-- 'Canonical' to be a sound hash-cons\/memo key. Combined with 'canonUnique'
+-- this means set-equal progressions hash equally.
+canonHashRespectsEq :: Domain w -> Domain w -> Property
+canonHashRespectsEq a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    case eq a b of
-      Just True  -> property (eqExact a b)
-      Just False -> property (Prelude.not (eqExact a b))
-      Nothing    -> property True
+    canonicalize a == canonicalize b ==>
+      property (hash (canonicalize a) == hash (canonicalize b))
+
+-- | Reference implementation of 'canonicalize': the lex-least (by stride, then
+-- start, then n) 'proper' progression denoting the same set as @c@. Exponential
+-- in @w@; used only to validate the @O(w)@ 'canonicalize'.
+canonicalizeSearch :: (1 <= w) => NatRepr w -> Domain w -> Domain w
+canonicalizeSearch w c =
+  List.foldl' pick c
+    [ d
+    | st <- [1 .. m]
+    , s  <- [0 .. m]
+    , let g = lowestSetBit st
+    , nv <- [0 .. orbitLenOf m g - 1]
+    , let d = Domain { start = s, stride = st, n = nv, mask = m }
+    , proper d
+    , eqExact d c
+    ]
+  where
+    m = integerToNatural (maxUnsigned w)
+    pick best d = if lexLt d best then d else best
+    lexLt x y =
+      (stride x, start x, n x) < (stride y, start y, n y)
 
 -- ------------------------------------------------------------------
 -- ** Conversion
