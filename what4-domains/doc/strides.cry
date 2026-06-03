@@ -271,6 +271,39 @@ leqExact a b =
   and [ ~ (i <= a.n) \/ member b (a.start + drop`{1} i * a.stride)
       | i <- [0 .. 2^^(n + 1) - 1] : [_][n + 1] ]
 
+smallWindow : {n} (fin n, n >= 2) => Domain n -> Bit
+smallWindow b = (zext b.n + 1 : [2 * n + 2]) * 2 <= (zext (orbitMask b) + 1)
+
+leqExactPartial : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe Bit
+leqExactPartial a b =
+  if      ~ onCoset     then Just False
+   else if a.n == 0     then Just (iAw <= bn)
+   else if ~ subgroup   then Just False
+   else if bFull        then Just True
+   else if smallWindow b then Just (iAw <= bn /\ (forwardFits \/ backwardFits))
+   else                      Nothing
+  where
+    gB    = strideGcd b
+    mask  = orbitMask b
+    bFull = b.n + 1 == orbitLen b
+    onCoset  = wrapOffset b a.start % gB == 0
+    subgroup = a.stride % gB == 0
+    invSB = invModPow2 (divByPow2 b.stride gB)
+    iA = (divByPow2 (wrapOffset b a.start) gB * invSB) && mask
+    s  = (divByPow2 a.stride gB * invSB) && mask
+    iE = (iA + drop`{1} a.n * s) && mask
+    iAw, iEw, an, sw, msw, bn, fwd, bwd : [2 * n + 2]
+    iAw = zext iA
+    iEw = zext iE
+    an  = zext a.n
+    sw  = zext s
+    msw = zext ((- s) && mask)
+    bn  = zext b.n
+    fwd = iAw + an * sw
+    bwd = iEw + an * msw
+    forwardFits  = fwd <= bn
+    backwardFits = bwd <= bn
+
 size : {n} (fin n, n >= 2) => Domain n -> [n + 1]
 size c = c.n + 1
 
@@ -1207,6 +1240,13 @@ leqExactTransitive a b c =
   proper a ==> proper b ==> proper c ==>
     leqExact a b ==> leqExact b c ==> leqExact a c
 
+leqExactPartialAgrees : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+leqExactPartialAgrees a b =
+  proper a ==> proper b ==>
+    case leqExactPartial a b of
+      Just r  -> r == leqExact a b
+      Nothing -> True
+
 correct_eq : {n} (fin n, n >= 2) => Domain n -> [n] -> Domain n -> [n] -> Property
 correct_eq a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
@@ -1288,6 +1328,7 @@ property p_leqExactCorrect           = leqExactCorrect`{4}
 property p_leqExactComplete          = leqExactComplete`{4}
 property p_leqExactReflexive         = leqExactReflexive`{4}
 property p_leqExactTransitive        = leqExactTransitive`{4}
+property p_leqExactPartialAgrees     = leqExactPartialAgrees`{4}
 property p_correct_eq                = correct_eq`{4}
 property p_cosetsDisjointCorrect     = cosetsDisjointCorrect`{4}
 property p_eqExactCorrect            = eqExactCorrect`{4}
