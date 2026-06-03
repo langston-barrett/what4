@@ -154,6 +154,7 @@ library
   build-depends:
     base >= 4.10 && < 5,
     containers,
+    hashable >= 1.4 && < 1.6,
     parameterized-utils >= 2.3 && < 2.4,
     mtl >= 2.2.1,
     transformers >= 0.4,
