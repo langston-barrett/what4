@@ -168,6 +168,9 @@ tests = TT.testGroup "Strides"
   , genTest "leqExactPartialAgrees" $
       do SW n <- genWidth
          S.leqExactPartialAgrees <$> S.genDomain n <*> S.genDomain n
+  , genTest "leqExactWindowAgrees" $
+      do SW n <- genWidth
+         S.leqExactWindowAgrees <$> S.genDomain n <*> S.genDomain n
   , genTest "sizeViaToList" $
       do SW n <- genWidthSmall
          S.sizeViaToList <$> S.genDomain n

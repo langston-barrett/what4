@@ -450,6 +450,7 @@ module What4.Domains.BV.Strides
   , leqExactReflexive
   , leqExactTransitive
   , leqExactPartialAgrees
+  , leqExactWindowAgrees
   , sizeViaToList
   , correct_eq
   , cosetsDisjointCorrect
@@ -586,6 +587,7 @@ module What4.Domains.BV.Strides
 
 import           Control.Exception (assert)
 import           Data.Bits ((.&.), popCount, shiftL, shiftR)
+import           Data.Maybe (fromMaybe)
 import           GHC.TypeNats (Nat, type (+), type (<=))
 import           Numeric.Natural (Natural)
 import           Prelude hiding (negate, not, and, or, concat)
@@ -1239,28 +1241,37 @@ leqExactPartial a b = assert (proper a) $ assert (proper b) $
           backward = iEnd + nA * (mB - aStep)
       in iAStart <= n b && (forward <= n b || backward <= n b)
 
+-- | /O(w^2)/. The 'floorSum'-based window count that decides the one case
+-- 'leqExactPartial' leaves open (a large window over a non-full @b@). Of the
+-- @n a + 1@ visited @b@-indices @{ iAStart + i · aStep mod orbitLen b }@,
+-- count how many fall in @[0, n b]@; @a@\'s window fits iff that count is
+-- @n a + 1@.
+--
+-- Correct on /any/ proper @a@, @b@ with @start a@ on @b@\'s coset and
+-- @⟨stride a⟩ ⊆ ⟨stride b⟩@ (it does not rely on the large-window guard); the
+-- guard only governs /whether/ this @O(w^2)@ path is needed over the @O(w)@
+-- one. 'leqExact' uses it solely on 'leqExactPartial'\''s 'Nothing'.
+leqExactWindow :: Domain w -> Domain w -> Bool
+leqExactWindow a b =
+  let gB      = strideGcd b
+      mB      = orbitLen b
+      invSB   = invModPow2 (stride b `divByPow2` gB) mB
+      aStep   = ((stride a `divByPow2` gB) * invSB) .&. (mB - 1)
+      iAStart = valueIndex b (start a)
+      nA1     = n a + 1
+      wWidth  = n b + 1
+      hits    = nA1 + floorSum nA1 mB aStep iAStart
+                    - floorSum nA1 mB aStep (iAStart + mB - wWidth)
+  in hits == nA1
+
 -- | /O(w log w)/ when @b@\'s window spans at most half its orbit, /O(w^2)/
 -- otherwise. Partial order on progressions: @leqExact a b@ iff every element
 -- of @a@ is in @b@.
 leqExact :: Domain w -> Domain w -> Bool
 -- 'leqExactPartial' decides everything but the large-window, non-full @b@ case
--- in @O(w)@. That remaining case is the only one where @a@ can fit @b@\'s
--- window by wrapping, so it needs the @O(w^2)@ 'floorSum' window count:
--- of the @n a + 1@ visited @b@-indices, how many fall in @[0, n b]@? The AP
--- fits iff that count is @n a + 1@.
-leqExact a b = case leqExactPartial a b of
-  Just r  -> r
-  Nothing ->
-    let gB     = strideGcd b
-        mB     = orbitLen b
-        invSB  = invModPow2 (stride b `divByPow2` gB) mB
-        aStep  = ((stride a `divByPow2` gB) * invSB) .&. (mB - 1)
-        iAStart = valueIndex b (start a)
-        nA1    = n a + 1
-        wWidth = n b + 1
-        hits   = nA1 + floorSum nA1 mB aStep iAStart
-                     - floorSum nA1 mB aStep (iAStart + mB - wWidth)
-    in hits == nA1
+-- in @O(w)@; that remaining case is the only one where @a@ can fit @b@\'s
+-- window by wrapping, so it falls back to the @O(w^2)@ 'leqExactWindow' count.
+leqExact a b = fromMaybe (leqExactWindow a b) (leqExactPartial a b)
 
 -- | /O(2^w \/ g)/, where @g = gcd(stride, 2^w)@. Concretization function.
 --
@@ -3592,14 +3603,28 @@ leqExactTransitive a b c =
       leqExact a b ==> leqExact b c ==> property (leqExact a c)
 
 -- | 'leqExactPartial' is exact wherever it is defined: when it returns
--- @Just r@, that @r@ agrees with 'leqExact'. (On 'Nothing' the partial check
--- declines, and 'leqExact' falls back to the 'floorSum' window count.)
+-- @Just r@, that @r@ matches semantic containment (every element of @a@ is in
+-- @b@). Compared against membership directly, not against 'leqExact', since
+-- 'leqExact' is /defined/ in terms of 'leqExactPartial' and so would make the
+-- check vacuous on the @Just@ branch. (On 'Nothing' the partial check
+-- declines, and 'leqExact' falls back to 'leqExactWindow'.)
 leqExactPartialAgrees :: Domain w -> Domain w -> Property
 leqExactPartialAgrees a b =
   proper a ==> proper b ==> mask a == mask b ==>
     case leqExactPartial a b of
-      Just r  -> property (r == leqExact a b)
+      Just r  -> property (r == Prelude.all (member b) (toList a))
       Nothing -> property True
+
+-- | 'leqExactWindow' decides the 'leqExactPartial' 'Nothing' case correctly:
+-- on the inputs where the partial check declines, the window count matches
+-- semantic containment. Together with 'leqExactPartialAgrees' this validates
+-- both arms of 'leqExact' against membership independently.
+leqExactWindowAgrees :: Domain w -> Domain w -> Property
+leqExactWindowAgrees a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case leqExactPartial a b of
+      Just _  -> property True
+      Nothing -> property (leqExactWindow a b == Prelude.all (member b) (toList a))
 
 -- | 'size' agrees with the length of 'toList'.
 sizeViaToList :: Domain w -> Property
