@@ -1679,7 +1679,12 @@ correct_ror a b x y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     member (ror a b) (x >>> y)
 
-property p_correct_shl  = correct_shl`{4}
+// @p_correct_shl@ is not declared as a SAW property because @shl@ is
+// defined via @mul@, whose 'Integer' arithmetic and iterated
+// 'sIntegerGcd' cause solver timeouts (see @p_correct_mul@). This holds
+// even at @w = 2@. The Haskell @correct_shl@ Hedgehog property covers
+// soundness empirically.
+// property p_correct_shl  = correct_shl`{4}
 property p_correct_lshr = correct_lshr`{4}
 property p_correct_ashr = correct_ashr`{4}
 property p_correct_rol  = correct_rol`{4}
@@ -2181,7 +2186,9 @@ precise_ashr a b =
   proper a ==> proper b ==>
     size (ashr a b) <= Arith::size (Arith::ashr (hull a) (hull b))
 
-property p_precise_shl  = precise_shl`{4}
+// Disabled for the same reason as @p_correct_shl@: @shl@ reduces to @mul@,
+// which times out the solver even at @w = 2@.
+// property p_precise_shl  = precise_shl`{4}
 property p_precise_lshr = precise_lshr`{4}
 property p_precise_ashr = precise_ashr`{4}
 
@@ -2262,6 +2269,8 @@ subset_ashr a b x =
   proper a ==> proper b ==> member (ashr a b) x ==>
     Arith::mem (Arith::ashr (toArith a) (toArith b)) x
 
-property p_subset_shl  = subset_shl`{4}
+// Disabled for the same reason as @p_correct_shl@: @shl@ reduces to @mul@,
+// which times out the solver even at @w = 2@.
+// property p_subset_shl  = subset_shl`{4}
 property p_subset_lshr = subset_lshr`{4}
 property p_subset_ashr = subset_ashr`{4}
