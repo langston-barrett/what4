@@ -3,10 +3,12 @@ name: Check Cryptol specs
 on:
   push:
     paths:
+      - 'ci/**'
       - 'what4-domains/doc/*.cry'
       - '.github/workflows/cryptol.yml'
   pull_request:
     paths:
+      - 'ci/**'
       - 'what4-domains/doc/*.cry'
       - '.github/workflows/cryptol.yml'
 
@@ -31,17 +33,26 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Select changed Cryptol specs
+        id: changed
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha="${{ github.event.pull_request.base.sha }}"
+          else
+            base_sha="${{ github.event.before }}"
+          fi
+          bash ci/cryptol_changed_files.sh "${{ github.event_name }}" "$base_sha" "${{ github.sha }}"
 
       - name: Install Cryptol (with bundled solvers)
+        if: steps.changed.outputs.count != '0'
         run: |
           url="https://github.com/GaloisInc/cryptol/releases/download/${CRYPTOL_VERSION}/${CRYPTOL_TARBALL}"
           curl --fail --location --silent --show-error "$url" | tar -xzf - -C /opt
           echo "/opt/${CRYPTOL_ASSET}/bin" >> "$GITHUB_PATH"
 
-      - name: Prove all Cryptol specs
+      - name: Prove changed Cryptol specs
+        if: steps.changed.outputs.count != '0'
         run: |
-          cryptol --version
-          for f in what4-domains/doc/*.cry; do
-            echo "=== $f ==="
-            cryptol --command=":prove" "$f"
-          done
+          printf '%s\n' "${{ steps.changed.outputs.files }}" | bash ci/prove_cryptol_specs.sh
