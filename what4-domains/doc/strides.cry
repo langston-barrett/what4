@@ -574,11 +574,32 @@ operandRange c =
     span : [2 * n + 1]
     span = zext c.n * zext c.stride
 
+// See @andSingleton@ in What4.Domains.BV.Strides.
+bandSingleton : {n} (fin n, n >= 2) => [n] -> Domain n -> Domain n
+bandSingleton k c =
+  if c.n == 0 then mk base 1 0
+  else if kHigh == 0 then mk base 1 0
+  else mk cosetLo d nSteps
+  where
+    g = strideGcd c
+    kHigh = k && (~ (g - 1))
+    base = k && c.start
+    d = lowestSetBit kHigh
+    (_, cHi) = operandRange c
+    hi = if k <= cHi then k else cHi
+    cosetLo = base && (d - 1)
+    nSteps : [n + 1]
+    nSteps = if hi < cosetLo then 0 else zext ((hi - cosetLo) / d)
+
 // CLP report §3.3.4 (cheap O(w) variant): stride @d = min(g1, g2)@, upper
 // bound = @min(end of operandRange a, end of operandRange b)@, lower bound
-// = coset rep of @start a && start b@.
+// = coset rep of @start a && start b@. A singleton operand routes through
+// 'bandSingleton'.
 band : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-band a b = mk cosetLo d nSteps
+band a b =
+  if a.n == 0 then bandSingleton a.start b
+  else if b.n == 0 then bandSingleton b.start a
+  else mk cosetLo d nSteps
   where
     g1 = strideGcd a
     g2 = strideGcd b
@@ -595,7 +616,10 @@ band a b = mk cosetLo d nSteps
 // 'band', but more expensive (Warren's loop runs @w@ iterations of
 // @O(w)@ bitwise-and on naturals).
 bandPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-bandPrecise a b = mk cosetLo d nSteps
+bandPrecise a b =
+  if a.n == 0 then bandSingleton a.start b
+  else if b.n == 0 then bandSingleton b.start a
+  else mk cosetLo d nSteps
   where
     g1 = strideGcd a
     g2 = strideGcd b
@@ -660,9 +684,14 @@ andPreciseDominatesAnd : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 andPreciseDominatesAnd a b =
   proper a ==> proper b ==> leqExact (bandPrecise a b) (band a b)
 
+correct_andSingleton : {n} (fin n, n >= 2) => [n] -> Domain n -> [n] -> Property
+correct_andSingleton k c y =
+  proper c ==> member c y ==> member (bandSingleton k c) (k && y)
+
 property p_warrenAndLoCorrect      = warrenAndLoCorrect`{4}
 property p_warrenAndHiCorrect      = warrenAndHiCorrect`{4}
 property p_operandRangeCorrect     = operandRangeCorrect`{4}
+property p_correct_andSingleton    = correct_andSingleton`{4}
 property p_correct_andPrecise      = correct_andPrecise`{4}
 property p_correct_orPrecise       = correct_orPrecise`{4}
 property p_andPreciseDominatesAnd  = andPreciseDominatesAnd`{4}

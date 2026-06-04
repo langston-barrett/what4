@@ -328,6 +328,9 @@ tests = TT.testGroup "Strides"
   , genTest "correct_orPrecise" $
       do SW n <- genWidth
          S.correct_orPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_andSingleton" $
+      do SW n <- genWidth
+         S.correct_andSingleton n <$> genNatBV n <*> S.genDomain n <*> genNatBV n
   , genTest "warrenAndLoCorrect" $
       S.warrenAndLoCorrect <$> genNat <*> genNat <*> genNat <*> genNat
                            <*> genNat <*> genNat <*> genWidthExp
@@ -588,8 +591,8 @@ tests = TT.testGroup "Strides"
           liftBand a b =
             fromJust (S.fromBitwise w4 (B.and (S.toBitwise a) (S.toBitwise b)))
           -- Witness: @S.andPrecise a1 b1@ contains an element the lift does not.
-          a1 = mk 1 12 2
-          b1 = mk 1 1  0
+          a1 = mk 0 1 1
+          b1 = mk 0 2 1
           -- Witness: lift contains an element @S.andPrecise a2 b2@ does not.
           a2 = mk 2 4  2
           b2 = mk 12 10 6

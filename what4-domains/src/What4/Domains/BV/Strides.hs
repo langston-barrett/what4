@@ -499,6 +499,7 @@ module What4.Domains.BV.Strides
   , correct_or
   , correct_orPrecise
   , correct_xor
+  , correct_andSingleton
   , warrenAndLoCorrect
   , warrenAndHiCorrect
   , operandRangeCorrect
@@ -2090,6 +2091,12 @@ not w c@Domain{stride, n = nn, mask} =
 -- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
 -- >>> display (and w4 evens evens)
 -- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+--
+-- ANDing with the singleton @{12} = 1100@ clears the low two bits of every
+-- even, yielding the exact stride-4 result @{0,4,8,12}@:
+--
+-- >>> display (and w4 (mk4 12 1 0) evens)
+-- "[*...*...*...*...]  = [0,4,8,12]"
 and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
@@ -2099,33 +2106,91 @@ and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- bound is @min(hi a, hi b)@ from 'operandRange' since @x & y ≤ min(x, y)@.
 -- Lower bound is the @d@-coset rep of @start a & start b@ (so this isn't a
 -- tight bound — see 'andPrecise' for that).
+--
+-- When either operand is a singleton @{k}@, 'andSingleton' is much tighter —
+-- masking by the constant @k@ both fixes the result bits where @k@ is @0@ and
+-- can widen the stride — so we special-case it.
 and w a b =
   assert (proper a) $
   assert (proper b) $
-  let !d  = min (strideGcd a) (strideGcd b)
-      !(_, aHi) = operandRange a
-      !(_, bHi) = operandRange b
-      !sub_    = min aHi bHi
-      !sStart  = (start a Bits..&. start b) Bits..&. mask a
-      !cosetLo = sStart Bits..&. (d - 1)
-      !nSteps  = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
-  in mk w cosetLo d nSteps
+  case (n a, n b) of
+    (0, _) -> andSingleton w (start a) b
+    (_, 0) -> andSingleton w (start b) a
+    _ ->
+      let !d  = min (strideGcd a) (strideGcd b)
+          !(_, aHi) = operandRange a
+          !(_, bHi) = operandRange b
+          !sub_    = min aHi bHi
+          !sStart  = (start a Bits..&. start b) Bits..&. mask a
+          !cosetLo = sStart Bits..&. (d - 1)
+          !nSteps  = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
+      in mk w cosetLo d nSteps
+
+-- | /O(w)/. Bitwise AND of a singleton @{k}@ with an arbitrary progression
+-- @c@. Sound (over-approximating), and tighter than the generic 'and' path.
+--
+-- Not exact in general: @{ k & y | y ∈ c }@ need not be a single progression.
+-- For example at width 4, @{14} & {0,1,2,5,6,7,11,12,13}@ is @{0,2,4,6,10,12}@,
+-- which this returns as the cover @{0,2,4,6,8,10,12}@ (the spurious @8@ comes
+-- from forcing the result into one arithmetic progression).
+--
+-- ANDing every element of @c@ with the constant @k@ clears the result bits
+-- wherever @k@ is @0@ and leaves the rest equal to @c@\'s bits. Writing
+-- @stride c = 2^v · m@ (m odd), @c@\'s low @v@ bits are constant (equal to
+-- @start c@\'s), so:
+--
+--   * The fixed low bits of every result are @k & start c & (g - 1)@, where
+--     @g = 2^v = strideGcd c@.
+--   * Above bit @v@, @c@ advances in steps that are multiples of @g@, but
+--     @k@ masks those steps down to multiples of @d = lowestSetBit (k & ~(g-1))@.
+--     This @d ≥ g@ is the result stride.
+--   * If @k@ has no set bits at or above bit @v@ (@k & ~(g-1) == 0@), every
+--     result collapses to the single fixed value @k & start c@.
+--
+-- The upper bound @min(k, hi c)@ holds since @k & y ≤ k@ and @k & y ≤ y@; the
+-- coset rep is @(k & start c) & (d - 1)@.
+andSingleton :: (1 <= w) => NatRepr w -> Natural -> Domain w -> Domain w
+andSingleton w k c =
+  assert (proper c) $
+  let !g     = strideGcd c
+      !m      = mask c
+      !highMask = m `Bits.xor` (g - 1)
+      !kHigh  = k Bits..&. highMask
+      !base   = (k Bits..&. start c) Bits..&. m
+  -- A singleton @c@ has no varying bits (its stride is the dummy @1@), so
+  -- @{k} & {c} = {k & start c}@ exactly; the coset reasoning below assumes
+  -- @c@'s bits above @strideGcd c@ actually vary, so guard it out. Likewise
+  -- when @k@ masks away every varying bit, the result is the single value.
+  in if n c == 0 || kHigh == 0
+       then mk w base 1 0
+       else
+         let !d  = lowestSetBit kHigh
+             !(_, cHi) = operandRange c
+             !hi = min (k Bits..&. m) cHi
+             !cosetLo = base Bits..&. (d - 1)
+             !nSteps  = if hi < cosetLo then 0 else (hi - cosetLo) `divByPow2` d
+         in mk w cosetLo d nSteps
 
 -- | /O(w^2)/. Bitwise AND. At least as precise as 'and' on all inputs.
 andPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 andPrecise w a b =
   assert (proper a) $
   assert (proper b) $
-  let !d  = min (strideGcd a) (strideGcd b)
-      !(aLo, aHi) = operandRange a
-      !(bLo, bHi) = operandRange b
-      !wLo = warrenAndLo (mask a) aLo aHi bLo bHi
-      !wHi = warrenAndHi (mask a) aLo aHi bLo bHi
-      !sStart  = (start a Bits..&. start b) Bits..&. mask a
-      !sStartCoset = sStart Bits..&. (d - 1)
-      !cosetLo = wLo + (modSub (mask a) sStartCoset wLo Bits..&. (d - 1))
-      !nSteps  = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
-  in mk w cosetLo d nSteps
+  case (n a, n b) of
+    -- 'andSingleton' is at least as tight as the Warren-bounds path here too.
+    (0, _) -> andSingleton w (start a) b
+    (_, 0) -> andSingleton w (start b) a
+    _ ->
+      let !d  = min (strideGcd a) (strideGcd b)
+          !(aLo, aHi) = operandRange a
+          !(bLo, bHi) = operandRange b
+          !wLo = warrenAndLo (mask a) aLo aHi bLo bHi
+          !wHi = warrenAndHi (mask a) aLo aHi bLo bHi
+          !sStart  = (start a Bits..&. start b) Bits..&. mask a
+          !sStartCoset = sStart Bits..&. (d - 1)
+          !cosetLo = wLo + (modSub (mask a) sStartCoset wLo Bits..&. (d - 1))
+          !nSteps  = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
+      in mk w cosetLo d nSteps
 
 -- | /O(w)/. Bitwise OR. See also 'orPrecise'.
 or :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
@@ -4093,6 +4158,13 @@ correct_orPrecise ::
 correct_orPrecise w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (orPrecise w a b) (x Bits..|. y))
+
+-- | 'andSingleton' is sound: @k & y@ is a member for every @y@ in @c@.
+correct_andSingleton ::
+  (1 <= w) => NatRepr w -> Natural -> Domain w -> Natural -> Property
+correct_andSingleton w k c y =
+  proper c ==> member c y ==>
+    property (member (andSingleton w (k Bits..&. mask c) c) (k Bits..&. y))
 
 -- | 'warrenAndLo' is a sound lower bound on @{ x .&. y | alo <= x <= ahi,
 -- blo <= y <= bhi }@, where all values are at width @k@.
