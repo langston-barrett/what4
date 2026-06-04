@@ -1756,17 +1756,6 @@ pseudoMeetPreciseIdempotent a =
       Just c -> leqExact c a /\ leqExact a c
       Nothing -> False
 
-pseudoMeetPreciseRefinesMeet : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-pseudoMeetPreciseRefinesMeet a b =
-  proper a ==> proper b ==>
-    case pseudoMeet a b of
-      Nothing -> case pseudoMeetPrecise a b of
-        Nothing -> True
-        Just _ -> False
-      Just cM -> case pseudoMeetPrecise a b of
-        Nothing -> True
-        Just cP -> leqExact cP cM
-
 correct_pseudoJoin : {n} (fin n, n >= 2) => Domain n -> [n] -> Domain n -> Property
 correct_pseudoJoin a x b =
   proper a ==> proper b ==> member a x ==>
@@ -2054,7 +2043,6 @@ trimSelfWrapIdempotent a =
 // property p_pseudoMeetPreciseCommutative    = pseudoMeetPreciseCommutative`{4}
 property p_pseudoMeetIdempotent            = pseudoMeetIdempotent`{4}
 property p_pseudoMeetPreciseIdempotent     = pseudoMeetPreciseIdempotent`{4}
-// property p_pseudoMeetPreciseRefinesMeet    = pseudoMeetPreciseRefinesMeet`{4}
 
 property p_correct_pseudoJoin              = correct_pseudoJoin`{4}
 property p_correct_pseudoJoinPrecise       = correct_pseudoJoinPrecise`{4}

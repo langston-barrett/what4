@@ -523,7 +523,6 @@ module What4.Domains.BV.Strides
   , pseudoMeetPreciseCommutative
   , pseudoMeetIdempotent
   , pseudoMeetPreciseIdempotent
-  , pseudoMeetPreciseRefinesMeet
   , nsplitUnion
   , nsplitDisjoint
   , ssplitUnion
@@ -4321,31 +4320,6 @@ pseudoMeetPreciseIdempotent ::
   NatRepr w -> Domain w -> Property
 pseudoMeetPreciseIdempotent w a =
   proper a ==> property (pseudoMeetPrecise w a a == Just a)
-
-
--- | When neither operand contains the other under 'leqExact',
--- 'pseudoMeetPrecise' refines 'pseudoMeet': anything 'pseudoMeetPrecise'
--- contains, 'pseudoMeet' contains too.
---
--- The precondition rules out the case where 'pseudoMeetPrecise''s
--- @leqExact@ short-circuit fires while 'pseudoMeet''s @leq@ short-circuit
--- doesn't (since 'leq' implies 'leqExact' but not vice versa). In that
--- case 'pseudoMeetPrecise' returns the smaller operand directly while
--- 'pseudoMeet' falls through to the strides path, which can produce a
--- result whose stride structure doesn't refine the operand's. Outside
--- that case, both functions take the same code path and 'pseudoMeetPrecise'
--- merges strictly more pieces in 'compactifyPrecise', yielding a refined
--- result.
-pseudoMeetPreciseRefinesMeet ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Domain w -> Property
-pseudoMeetPreciseRefinesMeet w a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (leqExact a b || leqExact b a) ==>
-      case (pseudoMeet w a b, pseudoMeetPrecise w a b) of
-        (Just cM, Just cP) -> property (leqExact cP cM)
-        (_, Nothing)       -> property True
-        (Nothing, Just _)  -> property False  -- pseudoMeetPrecise tighter, so this shouldn't happen
 
 -- | 'nsplit' is a sound cover: every member of @a@ lies in some piece. (When
 -- @a@ self-wraps, pieces may also contain values outside @a@, since the split
