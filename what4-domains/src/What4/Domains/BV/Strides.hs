@@ -1962,29 +1962,160 @@ scaleSingleton w k c =
        then mk w s' 1 0  -- @k·t ≡ 0 (mod 2^w)@: every step lands on @k·s@.
        else mk w s' t' (clampToOrbit (mask c) t' (n c))
 
+-- | /O(w)/. Unsigned division.
 udiv :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-udiv w = liftArith2 w A.udiv
+-- References:
+--
+-- * CLP 3.3.2 / Table 3.1 (DIVISION), all-positive row: @(l1,u1,δ1) \/
+--   (l2,u2,δ2) ⊆ (l1\/u2, u1\/l2, 1)@.
+-- * CLP 3.3.2 (DIVISION by a constant): @(l1,u1,δ1) \/ k = (l1\/k, u1\/k,
+--   |δ1\/k|)@ — stride-preserving.
+--
+-- Implementation: split the dividend with 'ssplit' into non-wrap-mod-@2^w@
+-- arcs, convert each piece to its exact arith interval via 'arcArith', divide
+-- with 'A.udiv', then union the quotients with 'hullArith'. This stays within
+-- the @A.udiv (hull a) (hull b)@ envelope while avoiding a domain 'pseudoJoin'.
+-- If the divisor is a single constant @k@ dividing @stride a@, 'udivConst'
+-- returns the exact affine quotient instead of collapsing the stride to 1.
+udiv w a b =
+  assert (proper a) $
+  assert (proper b) $
+  case udivConst w a b of
+    Just r  -> r  -- stride-preserving constant divisor
+    Nothing -> hullArith w [ A.udiv (arcArith w ai) bArith | ai <- ssplit w a ]
+  where bArith = toArith b
+
+-- Stride-preserving fast path for division by a constant: when @b@ is a single
+-- nonzero constant @k@ dividing @stride a@ and @a@ is a single non-wrap arc,
+-- the quotient is exactly @(start a \/ k) + i·(stride a \/ k)@.
+udivConst :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+udivConst w a b
+  | n b == 0 && k /= 0
+  , [ai] <- ssplit w a   -- a is a single non-wrap arc
+  , n ai > 0 && stride ai `mod` k == 0
+  = Just (mk w (start ai `Prelude.div` k) (stride ai `Prelude.div` k) (n ai))
+  | otherwise = Nothing
+  where k = start b
 
 urem :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 urem w = liftArith2 w A.urem
 
+-- | /O(w)/. Signed division.
 sdiv :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-sdiv w = liftArith2 w (A.sdiv w)
+-- References:
+--
+-- * CLP 3.3.2 / Table 3.1 (DIVISION), sign-based case analysis on the
+--   endpoints of both operands.
+-- * CLP 3.3.2 (DIVISION by a constant): @(l1,u1,δ1) \/ k = (min(l1\/k,u1\/k),
+--   max(l1\/k,u1\/k), |δ1\/k|)@ — stride-preserving.
+--
+-- Implementation: split the dividend at both poles ('signPieces' = 'ssplit'
+-- then 'nsplit') into sign-coherent, non-wrap-mod-@2^w@ arcs, convert each
+-- piece to its exact arith interval via 'arcArith', divide with 'A.sdiv', then
+-- union the quotients with 'hullArith'. This keeps the result within the
+-- @A.sdiv (hull a) (hull b)@ envelope without a pole-crossing 'pseudoJoin'
+-- that could widen to 'top'. If the divisor is a single constant @k ≠ 0@ with
+-- @|k|@ dividing @stride a@, 'sdivConst' returns the exact affine quotient.
+sdiv w a b =
+  assert (proper a) $
+  assert (proper b) $
+  case sdivConst w a b of
+    Just r  -> r  -- stride-preserving constant divisor
+    Nothing -> hullArith w [ A.sdiv w (arcArith w ai) bArith | ai <- signPieces w a ]
+  where bArith = toArith b
+
+-- Stride-preserving fast path for signed division by a constant: when @b@ is a
+-- single nonzero constant @k@ with @|k|@ dividing @stride a@ and @a@ is a
+-- single sign-coherent non-wrap arc, truncated division is affine, so the
+-- quotient is exactly @[start a \/ k] + i·(stride a \/ |k|)@. The sign of @k@
+-- may reverse the walk, so the result start is the smaller endpoint.
+sdivConst :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+sdivConst w a b
+  | n b == 0 && k /= 0
+  , [ai] <- signPieces w a   -- a is a single sign-coherent non-wrap arc
+  , n ai > 0 && stride ai `mod` absK == 0
+  = let (aloU, ahiU) = arcUBounds ai
+        v0 = toSigned w (toInteger aloU) `quot` k
+        vn = toSigned w (toInteger ahiU) `quot` k
+    in Just (mk w (asN w (min v0 vn)) (stride ai `Prelude.div` absK) (n ai))
+  | otherwise = Nothing
+  where
+    k    = toSigned w (toInteger (start b))
+    absK = integerToNatural (abs k)
+
+-- Split a progression at both poles into sign-coherent, non-wrap-mod-@2^w@
+-- pieces: 'ssplit' (south\/unsigned) then 'nsplit' (north\/sign).
+signPieces :: (1 <= w) => NatRepr w -> Domain w -> [Domain w]
+signPieces w c = concatMap (nsplit w) (ssplit w c)
 
 srem :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 srem w = liftArith2 w (A.srem w)
 
 -- ------------------------------------------------------------------
+-- ** Division helpers
+
+-- Is this progression the singleton @{0}@?
+isSingletonZero :: Domain w -> Bool
+isSingletonZero c = n c == 0 && start c == 0
+
+-- The unsigned arc bounds @(lo, hi)@ of a non-wrap-mod-@2^w@ progression, read
+-- directly from @start@ and @end@ (no 'toArith').
+-- Precondition: @start + n·stride <= mask@ (e.g. 'ssplit'\/'nsplit' output).
+arcUBounds :: Domain w -> (Natural, Natural)
+arcUBounds c = (start c, start c + n c * stride c)
+
+-- Build the exact arith interval of a non-wrap-mod-@2^w@ arc, read straight
+-- off its @start@\/@end@ via 'A.range'. Unlike 'toArith', this never goes
+-- through the lossy 'cosetArc': for a single non-wrapping arc, @[start, end]@
+-- is exact. Used to feed dividend pieces into 'A.udiv'\/'A.sdiv'.
+arcArith :: (1 <= w) => NatRepr w -> Domain w -> A.Domain w
+arcArith w c =
+  let (lo, hi) = arcUBounds c
+  in A.range w (toInteger lo) (toInteger hi)
+
+-- The strides progression whose orbit contains every element of every arith
+-- interval in the list (their bounding hull, converted back via 'fromArith').
+-- Empty list yields 'top'. Used to combine the per-dividend-piece quotients
+-- from 'A.udiv'\/'A.sdiv' without a domain 'pseudoJoin', which could widen to
+-- 'top' across separated pieces.
+hullArith :: (1 <= w) => NatRepr w -> [A.Domain w] -> Domain w
+hullArith w = \case
+  []     -> top w
+  (d:ds) -> fromJustUnsafe "hullArith" (fromArith w (List.foldl' A.join d ds))
+
+-- ------------------------------------------------------------------
 -- ** Arithmetic (SMT-LIB div-by-zero semantics)
 
+-- | /O(w)/. Unsigned division with SMT-LIB div-by-zero semantics.
 udivSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-udivSmtlib w = liftArith2 w A.udivSmtlib
+-- If the divisor may be zero, join the ordinary quotient with the SMT-LIB
+-- all-ones result for the zero case.
+udivSmtlib w a b
+  | isSingletonZero b = mk w (mask a) 1 0            -- divisor exactly {0}: all-ones
+  | member b 0        = pseudoJoin w (udiv w a b) (mk w (mask a) 1 0)
+  | otherwise         = udiv w a b
 
 uremSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 uremSmtlib w = liftArith2 w A.uremSmtlib
 
+-- | /O(w)/. Signed division with SMT-LIB div-by-zero semantics.
 sdivSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-sdivSmtlib w = liftArith2 w (A.sdivSmtlib w)
+-- If the divisor may be zero, join the ordinary quotient with the sign-based
+-- SMT-LIB zero-divisor result.
+sdivSmtlib w a b
+  | isSingletonZero b = sdivByZeroStrides w a
+  | member b 0        = pseudoJoin w (sdiv w a b) (sdivByZeroStrides w a)
+  | otherwise         = sdiv w a b
+
+-- The result of @bvsdiv s 0@ as a function of the dividend's sign: all-ones
+-- when @s >= 0@, @1@ when @s < 0@. Mirrors 'A.sdivByZero'.
+sdivByZeroStrides :: (1 <= w) => NatRepr w -> Domain w -> Domain w
+sdivByZeroStrides w a =
+  let (al, ah) = A.sbounds w (toArith a)
+  in case (al < 0, ah >= 0) of
+       (False, _    ) -> mk w (mask a) 1 0            -- s >= 0: all-ones
+       (True,  False) -> mk w 1 1 0                   -- s < 0: one
+       (True,  True ) -> pseudoJoin w (mk w 1 1 0) (mk w (mask a) 1 0)
 
 sremSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 sremSmtlib w = liftArith2 w (A.sremSmtlib w)
