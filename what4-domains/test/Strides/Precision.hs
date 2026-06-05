@@ -127,26 +127,12 @@ precise_srem w a b =
   S.proper a ==> S.proper b ==>
     sizeLeq w (S.srem w a b) (A.srem w (S.hull a) (S.hull b))
 
-precise_udivSmtlib ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-precise_udivSmtlib w a b =
-  S.proper a ==> S.proper b ==>
-    sizeLeq w (S.udivSmtlib w a b) (A.udivSmtlib (S.hull a) (S.hull b))
-
 precise_uremSmtlib ::
   (1 <= w) =>
   NatRepr w -> S.Domain w -> S.Domain w -> Property
 precise_uremSmtlib w a b =
   S.proper a ==> S.proper b ==>
     sizeLeq w (S.uremSmtlib w a b) (A.uremSmtlib (S.hull a) (S.hull b))
-
-precise_sdivSmtlib ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-precise_sdivSmtlib w a b =
-  S.proper a ==> S.proper b ==>
-    sizeLeq w (S.sdivSmtlib w a b) (A.sdivSmtlib w (S.hull a) (S.hull b))
 
 precise_sremSmtlib ::
   (1 <= w) =>
@@ -260,12 +246,14 @@ subset_scale ::
 subset_scale w k c =
   S.proper c ==> subsetOf w (S.scale w k c) (A.scale k (S.toArith c))
 
-subset_udiv ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-subset_udiv w a b =
-  S.proper a ==> S.proper b ==>
-    subsetOf w (S.udiv w a b) (A.udiv (S.toArith a) (S.toArith b))
+-- Note: there is no @subset_udiv@ / @subset_sdiv@ (nor for the @*Smtlib@
+-- variants below). Closed-form division (CLP Table 3.1) returns a strided
+-- coset whose elements differ from the arith result's arc once the quotient
+-- has nontrivial coset structure, so — exactly as for 'mul' and as the module
+-- header explains — neither is a subset of the other. The weaker /cardinality/
+-- bound /does/ hold (we hull quotient endpoints rather than join domains; see
+-- 'S.udiv'), and is checked by 'precise_udiv' / 'precise_sdiv' etc. Soundness
+-- is covered by @correct_udiv@ / @correct_sdiv@.
 
 subset_urem ::
   (1 <= w) =>
@@ -274,13 +262,6 @@ subset_urem w a b =
   S.proper a ==> S.proper b ==>
     subsetOf w (S.urem w a b) (A.urem (S.toArith a) (S.toArith b))
 
-subset_sdiv ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-subset_sdiv w a b =
-  S.proper a ==> S.proper b ==>
-    subsetOf w (S.sdiv w a b) (A.sdiv w (S.toArith a) (S.toArith b))
-
 subset_srem ::
   (1 <= w) =>
   NatRepr w -> S.Domain w -> S.Domain w -> Property
@@ -288,12 +269,11 @@ subset_srem w a b =
   S.proper a ==> S.proper b ==>
     subsetOf w (S.srem w a b) (A.srem w (S.toArith a) (S.toArith b))
 
-subset_udivSmtlib ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-subset_udivSmtlib w a b =
-  S.proper a ==> S.proper b ==>
-    subsetOf w (S.udivSmtlib w a b) (A.udivSmtlib (S.toArith a) (S.toArith b))
+-- (No @subset_udivSmtlib@ / @subset_sdivSmtlib@ — same reason as
+-- @subset_udiv@ above. Their SMT-LIB zero-divisor cases use 'pseudoJoin',
+-- so we also do not assert the cardinality bounds. The remainder variants
+-- still go through the arith lift, so 'precise_uremSmtlib' /
+-- 'precise_sremSmtlib' remain asserted.)
 
 subset_uremSmtlib ::
   (1 <= w) =>
@@ -301,13 +281,6 @@ subset_uremSmtlib ::
 subset_uremSmtlib w a b =
   S.proper a ==> S.proper b ==>
     subsetOf w (S.uremSmtlib w a b) (A.uremSmtlib (S.toArith a) (S.toArith b))
-
-subset_sdivSmtlib ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-subset_sdivSmtlib w a b =
-  S.proper a ==> S.proper b ==>
-    subsetOf w (S.sdivSmtlib w a b) (A.sdivSmtlib w (S.toArith a) (S.toArith b))
 
 subset_sremSmtlib ::
   (1 <= w) =>
@@ -409,15 +382,9 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
   , genTest "precise_srem" $
       do SW n <- genWidth
          precise_srem n <$> S.genDomain n <*> S.genDomain n
-  , genTest "precise_udivSmtlib" $
-      do SW n <- genWidth
-         precise_udivSmtlib n <$> S.genDomain n <*> S.genDomain n
   , genTest "precise_uremSmtlib" $
       do SW n <- genWidth
          precise_uremSmtlib n <$> S.genDomain n <*> S.genDomain n
-  , genTest "precise_sdivSmtlib" $
-      do SW n <- genWidth
-         precise_sdivSmtlib n <$> S.genDomain n <*> S.genDomain n
   , genTest "precise_sremSmtlib" $
       do SW n <- genWidth
          precise_sremSmtlib n <$> S.genDomain n <*> S.genDomain n
@@ -480,27 +447,18 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
       do SW n <- genWidth
          subset_scale n <$> chooseInteger (0, maxUnsigned n)
                         <*> S.genDomain n
-  , genTest "subset_udiv" $
-      do SW n <- genWidth
-         subset_udiv n <$> S.genDomain n <*> S.genDomain n
+  -- No subset_udiv / subset_sdiv (nor *Smtlib): closed-form division is
+  -- set-incomparable with the arith lift; see subset_udiv's definition site.
+  -- Only the cardinality bound is checked, via precise_udiv / precise_sdiv etc.
   , genTest "subset_urem" $
       do SW n <- genWidth
          subset_urem n <$> S.genDomain n <*> S.genDomain n
-  , genTest "subset_sdiv" $
-      do SW n <- genWidth
-         subset_sdiv n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_srem" $
       do SW n <- genWidth
          subset_srem n <$> S.genDomain n <*> S.genDomain n
-  , genTest "subset_udivSmtlib" $
-      do SW n <- genWidth
-         subset_udivSmtlib n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_uremSmtlib" $
       do SW n <- genWidth
          subset_uremSmtlib n <$> S.genDomain n <*> S.genDomain n
-  , genTest "subset_sdivSmtlib" $
-      do SW n <- genWidth
-         subset_sdivSmtlib n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_sremSmtlib" $
       do SW n <- genWidth
          subset_sremSmtlib n <$> S.genDomain n <*> S.genDomain n

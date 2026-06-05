@@ -502,14 +502,122 @@ sIntegerGcd x y = result.0
     result = (iterate step (sIntegerAbs x, sIntegerAbs y)) @ (`100 : [10])
     step ab = if ab.1 == 0 then ab else (ab.1, ab.0 % ab.1)
 
+isSingletonZero : {n} (fin n, n >= 2) => Domain n -> Bit
+isSingletonZero c = c.n == 0 /\ c.start == 0
+
+// Stride-1 progression covering @[start, start + span]@ (mod 2^n), saturating
+// to `top` when the span reaches the full width. @span@ is the element count
+// minus one and may be as wide as 2^n.
+spanResult : {n} (fin n, n >= 2) => [n] -> [n+1] -> Domain n
+spanResult startBits span =
+  if span >= (1 << `n) then top else mk startBits 1 span
+
+// Up to two non-wrap-mod-2^n pieces of a progression ('ssplit'), padded with
+// `Nothing`.
+ssplitMaybe : {n} (fin n, n >= 2) => Domain n -> [2](Maybe (Domain n))
+ssplitMaybe c =
+  case ssplit c of
+    One c1 -> [Just c1, Nothing]
+    Two c1 c2 -> [Just c1, Just c2]
+
+// Up to four sign-coherent, non-wrap-mod-2^n pieces ('ssplit' then 'nsplit').
+signPieces : {n} (fin n, n >= 2) => Domain n -> [4](Maybe (Domain n))
+signPieces c =
+  case ssplit c of
+    One c1 -> nsplitMaybe c1 # [Nothing, Nothing]
+    Two c1 c2 -> nsplitMaybe c1 # nsplitMaybe c2
+
+nsplitMaybe : {n} (fin n, n >= 2) => Domain n -> [2](Maybe (Domain n))
+nsplitMaybe c =
+  case nsplit c of
+    One d1 -> [Just d1, Nothing]
+    Two d1 d2 -> [Just d1, Just d2]
+
+// Exact arithmetic interval of a non-wrap piece, read directly from its
+// endpoints instead of the stride coset hull.
+arcArith : {n} (fin n, n >= 2) => Domain n -> Dom n
+arcArith c = Arith::range c.start (c.start + drop`{1} c.n * c.stride)
+
+// Join optional arithmetic intervals, yielding `Nothing` only for the empty
+// fold. The caller can map that to `top`, matching the Haskell `hullArith []`.
+joinArithMaybe : {n} (fin n, n >= 1) => Maybe (Dom n) -> Maybe (Dom n) -> Maybe (Dom n)
+joinArithMaybe mx my = case mx of
+  Nothing -> my
+  Just x -> case my of
+    Nothing -> Just x
+    Just y -> Just (Arith::join x y)
+
 udiv : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-udiv = liftArith2 Arith::udiv
+udiv a b =
+  case udivConst a b of
+    Just r -> r
+    Nothing ->
+      case foldl joinArithMaybe Nothing pieces of
+        Nothing -> top
+        Just q  -> fromArith q
+  where
+    bArith = toArith b
+    pieces = [ case ai of
+                 Nothing -> Nothing
+                 Just a1 -> Just (Arith::udiv (arcArith a1) bArith)
+             | ai <- ssplitMaybe a ]
+
+// Stride-preserving constant-divisor fast path; mirrors @udivConst@.
+udivConst : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+udivConst a b =
+  case ssplit a of
+    One a1 -> if b.n == 0 /\ b.start != 0 /\ a1.n > 0 /\ a1.stride % b.start == 0
+                then Just (mk (a1.start / b.start) (a1.stride / b.start) a1.n)
+                else Nothing
+    Two _ _ -> Nothing
 
 urem : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 urem = liftArith2 Arith::urem
 
 sdiv : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-sdiv = liftArith2 Arith::sdiv
+sdiv a b =
+  case sdivConst a b of
+    Just r -> r
+    Nothing ->
+      case foldl joinArithMaybe Nothing pieces of
+        Nothing -> top
+        Just q  -> fromArith q
+  where
+    bArith = toArith b
+    pieces = [ case ai of
+                 Nothing -> Nothing
+                 Just a1 -> Just (Arith::sdiv (arcArith a1) bArith)
+             | ai <- signPieces a ]
+
+// Stride-preserving constant-divisor fast path; mirrors @sdivConst@.
+sdivConst : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+sdivConst a b =
+  case signPiecesOne a of
+    Nothing -> Nothing
+    Just a1 ->
+      if b.n == 0 /\ k != 0 /\ a1.n > 0 /\ a1.stride % absK == 0
+        then Just (mk (drop`{1} vlo) (a1.stride / absK) a1.n)
+        else Nothing
+      where
+        // Quotients in `[1+n]` bits so @INTMIN /$ -1@ (e.g. @-8 /$ -1 = 8@)
+        // does not overflow; the result start is then taken mod 2^n.
+        aLoS = sext a1.start : [1+n]
+        aHiS = sext (a1.start + drop`{1} a1.n * a1.stride) : [1+n]
+        v0   = aLoS /$ sext k
+        vn   = aHiS /$ sext k
+        vlo  = if v0 <$ vn then v0 else vn
+  where
+    k    = b.start
+    absK = if k <$ 0 then - k else k
+
+// If @c@ is a single sign-coherent non-wrap arc, return it.
+signPiecesOne : {n} (fin n, n >= 2) => Domain n -> Maybe (Domain n)
+signPiecesOne c =
+  case ssplit c of
+    One c1 -> (case nsplit c1 of
+                 One d1 -> Just d1
+                 Two _ _ -> Nothing)
+    Two _ _ -> Nothing
 
 srem : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 srem = liftArith2 Arith::srem
@@ -2341,20 +2449,10 @@ subset_negate a x =
   proper a ==> member (neg a) x ==>
     Arith::mem (Arith::neg (toArith a)) x
 
-subset_udiv : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
-subset_udiv a b x =
-  proper a ==> proper b ==> member (udiv a b) x ==>
-    Arith::mem (Arith::udiv (toArith a) (toArith b)) x
-
 subset_urem : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
 subset_urem a b x =
   proper a ==> proper b ==> member (urem a b) x ==>
     Arith::mem (Arith::urem (toArith a) (toArith b)) x
-
-subset_sdiv : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
-subset_sdiv a b x =
-  proper a ==> proper b ==> member (sdiv a b) x ==>
-    Arith::mem (Arith::sdiv (toArith a) (toArith b)) x
 
 subset_srem : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
 subset_srem a b x =
@@ -2362,10 +2460,13 @@ subset_srem a b x =
     Arith::mem (Arith::srem (toArith a) (toArith b)) x
 
 property p_subset_negate = subset_negate`{4}
-property p_subset_udiv   = subset_udiv`{4}
 property p_subset_urem   = subset_urem`{4}
-property p_subset_sdiv   = subset_sdiv`{4}
 property p_subset_srem   = subset_srem`{4}
+
+// No @subset_udiv@ / @subset_sdiv@: the closed-form division results keep coset
+// structure that is generally incomparable with the interval returned by
+// @Arith::{u,s}div (toArith a) (toArith b)@. Soundness is covered by
+// @correct_udiv@ / @correct_sdiv@ instead.
 
 // ------------------------------------------------------------------
 // ** Concatenation, extension, selection, and truncation
