@@ -496,6 +496,8 @@ module What4.Domains.BV.Strides
   , addExact
   , subExact
   , mulConstExact
+  , udivConstExact
+  , uremConstExact
   , ultExactTrueSeparated
   , ultExactFalseSeparated
   -- *** Arithmetic (SMT-LIB div-by-zero semantics)
@@ -4285,6 +4287,62 @@ mulConstExact w k a =
     property (Set.fromList (toList (scaleSingleton w k' a)) == exactScaleImage w k' a)
   where
     k' = k Bits..&. mask a
+
+udivConstExactCond :: Domain w -> Natural -> Bool
+udivConstExactCond a k =
+  k /= 0 && nonWrapping a &&
+  (stride a < k || stride a `mod` k == 0)
+
+exactUdivImage :: Natural -> Domain w -> Set.Set Natural
+exactUdivImage k a =
+  Set.fromList [ x `quot` k | x <- toList a ]
+
+-- | Unsigned division by a positive constant is exact on non-wrapping inputs
+-- when the stride is either smaller than the divisor or divisible by it.
+udivConstExact ::
+  (1 <= w) =>
+  NatRepr w -> Natural -> Domain w -> Property
+udivConstExact w k a =
+  proper a ==> udivConstExactCond a k' ==>
+    property (Set.fromList (toList (udiv w a divisor)) == exactUdivImage k' a)
+  where
+    k' = k Bits..&. mask a
+    divisor = mk w k' 1 0
+
+uremConstSameQuotCond :: Domain w -> Natural -> Bool
+uremConstSameQuotCond a k =
+  stride a == 1 &&
+  start a `quot` k == end a `quot` k
+
+uremConstFullResidueCond :: Domain w -> Natural -> Bool
+uremConstFullResidueCond a k =
+  start a `quot` k /= end a `quot` k &&
+  Prelude.gcd (stride a) k == 1 &&
+  spanExact a >= lcmNat (stride a) k - stride a
+
+uremConstExactCond :: Domain w -> Natural -> Bool
+uremConstExactCond a k =
+  k /= 0 && nonWrapping a &&
+  (uremConstSameQuotCond a k || uremConstFullResidueCond a k)
+
+exactUremImage :: Natural -> Domain w -> Set.Set Natural
+exactUremImage k a =
+  Set.fromList [ x `rem` k | x <- toList a ]
+
+-- | Unsigned remainder by a positive constant is exact on non-wrapping
+-- inputs in the paper's single-quotient case when the operand is already
+-- contiguous, and in the full-coverage case when the residue set is the full
+-- interval @[0, k-1]@ (here, the coprime @gcd(stride, k)=1@ subcase
+-- representable by a single progression result).
+uremConstExact ::
+  (1 <= w) =>
+  NatRepr w -> Natural -> Domain w -> Property
+uremConstExact w k a =
+  proper a ==> uremConstExactCond a k' ==>
+    property (Set.fromList (toList (urem w a divisor)) == exactUremImage k' a)
+  where
+    k' = k Bits..&. mask a
+    divisor = mk w k' 1 0
 
 -- | In the separated case @end a < start b@ for non-wrapping operands, every
 -- concrete pair satisfies unsigned less-than.

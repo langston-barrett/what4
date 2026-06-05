@@ -1795,6 +1795,54 @@ mulConstExact k a =
         | z <- [0 .. 2^^n - 1] : [_][n]
         ]
 
+udivConstExactCond : {n} (fin n, n >= 2) => [n] -> Domain n -> Bit
+udivConstExactCond k a =
+  k != 0 /\ nonWrapping a /\ (a.stride < k \/ a.stride % k == 0)
+
+exactUdivImage : {n} (fin n, n >= 2) => [n] -> Domain n -> [n] -> Bit
+exactUdivImage k a z =
+  or [ member a x /\ z == x / k
+     | x <- [0 .. 2^^n - 1] : [_][n]
+     ]
+
+udivConstExact : {n} (fin n, n >= 2) => [n] -> Domain n -> Property
+udivConstExact k a =
+  udivConstExactCond k a ==>
+    and [ member (udiv a (mk k 1 0)) z == exactUdivImage k a z
+        | z <- [0 .. 2^^n - 1] : [_][n]
+        ]
+
+lcmNatWide : {n} (fin n, n >= 2) => [n] -> [n] -> [2 * n + 1]
+lcmNatWide x y = (zext x / zext (gcd x y)) * zext y
+
+uremConstSameQuotCond : {n} (fin n, n >= 2) => [n] -> Domain n -> Bit
+uremConstSameQuotCond k a =
+  a.stride == 1 /\ a.start / k == end a / k
+
+uremConstFullResidueCond : {n} (fin n, n >= 2) => [n] -> Domain n -> Bit
+uremConstFullResidueCond k a =
+  a.start / k != end a / k /\
+  gcd a.stride k == 1 /\
+  spanExact a >= lcmNatWide a.stride k - zext a.stride
+
+uremConstExactCond : {n} (fin n, n >= 2) => [n] -> Domain n -> Bit
+uremConstExactCond k a =
+  k != 0 /\ nonWrapping a /\
+  (uremConstSameQuotCond k a \/ uremConstFullResidueCond k a)
+
+exactUremImage : {n} (fin n, n >= 2) => [n] -> Domain n -> [n] -> Bit
+exactUremImage k a z =
+  or [ member a x /\ z == x % k
+     | x <- [0 .. 2^^n - 1] : [_][n]
+     ]
+
+uremConstExact : {n} (fin n, n >= 2) => [n] -> Domain n -> Property
+uremConstExact k a =
+  uremConstExactCond k a ==>
+    and [ member (urem a (mk k 1 0)) z == exactUremImage k a z
+        | z <- [0 .. 2^^n - 1] : [_][n]
+        ]
+
 allUltPairs : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
 allUltPairs a b =
   and [ ~(member a x /\ member b y) \/ x < y
@@ -1834,6 +1882,8 @@ property p_correct_srem = correct_srem`{4}
 property p_addExact               = addExact`{4}
 property p_subExact               = subExact`{4}
 property p_mulConstExact          = mulConstExact`{4}
+property p_udivConstExact         = udivConstExact`{4}
+property p_uremConstExact         = uremConstExact`{4}
 property p_ultExactTrueSeparated  = ultExactTrueSeparated`{4}
 property p_ultExactFalseSeparated = ultExactFalseSeparated`{4}
 
