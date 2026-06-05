@@ -296,6 +296,24 @@ tests = TT.testGroup "Strides"
   , genTest "correct_srem" $
       do SW n <- genWidth
          S.correct_srem n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+
+  -- Exactness
+  , genTest "addExact" $
+      do SW n <- genWidthSmall
+         S.addExact n <$> S.genDomain n <*> S.genDomain n
+  , genTest "subExact" $
+      do SW n <- genWidthSmall
+         S.subExact n <$> S.genDomain n <*> S.genDomain n
+  , genTest "mulConstExact" $
+      do SW n <- genWidthSmall
+         S.mulConstExact n <$> genNatBV n <*> S.genDomain n
+  , genTest "ultExactTrueSeparated" $
+      do SW n <- genWidthSmall
+         S.ultExactTrueSeparated n <$> S.genDomain n <*> S.genDomain n
+  , genTest "ultExactFalseSeparated" $
+      do SW n <- genWidthSmall
+         S.ultExactFalseSeparated n <$> S.genDomain n <*> S.genDomain n
+
   , genTest "correct_udivSmtlib" $
       do SW n <- genWidth
          S.correct_udivSmtlib n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n

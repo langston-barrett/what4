@@ -1586,6 +1586,100 @@ correct_srem a b x y =
   proper a ==> proper b ==> member a x ==> member b y ==> y != 0 ==>
     member (srem a b) (x %$ y)
 
+// ------------------------------------------------------------------
+// *** Exactness
+//
+// Exactness side conditions from /ASE: A Value Set Decision Procedure for
+// Symbolic Execution/.
+
+spanExact : {n} (fin n, n >= 2) => Domain n -> [2 * n + 1]
+spanExact c = zext c.n * zext c.stride
+
+nonWrapping : {n} (fin n, n >= 2) => Domain n -> Bit
+nonWrapping c = proper c /\ ~ wrapsU c
+
+addSoundCond : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+addSoundCond a b =
+  (zext (spanExact a) : [2 * n + 2]) + zext (spanExact b) <= zext (~ 0 : [n])
+
+addStrideCond : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+addStrideCond a b =
+  (b.stride % a.stride == 0 /\ size a >= zext (b.stride / a.stride)) \/
+  (a.stride % b.stride == 0 /\ size b >= zext (a.stride / b.stride))
+
+addExactCond : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+addExactCond a b =
+  nonWrapping a /\ nonWrapping b /\ addSoundCond a b /\ addStrideCond a b
+
+exactAddImage : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Bit
+exactAddImage a b z =
+  or [ member a x /\ member b y /\ z == x + y
+     | x <- [0 .. 2^^n - 1] : [_][n]
+     , y <- [0 .. 2^^n - 1] : [_][n]
+     ]
+
+exactSubImage : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Bit
+exactSubImage a b z =
+  or [ member a x /\ member b y /\ z == x - y
+     | x <- [0 .. 2^^n - 1] : [_][n]
+     , y <- [0 .. 2^^n - 1] : [_][n]
+     ]
+
+addExact : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+addExact a b =
+  addExactCond a b ==>
+    and [ member (add a b) z == exactAddImage a b z
+        | z <- [0 .. 2^^n - 1] : [_][n]
+        ]
+
+subExact : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+subExact a b =
+  addExactCond a b ==>
+    and [ member (sub a b) z == exactSubImage a b z
+        | z <- [0 .. 2^^n - 1] : [_][n]
+        ]
+
+mulConstExactCond : {n} (fin n, n >= 2) => [n] -> Domain n -> Bit
+mulConstExactCond k a =
+  k != 0 /\ nonWrapping a /\
+  (zext k : [2 * n + 1]) * zext a.stride <= zext (~ 0 : [n]) /\
+  (zext k : [2 * n + 1]) * spanExact a <= zext (~ 0 : [n])
+
+exactScaleImage : {n} (fin n, n >= 2) => [n] -> Domain n -> [n] -> Bit
+exactScaleImage k a z =
+  or [ member a x /\ z == k * x
+     | x <- [0 .. 2^^n - 1] : [_][n]
+     ]
+
+mulConstExact : {n} (fin n, n >= 2) => [n] -> Domain n -> Property
+mulConstExact k a =
+  mulConstExactCond k a ==>
+    and [ member (scaleSingleton k a) z == exactScaleImage k a z
+        | z <- [0 .. 2^^n - 1] : [_][n]
+        ]
+
+allUltPairs : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+allUltPairs a b =
+  and [ ~(member a x /\ member b y) \/ x < y
+      | x <- [0 .. 2^^n - 1] : [_][n]
+      , y <- [0 .. 2^^n - 1] : [_][n]
+      ]
+
+allNotUltPairs : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+allNotUltPairs a b =
+  and [ ~(member a x /\ member b y) \/ ~(x < y)
+      | x <- [0 .. 2^^n - 1] : [_][n]
+      , y <- [0 .. 2^^n - 1] : [_][n]
+      ]
+
+ultExactTrueSeparated : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+ultExactTrueSeparated a b =
+  nonWrapping a /\ nonWrapping b /\ end a < b.start ==> allUltPairs a b
+
+ultExactFalseSeparated : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+ultExactFalseSeparated a b =
+  nonWrapping a /\ nonWrapping b /\ end b <= a.start ==> allNotUltPairs a b
+
 property p_correct_neg = correct_neg`{4}
 property p_correct_add = correct_add`{4}
 property p_correct_sub = correct_sub`{4}
@@ -1598,6 +1692,13 @@ property p_correct_udiv = correct_udiv`{4}
 property p_correct_urem = correct_urem`{4}
 property p_correct_sdiv = correct_sdiv`{4}
 property p_correct_srem = correct_srem`{4}
+
+// *** Exactness
+property p_addExact               = addExact`{4}
+property p_subExact               = subExact`{4}
+property p_mulConstExact          = mulConstExact`{4}
+property p_ultExactTrueSeparated  = ultExactTrueSeparated`{4}
+property p_ultExactFalseSeparated = ultExactFalseSeparated`{4}
 
 // ------------------------------------------------------------------
 // ** Bitwise

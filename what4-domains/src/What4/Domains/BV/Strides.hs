@@ -299,6 +299,11 @@ operation to achieve a score of 100%. That would require also computing the
 progression that is the best possible approximation of the pointwise result. We
 may do this in the future.
 
+=== Exactness
+
+The Haskell property tests and the Cryptol specification both include a small
+set of /exactness/ properties drawn from /ASE: A Value Set Decision Procedure
+for Symbolic Execution/.
 -}
 
 {-# LANGUAGE BangPatterns #-}
@@ -487,6 +492,12 @@ module What4.Domains.BV.Strides
   , correct_urem
   , correct_sdiv
   , correct_srem
+  -- *** Exactness
+  , addExact
+  , subExact
+  , mulConstExact
+  , ultExactTrueSeparated
+  , ultExactFalseSeparated
   -- *** Arithmetic (SMT-LIB div-by-zero semantics)
   , correct_udivSmtlib
   , correct_uremSmtlib
@@ -4005,6 +4016,101 @@ correct_srem w a x b y =
     ys = toSigned w (toInteger y)
 
 -- ------------------------------------------------------------------
+-- *** Exactness
+
+spanExact :: Domain w -> Natural
+spanExact c = n c * stride c
+
+nonWrapping :: Domain w -> Bool
+nonWrapping c = Prelude.not (start c + n c * stride c > mask c)
+
+addSoundCond :: Domain w -> Domain w -> Bool
+addSoundCond a b = spanExact a + spanExact b <= mask a
+
+addStrideCond :: Domain w -> Domain w -> Bool
+addStrideCond a b =
+  (stride b `mod` stride a == 0 && size a >= stride b `div` stride a) ||
+  (stride a `mod` stride b == 0 && size b >= stride a `div` stride b)
+
+addExactCond :: Domain w -> Domain w -> Bool
+addExactCond a b =
+  nonWrapping a && nonWrapping b && addSoundCond a b && addStrideCond a b
+
+exactAddImage :: NatRepr w -> Domain w -> Domain w -> Set.Set Natural
+exactAddImage w a b =
+  Set.fromList [ asN w (toInteger x + toInteger y)
+               | x <- toList a
+               , y <- toList b
+               ]
+
+exactSubImage :: NatRepr w -> Domain w -> Domain w -> Set.Set Natural
+exactSubImage w a b =
+  Set.fromList [ asN w (toInteger x - toInteger y)
+               | x <- toList a
+               , y <- toList b
+               ]
+
+-- | Under the CLP/ASE side conditions for non-wrapping aligned addition, the
+-- abstract result is exact: it contains exactly the concrete pointwise sums.
+addExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+addExact w a b =
+  proper a ==> proper b ==> mask a == mask b ==> addExactCond a b ==>
+    property (Set.fromList (toList (add w a b)) == exactAddImage w a b)
+
+-- | Under the same side conditions, subtraction is exact.
+subExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+subExact w a b =
+  proper a ==> proper b ==> mask a == mask b ==> addExactCond a b ==>
+    property (Set.fromList (toList (sub w a b)) == exactSubImage w a b)
+
+mulConstExactCond :: Domain w -> Natural -> Bool
+mulConstExactCond a k =
+  k /= 0 && nonWrapping a &&
+  k * stride a <= mask a &&
+  k * spanExact a <= mask a
+
+exactScaleImage :: NatRepr w -> Natural -> Domain w -> Set.Set Natural
+exactScaleImage w k a =
+  Set.fromList [ asN w (toInteger k * toInteger x)
+               | x <- toList a
+               ]
+
+-- | Multiplication by a positive constant is exact when neither the resulting
+-- stride nor the non-wrapping span overflows.
+mulConstExact ::
+  (1 <= w) =>
+  NatRepr w -> Natural -> Domain w -> Property
+mulConstExact w k a =
+  proper a ==> mulConstExactCond a k' ==>
+    property (Set.fromList (toList (scaleSingleton w k' a)) == exactScaleImage w k' a)
+  where
+    k' = k Bits..&. mask a
+
+-- | In the separated case @end a < start b@ for non-wrapping operands, every
+-- concrete pair satisfies unsigned less-than.
+ultExactTrueSeparated ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+ultExactTrueSeparated _w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    nonWrapping a ==> nonWrapping b ==> end a < start b ==>
+      property (Prelude.and [ x < y | x <- toList a, y <- toList b ])
+
+-- | In the separated case @end b <= start a@ for non-wrapping operands, no
+-- concrete pair satisfies unsigned less-than.
+ultExactFalseSeparated ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+ultExactFalseSeparated _w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    nonWrapping a ==> nonWrapping b ==> end b <= start a ==>
+      property (Prelude.and [ Prelude.not (x < y) | x <- toList a, y <- toList b ])
+
+-- ------------------------------------------------------------------
 -- *** Arithmetic (SMT-LIB div-by-zero semantics)
 
 correct_udivSmtlib ::
@@ -4935,4 +5041,3 @@ toSigned w x =
   where
     x' = x Bits..&. maxUnsigned w
     signBit = 1 `Bits.shiftL` (NR.widthVal w - 1)
-
