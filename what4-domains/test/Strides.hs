@@ -307,6 +307,12 @@ tests = TT.testGroup "Strides"
   , genTest "mulConstExact" $
       do SW n <- genWidthSmall
          S.mulConstExact n <$> genNatBV n <*> S.genDomain n
+  , genTest "udivConstExact" $
+      do SW n <- genWidthSmall
+         S.udivConstExact n <$> genNatBV n <*> S.genDomain n
+  , genTest "uremConstExact" $
+      do SW n <- genWidthSmall
+         S.uremConstExact n <$> genNatBV n <*> S.genDomain n
   , genTest "ultExactTrueSeparated" $
       do SW n <- genWidthSmall
          S.ultExactTrueSeparated n <$> S.genDomain n <*> S.genDomain n
