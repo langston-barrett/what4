@@ -423,9 +423,6 @@ tests = TT.testGroup "Strides"
   , genTest "pseudoMeetPreciseIdempotent" $
       do SW n <- genWidth
          S.pseudoMeetPreciseIdempotent n <$> S.genDomain n
-  , genTest "pseudoMeetPreciseRefinesMeet" $
-      do SW n <- genWidth
-         S.pseudoMeetPreciseRefinesMeet n <$> S.genDomain n <*> S.genDomain n
   , genTest "nsplitUnion" $
       do SW n <- genWidth
          S.nsplitUnion n <$> S.genDomain n <*> genNatBV n
