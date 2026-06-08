@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
@@ -40,6 +41,9 @@ import qualified What4.Domains.BV.XOR as X
 import           What4.Domains.Internal (assertionsEnabled)
 import qualified What4.Domains.Arithmetic.Internal as ArithOpt
 
+#ifndef USE_HEDGEHOG
+import qualified CLP
+#endif
 import qualified Strides
 import qualified StridedInterval
 
@@ -59,6 +63,12 @@ main = defaultMain $
     , xorDomainTests
     , overallDomainTests
     , transferTests
+#ifndef USE_HEDGEHOG
+    -- CLP tests disabled for Hedgehog due to performance issues.
+    -- Hedgehog's shrink tree generation causes 30+ GB allocations
+    -- and timeouts even with capped integer ranges.
+    , CLP.tests
+#endif
     , Strides.tests
     , StridedInterval.tests
     ]
