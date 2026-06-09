@@ -544,6 +544,40 @@ tests = TT.testGroup "Strides"
   , genTest "pseudoJoinPreciseRefinesJoin" $
       do SW n <- genWidth
          S.pseudoJoinPreciseRefinesJoin n <$> S.genDomain n <*> S.genDomain n
+  , genTest "correct_generalizedJoin" $
+      do SW n <- genWidth
+         k <- chooseInt (0, 4)
+         cs <- mapM (const (S.genDomain n)) [1 .. k]
+         S.correct_generalizedJoin n cs <$> genNatBV n
+  , genTest "generalizedJoinSingleton" $
+      do SW n <- genWidth
+         S.generalizedJoinSingleton n <$> S.genDomain n
+  , genTest "generalizedJoinUpperBound" $
+      do SW n <- genWidth
+         k <- chooseInt (1, 4)
+         cs <- mapM (const (S.genDomain n)) [1 .. k]
+         pure (S.generalizedJoinUpperBound n cs)
+  , genTest "generalizedJoinPermutationInvariant" $
+      do SW n <- genWidth
+         k <- chooseInt (0, 4)
+         cs <- mapM (const (S.genDomain n)) [1 .. k]
+         pure (S.generalizedJoinPermutationInvariant n cs)
+  , genTest "generalizedJoinTopAnnihilator" $
+      do SW n <- genWidth
+         k <- chooseInt (0, 4)
+         cs <- mapM (const (S.genDomain n)) [1 .. k]
+         pure (S.generalizedJoinTopAnnihilator n cs)
+  , genTest "generalizedJoinAgreesWithPseudoJoin" $
+      do SW n <- genWidth
+         S.generalizedJoinAgreesWithPseudoJoin n <$> S.genDomain n <*> S.genDomain n
+  , genTest "generalizedJoinSasiAgreesWithPseudoJoin" $
+      do SW n <- genWidth
+         S.generalizedJoinSasiAgreesWithPseudoJoin n <$> S.genDomain n <*> S.genDomain n
+  , genTest "generalizedJoinDominatesSasi" $
+      do SW n <- genWidth
+         k <- chooseInt (1, 4)
+         cs <- mapM (const (S.genDomain n)) [1 .. k]
+         pure (S.generalizedJoinDominatesSasi n cs)
   , genTest "pseudoMeetTopIdentity" $
       do SW n <- genWidth
          S.pseudoMeetTopIdentity n <$> S.genDomain n
