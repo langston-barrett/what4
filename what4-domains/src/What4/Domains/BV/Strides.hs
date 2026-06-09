@@ -1738,8 +1738,40 @@ strideOrientations c
 -- pairs with the closed-form 'addSubSize' — a couple of scalar gcd\/mults — and
 -- materializes the winning orientation /once/. The two agree exactly
 -- ('addRobustClosedFormAgrees'), since 'addSubSize' /is/ @size . op@.
+--
+-- == Examples
+--
+-- Orientation matters: at @w = 4@, the two-element progressions @{0,6}@ and
+-- @{0,10}@ have different cross-operand gcds at the four orientation
+-- combinations, because 'reverseD' replaces a stride @s@ with @2^w − s@:
+--
+-- >>> let a = mk4 0 6 1; b = mk4 0 10 1
+-- >>> (stride a, stride (reverseD w4 a))
+-- (6,10)
+-- >>> (stride b, stride (reverseD w4 b))
+-- (10,6)
+--
+-- The forward gcd is @gcd(6, 10) = 2@ — an 8-step stride-2 walk — but the
+-- diagonal pairings give @gcd(6, 6) = 6@ and @gcd(10, 10) = 10@, both yielding
+-- a 3-element result. 'orientRobustAddSub' picks the tightest:
+--
+-- >>> display (add w4 a b)
+-- "[*.....*...*.....]  = [10,0,6]"
+-- >>> stride (add w4 a b)
+-- 6
+--
+-- And because every orientation denotes the same set, the answer is invariant
+-- under reversing either or both operands:
+--
+-- >>> eq (add w4 a b) (add w4 (reverseD w4 a) b)
+-- True
+-- >>> eq (add w4 a b) (add w4 a (reverseD w4 b))
+-- True
+-- >>> eq (add w4 a b) (add w4 (reverseD w4 a) (reverseD w4 b))
+-- True
 orientRobustAddSub ::
   NatRepr w ->
+  -- | 'addRaw' or 'subRaw'
   (Domain w -> Domain w -> Domain w) ->
   Domain w -> Domain w -> Domain w
 orientRobustAddSub w op a b =
