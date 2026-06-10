@@ -276,12 +276,14 @@ smallWindow b = (zext b.n + 1 : [2 * n + 2]) * 2 <= (zext (orbitMask b) + 1)
 
 leqExactPartial : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe Bit
 leqExactPartial a b =
-  if      ~ onCoset     then Just False
-   else if a.n == 0     then Just (iAw <= bn)
-   else if ~ subgroup   then Just False
-   else if bFull        then Just True
-   else if smallWindow b then Just (iAw <= bn /\ (forwardFits \/ backwardFits))
-   else                      Nothing
+  if      ~ onCoset      then Just False
+   else if a.n == 0      then Just (iAw <= bn)
+   else if ~ subgroup    then Just False
+   else if bFull         then Just True
+   else if an > bn       then Just False                  // pigeonhole
+   else if monoFits      then Just True                   // sound under any window
+   else if smallWindow b then Just False                  // exact reject
+   else                       Nothing
   where
     gB    = strideGcd b
     mask  = orbitMask b
@@ -303,6 +305,7 @@ leqExactPartial a b =
     bwd = iEw + an * msw
     forwardFits  = fwd <= bn
     backwardFits = bwd <= bn
+    monoFits     = iAw <= bn /\ (forwardFits \/ backwardFits)
 
 size : {n} (fin n, n >= 2) => Domain n -> [n + 1]
 size c = c.n + 1

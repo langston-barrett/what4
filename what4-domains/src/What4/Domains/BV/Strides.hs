@@ -1337,8 +1337,8 @@ leqPrecise a b = assert (proper a) $ assert (proper b) $
 
 -- | /O(w log w)/. Like 'leqExact', but never runs the quadratic window count:
 -- returns @Just@ the exact answer on the sub-domain it can decide cheaply, and
--- 'Nothing' on the one case (a large window over a non-full @b@) that genuinely
--- needs 'leqExact'\''s 'floorSum'. Exact wherever it is defined.
+-- 'Nothing' on the one residual case that genuinely needs 'leqExact'\''s
+-- 'floorSum'. Exact wherever it is defined.
 leqExactPartial :: Domain w -> Domain w -> Maybe Bool
 -- Writing @stride = 2^v · m@ for odd @m@, the subgroup of @Z\/2^w@ generated
 -- by @stride@ is @⟨2^v⟩@ — the odd factor @m@ is invertible mod @2^w\/2^v@
@@ -1352,17 +1352,19 @@ leqExactPartial :: Domain w -> Domain w -> Maybe Bool
 --       | 0 ≤ i ≤ n a }@ all lie in @[0, n b]@, where
 --       @aStep = stride a · stride b^{-1} mod orbitLen b@ in @b@\'s index space.
 --
--- All of (1), (2), and the easy shapes of (3) — @a@ a singleton, @b@ full, or
--- @b@\'s window spanning at most half its orbit — are @O(w)@. In the small-
--- window case @a@\'s visited indices can fit @[0, n b]@ in at most one
--- orientation — running forward (no wrap) or backward (from the last index) —
--- so 'monoFits' decides (3) with two unwrapped comparisons and no Euclidean
--- descent. (The @Maybe@-valued counterpart and its exactness — wherever it
--- commits, it equals the oracle 'leqExact' — are proven in Cryptol at @w = 4@,
--- with @w = 8@ corroborated by randomized testing; see @doc/strides.cry@,
--- @leqExactPartial@\/@leqExactPartialAgrees@.) Only the /large window/
--- (non-full @b@, window over half the orbit) is left to the caller as
--- 'Nothing': there @a@ may fit by wrapping, which needs a count.
+-- All cheap branches of (3) — @a@ a singleton, @b@ full, /pigeonhole/
+-- (@|a| > |b|@: under (2) @a@\'s b-indices are distinct, so @a@ has too many
+-- elements to fit), /monoFits-accept/ (a's window walks an unwrapped run that
+-- stays in @[0, n b]@; sound regardless of window size), and /small window/
+-- (where @a@\'s indices can only fit @[0, n b]@ in at most one orientation, so
+-- a 'monoFits' rejection is exact) — are @O(w)@ each. (The @Maybe@-valued
+-- counterpart and its exactness — wherever it commits, it equals the oracle
+-- 'leqExact' — are proven in Cryptol at @w = 4@, with @w = 8@ corroborated by
+-- randomized testing; see @doc/strides.cry@,
+-- @leqExactPartial@\/@leqExactPartialAgrees@.) Only the /residual/ case — large
+-- window over non-full @b@, with @a@ small enough to fit (@|a| ≤ |b|@) but
+-- 'monoFits' rejecting — is left to the caller as 'Nothing': there @a@ may fit
+-- by wrapping, which needs a count.
 leqExactPartial a b = assert (proper a) $ assert (proper b) $
   case valueIndexMaybe b (start a) of
     Nothing -> Just False                            -- (1) fails: start a off coset
@@ -1370,7 +1372,9 @@ leqExactPartial a b = assert (proper a) $ assert (proper b) $
       | aIsSingleton          -> Just (iAStart <= n b)  -- (1) ok; (2)/(3) vacuous
       | Prelude.not subgroupContained -> Just False     -- (2) fails
       | bIsFull               -> Just True              -- (3) vacuous: full orbit
-      | smallWindow           -> Just (monoFits iAStart) -- (3) O(w) fast path
+      | n a > n b             -> Just False             -- (3) pigeonhole
+      | monoFits iAStart      -> Just True              -- (3) monoFits-accept
+      | smallWindow           -> Just False             -- (3) exact reject
       | otherwise             -> Nothing                -- (3) needs floorSum
   where
     gB :: Natural
@@ -1386,11 +1390,13 @@ leqExactPartial a b = assert (proper a) $ assert (proper b) $
     invSB, aStep :: Natural
     invSB = invModPow2 (stride b `divByPow2` gB) mB
     aStep = ((stride a `divByPow2` gB) * invSB) .&. (mB - 1)
-    -- (3), small-window fast path: @a@'s indices fit @[0, n b]@ iff they fit
-    -- without wrapping in some orientation. Forward: @iAStart + n a · aStep@
+    -- (3), monoFits: @a@'s indices fit @[0, n b]@ if they fit without
+    -- wrapping in some orientation. Forward: @iAStart + n a · aStep@
     -- never exceeds @n b@. Backward: from the last index, stepping by
-    -- @mB - aStep@, the reach never exceeds @n b@. (Exact only when
-    -- 'smallWindow' holds, so a window cannot fit by wrapping.)
+    -- @mB - aStep@, the reach never exceeds @n b@. /Sound True/ regardless of
+    -- window size (an unwrapped run stays in @[0, n b]@); /exact/ — i.e. False
+    -- is also sound — only under 'smallWindow', where the window cannot fit
+    -- by wrapping.
     monoFits :: Natural -> Bool
     monoFits iAStart =
       let nA       = n a
@@ -1422,12 +1428,14 @@ leqExactWindow a b =
                     - floorSum nA1 mB aStep (iAStart + mB - wWidth)
   in hits == nA1
 
--- | /O(w log w)/ when @b@\'s window spans at most half its orbit, /O(w^2)/
--- otherwise. Partial order on progressions: @leqExact a b@ iff every element
--- of @a@ is in @b@.
+-- | /O(w log w)/, except /O(w^2)/ on the residual case: @b@\'s window is
+-- larger than half its orbit, @b@ is not full, @a@ has at most as many points
+-- as @b@\'s window, and @a@\'s indices in @b@\'s index space neither fit
+-- forward nor backward without wrapping. Partial order on progressions:
+-- @leqExact a b@ iff every element of @a@ is in @b@.
 leqExact :: Domain w -> Domain w -> Bool
--- 'leqExactPartial' decides everything but the large-window, non-full @b@ case
--- in @O(w)@; that remaining case is the only one where @a@ can fit @b@\'s
+-- 'leqExactPartial' decides everything but the residual large-window wrapping
+-- case in @O(w)@; that remaining case is the only one where @a@ can fit @b@\'s
 -- window by wrapping, so it falls back to the @O(w^2)@ 'leqExactWindow' count.
 leqExact a b = fromMaybe (leqExactWindow a b) (leqExactPartial a b)
 
