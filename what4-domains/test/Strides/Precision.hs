@@ -318,26 +318,32 @@ subset_select i n w c =
     LeqProof ->
       S.proper c ==> subsetOf n (S.select i n w c) (A.select i n (S.toArith c))
 
+-- These check the @*Raw@ kernel against the arith abstraction. The
+-- 'S.psplitOp2R'-wrapped public versions ('S.shl' etc.) can soundly land on a
+-- coset that the arith arc does not contain — strides and arith are
+-- /incomparable/ once 'pseudoJoin' enters the picture — so those are checked
+-- against the concrete operation directly via 'correct_shl' / 'correct_lshr' /
+-- 'correct_ashr' instead.
 subset_shl ::
   (1 <= w) =>
   NatRepr w -> S.Domain w -> S.Domain w -> Property
 subset_shl w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.shl w a b) (A.shl w (S.toArith a) (S.toArith b))
+    subsetOf w (S.shlRaw w a b) (A.shl w (S.toArith a) (S.toArith b))
 
 subset_lshr ::
   (1 <= w) =>
   NatRepr w -> S.Domain w -> S.Domain w -> Property
 subset_lshr w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.lshr w a b) (A.lshr w (S.toArith a) (S.toArith b))
+    subsetOf w (S.lshrRaw w a b) (A.lshr w (S.toArith a) (S.toArith b))
 
 subset_ashr ::
   (1 <= w) =>
   NatRepr w -> S.Domain w -> S.Domain w -> Property
 subset_ashr w a b =
   S.proper a ==> S.proper b ==>
-    subsetOf w (S.ashr w a b) (A.ashr w (S.toArith a) (S.toArith b))
+    subsetOf w (S.ashrRaw w a b) (A.ashr w (S.toArith a) (S.toArith b))
 
 tests :: TT.TestTree
 tests = TT.testGroup "Precision (Strides at least as precise as Arith)"

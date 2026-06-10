@@ -377,8 +377,10 @@ module What4.Domains.BV.Strides
   , sremSmtlib
   -- * Bitwise operations
   , not
+  , andFast
   , and
   , andPrecise
+  , orFast
   , or
   , orPrecise
   , xor
@@ -389,10 +391,15 @@ module What4.Domains.BV.Strides
   , select
   -- * Shifts and rotations
   , shl
+  , shlRaw
   , lshr
+  , lshrRaw
   , ashr
+  , ashrRaw
   , rol
+  , rolRaw
   , ror
+  , rorRaw
   -- * Lattice operations
   -- $lattice
   , pseudoMeet
@@ -482,6 +489,10 @@ module What4.Domains.BV.Strides
   -- ** Arithmetic
   , correct_neg
   , reverseDSameSet
+  , psplitProper
+  , psplitCovers
+  , psplitPartitions
+  , psplitOp2Sound
   , correct_add
   , correct_sub
   , correct_scale
@@ -529,7 +540,7 @@ module What4.Domains.BV.Strides
   , warrenAndLoCorrect
   , warrenAndHiCorrect
   , operandRangeCorrect
-  , andPreciseDominatesAnd
+  , andPreciseDominatesAndFast
   -- ** Concatenation, extension, selection, and truncation
   , correct_zero_ext
   , correct_sign_ext
@@ -746,13 +757,13 @@ wrapOffset c@Domain{start, mask} v =
   assert (proper c) $ modSub mask v start
 {-# INLINE wrapOffset #-}
 
--- | /O(1)/. The lowest set bit of @x@; equivalently @gcd(x, 2^w)@ for any
+-- | /O(w)/. The lowest set bit of @x@; equivalently @gcd(x, 2^w)@ for any
 -- @w@ at least the bit-length of @x@.
 lowestSetBit :: Natural -> Natural
 lowestSetBit x = 1 `shiftL` countTrailingZerosOr0 (toInteger x)
 {-# INLINE lowestSetBit #-}
 
--- | /O(1)/. @gcd(stride, 2^w)@. Since @2^w@ is a power of two, this equals the
+-- | /O(w)/. @gcd(stride, 2^w)@. Since @2^w@ is a power of two, this equals the
 -- lowest set bit of @stride@.
 strideGcd :: Domain w -> Natural
 strideGcd Domain{stride} = lowestSetBit stride
@@ -786,7 +797,7 @@ orbitLen :: Domain w -> Natural
 orbitLen c@Domain{mask} = orbitLenOf mask (strideGcd c)
 {-# INLINE orbitLen #-}
 
--- | /O(1)/. Cap @n@ at the orbit length minus 1: the maximum step count
+-- | /O(w)/. Cap @n@ at the orbit length minus 1: the maximum step count
 -- representable for stride @stride@ at width @log2 (mask + 1)@.
 clampToOrbit :: Natural -> Natural -> Natural -> Natural
 clampToOrbit mask stride i =
@@ -892,7 +903,7 @@ circLeq :: Natural -> Natural -> Natural -> Natural -> Bool
 circLeq m x a b = (a + nx) .&. m <= (b + nx) .&. m
   where nx = modNeg m x
 
--- | /O(1)/. Does this progression self-wrap? A progression is self-wrapping if the
+-- | /O(w)/. Does this progression self-wrap? A progression is self-wrapping if the
 -- cumulative distance traversed by its orbit (@n * stride@, where @n@ is the
 -- number of steps from @start@ to @end@) exceeds @2^w@. Geometrically: walking
 -- around the number circle from @start@, the orbit passes its starting point
@@ -958,7 +969,7 @@ mk w s st nn =
     c = Domain { start = s', stride = st', n = n', mask = m }
 {-# INLINE mk #-}
 
--- | /O(1)/. The top element of the lattice: the progression containing every
+-- | /O(w)/. The top element of the lattice: the progression containing every
 -- @w@-bit value, @(0, 1, 2^w - 1)@.
 top :: NatRepr w -> Domain w
 top w = mk w 0 1 (integerToNatural (maxUnsigned w))
@@ -1187,7 +1198,7 @@ toBitwise c = B.meet (arcBitwise c) (strideBitwise c)
 arcBitwise :: Domain w -> B.Domain w
 arcBitwise = arithToBitwise . toArith
 
--- | /O(1)/. Bitwise domain from the stride alone: every orbit element
+-- | /O(w)/. Bitwise domain from the stride alone: every orbit element
 -- shares its low @v@ bits with @start@, where @stride = 2^v · m@ for odd
 -- @m@. (Each step adds a multiple of @2^v@, leaving the low @v@ bits
 -- unchanged.) The high bits are unconstrained.
@@ -1685,6 +1696,82 @@ orientRobust w op a b =
   where
     orientations c = let r = reverseD w c in if r == c then [c] else [c, r]
     minBySize x y = if size x <= size y then x else y
+
+-- | /O(w)/. Split a progression by index parity into two sub-progressions
+-- with stride @2·stride@: the even-index orbit @(start, 2t, n \`div\` 2)@ and
+-- the odd-index orbit @(start + t, 2t, (n - 1) \`div\` 2)@. Their union is
+-- exactly @c@, partitioned cleanly: writing @stride = 2^v · m@ for odd @m@,
+-- bit @v@ of element @i@ is @bit_v(start) XOR (i mod 2)@, so the even and odd
+-- halves are distinguished by bit @v@. Each half therefore pins one more low
+-- bit than @c@ does.
+--
+-- Returns @[c]@ in the cases where the split is uninformative:
+--
+--   * /Singleton/ (@n = 0@): there is no second piece.
+--   * /Full coset/ (@n + 1 = orbitLen@): both halves saturate back to the
+--     same full coset of @c@, so the split adds no precision.
+--   * /Stride at the top bit/ (@2·stride ≡ 0 mod 2^w@): the @2t@ stride is
+--     ill-defined; this only arises when @t = 2^(w-1)@, which forces a
+--     singleton or full coset and is already handled above.
+psplit :: (1 <= w) => NatRepr w -> Domain w -> [Domain w]
+psplit w c@Domain{start = s, stride = t, n = nn, mask = m} =
+  assert (proper c) $
+  let !t' = (2 * t) .&. m
+  in if nn == 0 || nn + 1 == orbitLen c || t' == 0
+       then [c]
+       else
+         let !nEven = nn `Prelude.div` 2
+             !nOdd  = (nn - 1) `Prelude.div` 2
+             !sOdd  = (s + t) .&. m
+         in [mk w s t' nEven, mk w sOdd t' nOdd]
+
+-- | Run a sound binary operation at all (up to four) 'psplit' combinations of
+-- its operands, pseudo-join the sub-results, and return whichever of the raw
+-- and pseudo-joined results is smaller by cardinality.
+--
+-- Soundness: every concrete @x \`op\` y@ for @x ∈ a, y ∈ b@ has @x@ in some
+-- 'psplit' piece of @a@ and @y@ in some piece of @b@, so it is in the
+-- corresponding sub-result, hence in the pseudo-join. The min-by-size keeps
+-- the raw call's result whenever it is at least as tight, so this never
+-- worsens @op@ by cardinality.
+--
+-- Costs at most @5 · cost(op) + 3 · cost(pseudoJoin) + O(w)@ (the raw call,
+-- 4 sub-ops, 3 folded pseudo-joins, and 2 'psplit' calls), still /O(w)/ for
+-- /O(w)/ ops. Worth using for ops where the cross-operand interaction is
+-- sensitive to bit-@v@ pinning (e.g. 'andPrecise', where each piece has one
+-- more fixed low bit than the input).
+psplitOp2 ::
+  (1 <= w) =>
+  NatRepr w ->
+  (Domain w -> Domain w -> Domain w) ->
+  Domain w -> Domain w -> Domain w
+psplitOp2 w op a b =
+  let !raw = op a b
+      !subs = [ op ai bj | ai <- psplit w a, bj <- psplit w b ]
+      !pj = case subs of
+              []     -> raw           -- unreachable: psplit returns ≥ 1 piece
+              (c:cs) -> Prelude.foldr (pseudoJoin w) c cs
+  in if size raw <= size pj then raw else pj
+
+-- | Like 'psplitOp2', but only splits the second operand — useful for
+-- operations like shifts/rotates where the second argument has a structurally
+-- different role and splitting only it captures most of the precision win at
+-- half the work.
+--
+-- Costs at most @3 · cost(op) + cost(pseudoJoin) + O(w)@ (the raw call,
+-- 2 sub-ops, 1 pseudo-join, and 1 'psplit' call).
+psplitOp2R ::
+  (1 <= w) =>
+  NatRepr w ->
+  (Domain w -> Domain w -> Domain w) ->
+  Domain w -> Domain w -> Domain w
+psplitOp2R w op a b =
+  let !raw = op a b
+      !subs = [ op a bj | bj <- psplit w b ]
+      !pj = case subs of
+              []     -> raw           -- unreachable: psplit returns ≥ 1 piece
+              (c:cs) -> Prelude.foldr (pseudoJoin w) c cs
+  in if size raw <= size pj then raw else pj
 
 -- | The exact result size of @addRaw@\/@subRaw@ on operands with the given step
 -- counts and strides, /without/ materializing the result.
@@ -2444,11 +2531,11 @@ operandRange c@Domain{start = s, stride = t, n = nn, mask = m} =
      else if s + span_ > m then (0, m)                    -- wrap (not self)
      else (s, s + span_)                                  -- no wrap
 
--- | /O(w)/. Tight unsigned lower bound on @{ x .&. y | alo <= x <= ahi,
+-- | /O(w^2)/. Tight unsigned lower bound on @{ x .&. y | alo <= x <= ahi,
 -- blo <= y <= bhi }@.
 --
--- /Hacker's Delight/ §4.3, minAND. Walks bit positions MSB to LSB,
--- attempting to flip shared 0-bits to 1 in @a@ or @b@.
+-- /Hacker's Delight/ §4.3, minAND. Walks @w@ bit positions MSB to LSB,
+-- doing /O(w)/ Natural ops per iteration (shifts, masks, comparisons).
 warrenAndLo ::
   Natural {- ^ @mask@ -} ->
   Natural {- ^ @alo@ -} ->
@@ -2471,11 +2558,11 @@ warrenAndLo m alo ahi blo bhi =
              else if canFlip && bPrime <= bhi then go a bPrime (i - 1)
              else go a b (i - 1)
 
--- | /O(w)/. Tight unsigned upper bound on @{ x .&. y | alo <= x <= ahi,
+-- | /O(w^2)/. Tight unsigned upper bound on @{ x .&. y | alo <= x <= ahi,
 -- blo <= y <= bhi }@.
 --
--- /Hacker's Delight/ §4.3, maxAND. Walks bit positions MSB to LSB,
--- attempting to clear bits where one operand has 1 and the other 0.
+-- /Hacker's Delight/ §4.3, maxAND. Walks @w@ bit positions MSB to LSB,
+-- doing /O(w)/ Natural ops per iteration (shifts, masks, comparisons).
 warrenAndHi ::
   Natural {- ^ @mask@ -} ->
   Natural {- ^ @alo@ -} ->
@@ -2524,7 +2611,9 @@ not w c@Domain{stride, n = nn, mask} =
   assert (proper c) $
   mk w (mask - end c) stride nn
 
--- | /O(w)/. Bitwise AND. See also 'andPrecise'.
+-- | /O(w)/. The cheap bitwise-AND kernel: a single arithmetic pass, no parity
+-- splitting or Warren bounds. See 'and' for the default ('psplitOp2'-wrapped)
+-- variant and 'andPrecise' for the tightest one.
 --
 -- == Examples
 --
@@ -2534,15 +2623,15 @@ not w c@Domain{stride, n = nn, mask} =
 -- >>> let evens = mk4 0 2 7
 -- >>> display evens
 -- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
--- >>> display (and w4 evens evens)
+-- >>> display (andFast w4 evens evens)
 -- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
 --
 -- ANDing with the singleton @{12} = 1100@ clears the low two bits of every
 -- even, yielding the exact stride-4 result @{0,4,8,12}@:
 --
--- >>> display (and w4 (mk4 12 1 0) evens)
+-- >>> display (andFast w4 (mk4 12 1 0) evens)
 -- "[*...*...*...*...]  = [0,4,8,12]"
-and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+andFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
 -- * CLP 3.3.4 Bit Operations, CLP-CLP @&@ case.
@@ -2555,7 +2644,7 @@ and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- When either operand is a singleton @{k}@, 'andSingleton' is much tighter —
 -- masking by the constant @k@ both fixes the result bits where @k@ is @0@ and
 -- can widen the stride — so we special-case it.
-and w a b =
+andFast w a b =
   assert (proper a) $
   assert (proper b) $
   case (n a, n b) of
@@ -2571,8 +2660,18 @@ and w a b =
           !nSteps  = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
       in mk w cosetLo d nSteps
 
+-- | /O(w)/. Bitwise AND. Wraps 'andFast' through 'psplitOp2': each 'psplit'
+-- piece of an operand has one more fixed low bit than the operand itself, so
+-- running 'andFast' on each pair of pieces and pseudo-joining can be tighter
+-- than the single 'andFast' call. The min-by-size guard inside 'psplitOp2'
+-- keeps the raw call's result whenever it is at least as tight, so 'and' is
+-- never larger than 'andFast' by cardinality. See 'andPrecise' for the
+-- variant that also uses Warren bounds.
+and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+and w = psplitOp2 w (andFast w)
+
 -- | /O(w)/. Bitwise AND of a singleton @{k}@ with an arbitrary progression
--- @c@. Sound (over-approximating), and tighter than the generic 'and' path.
+-- @c@. Sound (over-approximating), and tighter than the generic 'andFast' path.
 --
 -- Not exact in general: @{ k & y | y ∈ c }@ need not be a single progression.
 -- For example at width 4, @{14} & {0,1,2,5,6,7,11,12,13}@ is @{0,2,4,6,10,12}@,
@@ -2617,8 +2716,20 @@ andSingleton w k c =
          in mk w cosetLo d nSteps
 
 -- | /O(w^2)/. Bitwise AND. At least as precise as 'and' on all inputs.
+--
+-- Wraps 'andPreciseRaw' through 'psplitOp2': each 'psplit' piece of an operand
+-- has one more fixed low bit than the operand itself (writing
+-- @stride = 2^v · m@, bit @v@ alternates with index parity), and AND
+-- distributes over union, so running 'andPreciseRaw' on each pair of pieces
+-- and pseudo-joining can be tighter than the single 'andPreciseRaw' call on
+-- the unsplit operands.
 andPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-andPrecise w a b =
+andPrecise w = psplitOp2 w (andPreciseRaw w)
+
+-- | /O(w^2)/. The single-progression-pair AND kernel; see 'andPrecise' for
+-- the 'psplitOp2' wrapper that should be preferred.
+andPreciseRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+andPreciseRaw w a b =
   assert (proper a) $
   assert (proper b) $
   case (n a, n b) of
@@ -2637,7 +2748,14 @@ andPrecise w a b =
           !nSteps  = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
       in mk w cosetLo d nSteps
 
--- | /O(w)/. Bitwise OR. See also 'orPrecise'.
+-- | /O(w)/. The cheap bitwise-OR kernel (De Morgan over 'andFast'). See 'or'
+-- for the default ('psplitOp2'-wrapped) variant and 'orPrecise' for the
+-- tightest one.
+orFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+orFast w a b = not w (andFast w (not w a) (not w b))
+
+-- | /O(w)/. Bitwise OR (De Morgan over 'and'). At least as precise as 'orFast'
+-- by cardinality. See 'orPrecise' for the variant that also uses Warren bounds.
 or :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 or w a b = not w (and w (not w a) (not w b))
 
@@ -2706,6 +2824,11 @@ select i n _w c =
 -- >>> display (shl w4 a b)
 -- "[..*.*.*.*.......]  = [2,4,6,8]"
 shl :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+shl w = psplitOp2R w (shlRaw w)
+
+-- | /O(w)/. The single-pair shift-left kernel; see 'shl' for the
+-- 'psplitOp2R'-wrapped variant.
+shlRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
 -- * CLP 3.3.3 Shift Operations:
@@ -2735,7 +2858,7 @@ shl :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- @A.shl@'s arc, leaving 'mul' incomparable with @A.shl@. We accept the
 -- 'mul' result only when 'leqExact' confirms it is contained in the
 -- arith arc; otherwise we fall back to the arith result.
-shl w a b
+shlRaw w a b
   | l_b' == wInt = mk w 0 1 0
   | leqExact mulResult arithResult = mulResult
   | otherwise = arithResult
@@ -2773,6 +2896,11 @@ shl w a b
 -- >>> display (lshr w4 a b2)
 -- "[.***............]  = [1,2,3]"
 lshr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+lshr w = psplitOp2R w (lshrRaw w)
+
+-- | /O(w)/. The single-pair logical-right-shift kernel; see 'lshr' for the
+-- 'psplitOp2R'-wrapped variant.
+lshrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
 -- * CLP 3.3.3 Shift Operations, Table 3.2 (@s(l1) = +, s(u1) = +@):
@@ -2790,7 +2918,7 @@ lshr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- For non-singleton @b@, different @k ∈ b@ give different shifted strides
 -- @stride a >> k@, and the union of those progressions is generally not a
 -- single CLP, so we fall back to Table 3.2's stride-1 bounds.
-lshr w a b
+lshrRaw w a b
   | n b == 0
   , kI <= ctzStride
   , kI == 0 || arcNoWrap
@@ -2811,6 +2939,11 @@ lshr w a b
 
 -- | /O(w)/. Arithmetic right shift.
 ashr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+ashr w = psplitOp2R w (ashrRaw w)
+
+-- | /O(w)/. The single-pair arithmetic-right-shift kernel; see 'ashr' for
+-- the 'psplitOp2R'-wrapped variant.
+ashrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
 -- * CLP 3.3.3 Shift Operations, Table 3.2 (sign-based case analysis):
@@ -2824,7 +2957,7 @@ ashr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- Same singleton-shift stride preservation as 'lshr', plus a sign-half check:
 -- positive orbits behave like 'lshr'; negative orbits get the sign-extension
 -- offset @2^w - 2^(w-k)@ added (top @k@ bits of every result are 1).
-ashr w a b
+ashrRaw w a b
   | n b == 0 && kI == 0 = a
   | n b == 0
   , kI <= ctzStride
@@ -2858,10 +2991,20 @@ ashr w a b
     hi = u_a `Bits.shiftR` (if u_a < 0 then u_b' else l_b')
 
 rol :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-rol w = liftBitwise2 w (B.rolAbstract w)
+rol w = psplitOp2 w (rolRaw w)
+
+-- | /O(w log w)/. The single-pair rotate-left kernel; see 'rol' for the
+-- 'psplitOp2'-wrapped variant.
+rolRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+rolRaw w = liftBitwise2 w (B.rolAbstract w)
 
 ror :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-ror w = liftBitwise2 w (B.rorAbstract w)
+ror w = psplitOp2 w (rorRaw w)
+
+-- | /O(w log w)/. The single-pair rotate-right kernel; see 'ror' for the
+-- 'psplitOp2'-wrapped variant.
+rorRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+rorRaw w = liftBitwise2 w (B.rorAbstract w)
 
 -- ------------------------------------------------------------------
 -- * Lattice operations
@@ -3759,7 +3902,7 @@ intersectionSize w c1 c2 =
                ]
   in min raw (min (size c1) (size c2))
 
--- | /O(1)/. If @c@ self-wraps, drop to a non-self-wrapping sub-progression
+-- | /O(w)/. If @c@ self-wraps, drop to a non-self-wrapping sub-progression
 -- of @c@'s orbit. Otherwise return @c@ unchanged. Used by 'lowerBound' to
 -- extract a sound under-approximation from a self-wrapping operand.
 --
@@ -4341,6 +4484,37 @@ reverseDSameSet w c =
   proper c ==>
     property (Set.fromList (toList (reverseD w c)) == Set.fromList (toList c))
 
+-- | Every piece returned by 'psplit' is 'proper'.
+psplitProper :: (1 <= w) => NatRepr w -> Domain w -> Property
+psplitProper w c =
+  proper c ==> property (all proper (psplit w c))
+
+-- | Every member of a 'psplit' piece is a member of the original.
+psplitCovers :: (1 <= w) => NatRepr w -> Domain w -> Property
+psplitCovers w c =
+  proper c ==>
+    property (Set.unions (map (Set.fromList . toList) (psplit w c))
+              `Set.isSubsetOf` Set.fromList (toList c))
+
+-- | The pieces returned by 'psplit' partition the original set: their
+-- elementwise union equals the original, and they cover it without omission.
+psplitPartitions :: (1 <= w) => NatRepr w -> Domain w -> Property
+psplitPartitions w c =
+  proper c ==>
+    property (Set.unions (map (Set.fromList . toList) (psplit w c))
+              == Set.fromList (toList c))
+
+-- | 'psplitOp2' is sound for any sound binary operation: every concrete
+-- @x \`op\` y@ for @x ∈ a, y ∈ b@ is in the abstract result. We verify this
+-- by specializing to 'andFast' (a known-sound binary op): @x .&. y ∈ psplitOp2
+-- (andFast w) a b@.
+psplitOp2Sound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+psplitOp2Sound w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (psplitOp2 w (andFast w) a b) (x Bits..&. y))
+
 correct_add ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
@@ -4891,12 +5065,21 @@ operandRangeCorrect c x =
   where
     x' = x Bits..&. mask c
 
--- | 'andPrecise' is at least as precise as 'and' on the 'leqExact' order.
-andPreciseDominatesAnd ::
+-- | 'andPrecise' is at least as precise as 'andFast' /by cardinality/.
+--
+-- The chain @size andPrecise ≤ size andPreciseRaw ≤ size andFast@ holds
+-- structurally: the second inequality is the Warren-vs-naive bound, the
+-- first is the 'psplitOp2' min-by-size guard.
+--
+-- The corresponding relation against 'and' (also 'psplitOp2'-wrapped) does
+-- /not/ hold: 'pseudoJoin' is non-monotone, so the pseudo-joined result of
+-- the tighter Warren pieces can land on a coset that is /larger/ than the
+-- pseudo-joined result of the looser 'andFast' pieces.
+andPreciseDominatesAndFast ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
-andPreciseDominatesAnd w a b =
+andPreciseDominatesAndFast w a b =
   proper a ==> proper b ==>
-    property (leqExact (andPrecise w a b) (and w a b))
+    property (size (andPrecise w a b) <= size (andFast w a b))
 
 -- ------------------------------------------------------------------
 -- ** Concatenation, extension, selection, and truncation
