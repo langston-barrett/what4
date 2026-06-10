@@ -642,6 +642,54 @@ tests = TT.testGroup "Strides"
   , genTest "trimSelfWrapIdempotent" $
       do SW n <- genWidth
          S.trimSelfWrapIdempotent n <$> S.genDomain n
+
+  -- Reduced product with bitwise
+  , genTest "knownZerosOnesNatDisjoint" $
+      do SW n <- genWidth
+         S.knownZerosOnesNatDisjoint <$> B.genDomain n
+  , genTest "knownZerosOnesNatMember" $
+      do SW n <- genWidth
+         S.knownZerosOnesNatMember <$> B.genDomain n <*> genNatBV n
+  , genTest "liftForcedBitsShrinks" $
+      do SW n <- genWidth
+         S.liftForcedBitsShrinks n <$> S.genDomain n <*> B.genDomain n
+  , genTest "liftForcedBitsMember" $
+      do SW n <- genWidth
+         S.liftForcedBitsMember n <$> S.genDomain n <*> B.genDomain n
+  , genTest "arcClipBitwiseShrinks" $
+      do SW n <- genWidth
+         S.arcClipBitwiseShrinks n <$> S.genDomain n <*> genNatBV n <*> genNatBV n
+  , genTest "arcClipBitwiseMember" $
+      do SW n <- genWidth
+         S.arcClipBitwiseMember n <$> S.genDomain n <*> genNatBV n <*> genNatBV n <*> genNatBV n
+  , genTest "correct_refineByBits" $
+      do SW n <- genWidth
+         S.correct_refineByBits n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "refineByBitsShrinks" $
+      do SW n <- genWidth
+         S.refineByBitsShrinks n <$> S.genDomain n <*> B.genDomain n
+  , genTest "refineByBitsDominatesRoundTripNonSelfWrap" $
+      do SW n <- genWidth
+         S.refineByBitsDominatesRoundTripNonSelfWrap n <$> S.genDomain n <*> B.genDomain n
+  , genTest "correct_reduceStep" $
+      do SW n <- genWidth
+         S.correct_reduceStep n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "correct_reduce" $
+      do SW n <- genWidth
+         S.correct_reduce n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reduceStepShrinks" $
+      do SW n <- genWidth
+         S.reduceStepShrinks n <$> S.genDomain n <*> B.genDomain n
+  , genTest "reduceShrinks" $
+      do SW n <- genWidth
+         S.reduceShrinks n <$> S.genDomain n <*> B.genDomain n
+  , genTest "reduceIdempotent" $
+      do SW n <- genWidth
+         S.reduceIdempotent n <$> S.genDomain n <*> B.genDomain n
+  , genTest "reduceConflictMeansEmpty" $
+      do SW n <- genWidth
+         S.reduceConflictMeansEmpty n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+
   -- @S.andPrecise@ and the bitwise lift are /incomparable/ on the
   -- 'leqExact' order: at @w = 4@, Z3 refutes both directions of dominance.
   -- These manual counter-examples were extracted from those refutations.

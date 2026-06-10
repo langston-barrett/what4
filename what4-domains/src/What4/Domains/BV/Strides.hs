@@ -404,6 +404,11 @@ module What4.Domains.BV.Strides
   , exactMeet
   , lowerBound
   , lowerBounds
+  -- * Reduced product with bitwise
+  -- $reduced
+  , refineByBits
+  , reduceStep
+  , reduce
   -- * Properties
   -- ** Generators
   , genDomain
@@ -601,6 +606,22 @@ module What4.Domains.BV.Strides
   , trimSelfWrapSubset
   , trimSelfWrapIdentity
   , trimSelfWrapIdempotent
+  -- ** Reduced product with bitwise
+  , knownZerosOnesNatDisjoint
+  , knownZerosOnesNatMember
+  , liftForcedBitsShrinks
+  , liftForcedBitsMember
+  , arcClipBitwiseShrinks
+  , arcClipBitwiseMember
+  , correct_refineByBits
+  , refineByBitsShrinks
+  , refineByBitsDominatesRoundTripNonSelfWrap
+  , correct_reduceStep
+  , correct_reduce
+  , reduceStepShrinks
+  , reduceShrinks
+  , reduceIdempotent
+  , reduceConflictMeansEmpty
     -- * Re-exports
     --
     -- | Re-exported so doctests (and downstream users) obtain @knownNat@\/@NatRepr@
@@ -634,7 +655,7 @@ import qualified What4.Domains.BV.Strides.Internal as SI
 import           What4.Domains.Verification (Property, property, (==>), Gen, chooseInteger)
 
 -- $setup
--- >>> :set -XDataKinds -XTypeApplications
+-- >>> :set -XBinaryLiterals -XDataKinds -XTypeApplications
 -- >>> import Prelude hiding (negate, not, and, or, concat)
 -- >>> import Numeric.Natural (Natural)
 -- >>> let w4 = knownNat @4
@@ -3762,6 +3783,316 @@ trimSelfWrap w c@Domain{start = s, stride = t, n = nn, mask = m}
                  else 0
 
 -- ------------------------------------------------------------------
+-- * Reduced product with bitwise
+
+-- $reduced
+--
+-- A /reduced product/ pairs two abstract domains and exchanges information
+-- between them so the joint result is tighter than either component alone.
+-- Here that pairing is between strides ('Domain') and the bitwise tristate
+-- domain ('B.Domain'). Either domain projects out of the other via
+-- 'toBitwise'\/'fromBitwise' (already exported); 'reduceStep' is the
+-- /reduction operator/ that exchanges those projections to refine both
+-- components in lockstep.
+--
+-- Refinements only shrink each component, the per-width state space is finite,
+-- so iterating to a fixed point ('reduce') terminates. In practice one or two
+-- passes suffice.
+--
+-- Strides and bitwise see different things:
+--
+-- * Strides tracks the orbit's /coset/ structure (stride and start), which
+--   the bitwise domain only captures via low constant bits.
+-- * Bitwise tracks /individual bits/ across the whole orbit, which strides
+--   can\'t represent above the stride.
+--
+-- Each side\'s extra information helps refine the other. 'reduceStep' is
+-- 'Nothing' precisely when the two components are jointly unsatisfiable.
+
+-- | /O(w log w)/. Refine a progression using a bitwise value.
+--
+-- Works directly, without going through a lossy 'fromBitwise' projection or
+-- 'pseudoMeet'.
+--
+-- Two refinements compose:
+--
+-- == 1. Stride lift
+--
+-- Write @stride s = t = 2^v · m@ with @m@ odd. Every orbit element
+-- @start + i·t@ has:
+--
+--   * bits @0..v-1@ fixed to @start@\'s low bits (the stride doesn\'t
+--     touch them, those bits of the stride are 0);
+--   * bit @v@ equal to @bit_v(start) XOR (i mod 2)@ (since @m@ is odd, the
+--     low bit of @i·m@ is the low bit of @i@);
+--   * bits above @v@ varying with @i@.
+--
+-- So:
+--
+-- 1. Bits @0..v-1@: if @b@ forces any of them to disagree with @start@,
+--    return 'Nothing'.
+-- 2. Bit @v@: if @b@ forces it to @q@, then @i mod 2 = q XOR bit_v(start)@,
+--    halving the orbit. The new stride is @2·t@; the new start is either
+--    @start@ (if @q == bit_v(start)@) or @start + t@ (otherwise); the new
+--    @n@ is @floor(n\/2)@ or @ceil((n-1)\/2)@ accordingly.
+-- 3. Iterate at the new @v+1@ until @b@ stops forcing bit @v@ — the run
+--    of contiguous forced bits starting at the stride boundary lifts the
+--    stride exactly that many doublings.
+--
+-- This step beats 'fromBitwise b': @fromBitwise@ produces a single
+-- progression whose stride is set by the lowest /free/ bit of @b@, so
+-- forced bits /above/ a free bit collapse on the projection. The lift
+-- consumes them one at a time as stride doublings.
+--
+-- == 2. Arc clip
+--
+-- Above the contiguous run, scattered forced bits aren't representable
+-- as a stride lift, but they show up in @b@\'s numeric bounds
+-- @[blo, bhi]@. Intersect the lifted progression with the stride-1
+-- arc @[blo, bhi]@ via 'arcMeetClosed' on each 'ssplit' piece. After
+-- the lift, @[blo, bhi]@ is the only further info @b@ carries in
+-- single-progression form, so this direct intersection is no less
+-- precise than @pseudoMeet (fromBitwise b)@ would be on non-self-wrap
+-- inputs and avoids 'pseudoMeet'\'s wrap pitfalls.
+--
+-- The clip is skipped on self-wrapping lift results: 'ssplit' over-
+-- approximates them to the full coset, which would break the subset
+-- guarantee. The lift alone still shrinks @s@.
+--
+-- Returns 'Nothing' precisely when the constraints are inconsistent —
+-- @start@\'s low bits violate @b@, or the orbit was a singleton whose
+-- value violates @b@.
+--
+-- == Example
+--
+-- evens × \"bit 1 forced to 1\" = @{2, 6, 10, 14}@ exactly:
+--
+-- >>> import qualified What4.Domains.BV.Bitwise as B
+-- >>> let evens = mk4 0 2 7
+-- >>> let bm = B.range w4 0b0010 0b1111
+-- >>> fmap display (refineByBits w4 evens bm)
+-- Just "[..*...*...*...*.]  = [2,6,10,14]"
+refineByBits ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  B.Domain w ->
+  Maybe (Domain w)
+refineByBits w s b = do
+  l <- liftForcedBits w s zo
+  arcClipBitwise w l (blo, bhi)
+  where
+    zo = knownZerosOnesNat b
+    (bloI, bhiI) = B.bitbounds b
+    blo = integerToNatural bloI
+    bhi = integerToNatural bhiI
+
+-- | /O(w)/. Forced bits of a 'B.Domain' as a @(zeros, ones)@ pair of
+-- 'Natural's: @zeros@ has a 1 at every position forced to 0, @ones@ at
+-- every position forced to 1.
+--
+-- The two values are bit-disjoint (@zeros .&. ones == 0@), and a value
+-- @x@ is a member of @b@ iff its forced positions agree with @(zeros,
+-- ones)@: see 'knownZerosOnesNatDisjoint' and 'knownZerosOnesNatMember'.
+knownZerosOnesNat :: B.Domain w -> (Natural, Natural)
+knownZerosOnesNat b =
+  -- @bm = mask@; @lo@ has 1s where every member has a 1 (forced ones);
+  -- @hi@ has 1s where any member could have a 1, so @bm `xor` hi@ has 1s
+  -- where every member has a 0 (forced zeros).
+  let (lo, hi) = B.bitbounds b
+      bm       = B.bvdMask b
+  in (integerToNatural (bm `Bits.xor` hi), integerToNatural lo)
+
+-- | /O(w log w)/. Refine a progression by the forced-bit pair @(zeros,
+-- ones)@ of a 'B.Domain' (see 'knownZerosOnesNat') via stride lifting.
+--
+-- Walks the contiguous run of forced bits starting at the stride
+-- boundary of @s@: each step doubles the stride and halves the orbit
+-- (selecting the parity that matches the forced bit). On a singleton
+-- input, returns 'Just s' if @start s@ agrees with the forced bits and
+-- 'Nothing' otherwise.
+--
+-- Returns 'Nothing' precisely when @s@ has no element whose low bits
+-- match @(zeros, ones)@ on the contiguous-forced-prefix. The result is
+-- always a subset of @s@ ('liftForcedBitsShrinks'), preserves every
+-- element of @s@ that agrees with the forced bits on positions
+-- @0..v - 1@ where @v@ is the lifted stride exponent
+-- ('liftForcedBitsCompleteOnLowBits'), and any element of the result is
+-- a member of @s@ whose forced positions agree with @(zeros, ones)@
+-- ('liftForcedBitsMember').
+--
+-- This step beats projecting through 'fromBitwise' followed by
+-- 'pseudoMeet': @fromBitwise@ produces a single progression whose stride
+-- is set by the lowest /free/ bit of @b@, so forced bits /above/ a free
+-- bit collapse on the projection. The lift consumes them one at a time
+-- as stride doublings.
+liftForcedBits ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  -- | @(zeros, ones)@ as produced by 'knownZerosOnesNat'.
+  (Natural, Natural) ->
+  Maybe (Domain w)
+liftForcedBits w s (zeros, ones)
+  -- Singleton: the orbit has one value; just check it.
+  | n s == 0 =
+      if (zeros .&. start s) == 0 && (ones .&. notN (start s)) == 0
+        then Just s
+        else Nothing
+  -- @start@\'s low bits below @v@ are fixed across the whole orbit.
+  -- Conflict with any forced bit there means the joint is empty.
+  | (zeros .&. start s .&. lowMask) /= 0 = Nothing
+  | (ones  .&. notN (start s) .&. lowMask) /= 0 = Nothing
+  | otherwise = go s
+  where
+    m = mask s
+    notN x = m `Bits.xor` x
+    g = strideGcd s
+    lowMask = g - 1  -- bits 0..v-1
+
+    -- Walk the contiguous run of forced bits starting at position @v@.
+    -- Each forced bit at the current stride boundary halves the orbit
+    -- and doubles the stride.
+    go !c
+      | n c == 0 = Just c
+      | otherwise =
+          let v = strideGcd c
+              stB = stride c
+              vBitMask = v
+              forcedZero = (zeros .&. vBitMask) /= 0
+              forcedOne  = (ones  .&. vBitMask) /= 0
+          in if Prelude.not (forcedZero || forcedOne)
+               then Just c
+               else
+                 let startBitV = (start c .&. vBitMask) /= 0
+                     -- Required parity of @i@ to match the bit-@v@ force.
+                     wantOdd = case (forcedZero, forcedOne) of
+                       (True, _)  -> startBitV
+                       (_, True)  -> Prelude.not startBitV
+                       _          -> error "liftForcedBits: unreachable"
+                     newStride = (stB `shiftL` 1) .&. m
+                     newStart =
+                       if wantOdd
+                         then (start c + stB) .&. m
+                         else start c
+                 in if newStride == 0
+                      -- @stride@ doubles to @2^w mod 2^w = 0@: every step
+                      -- lands back on the same value, so the result is a
+                      -- singleton.
+                      then Just (mk w newStart 1 0)
+                      else
+                        -- Number of valid @i@'s in @[0..n c]@:
+                        --   wantOdd=False: i ∈ {0,2,...,N} → ⌊N\/2⌋+1
+                        --   wantOdd=True : i ∈ {1,3,...}   → (N+1)\/2
+                        -- @newN = count - 1@.
+                        let newN =
+                              if wantOdd
+                                then (n c - 1) `Prelude.div` 2
+                                else n c `Prelude.div` 2
+                        in if wantOdd && n c == 0
+                             then Nothing  -- only i=0 available, parity wrong
+                             else go (mk w newStart newStride newN)
+
+-- | /O(w log w)/. Intersect a progression with the unsigned arc
+-- @[blo, bhi]@ (the unsigned bounds of a 'B.Domain'). Above the
+-- contiguous run of forced bits 'liftForcedBits' consumes, scattered
+-- forced bits aren\'t representable as a stride lift, but they still
+-- show up in @b@\'s numeric bounds — e.g. @b@ with bit 1 forced and bit
+-- 0 free at @w = 2@ has @(blo, bhi) = (2, 3)@.
+--
+-- 'ssplit's the input at the unsigned pole and runs 'arcMeetClosed' on
+-- each non-wrap piece, then 'compactify's. When the result splits into
+-- multiple progressions (because the input wraps mod @2^w@ and the arc
+-- carves out two disjoint pieces), the input is returned unchanged
+-- rather than over-approximating with a single-progression cover.
+--
+-- /Skipped/ on self-wrapping inputs: 'ssplit' over-approximates them to
+-- the full coset, which would break the subset guarantee. The caller
+-- gets 'Just' the unmodified input in that case.
+--
+-- The result (when 'Just') is a subset of the input
+-- ('arcClipBitwiseShrinks'); every input element in @[blo, bhi]@ is
+-- preserved ('arcClipBitwiseMember').
+arcClipBitwise ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  -- | @(blo, bhi)@: an unsigned arc with @blo <= bhi <= mask@.
+  (Natural, Natural) ->
+  Maybe (Domain w)
+arcClipBitwise w l (blo, bhi)
+  -- 'ssplit' on a self-wrapping orbit over-approximates to the full
+  -- coset — fine for over-approximating ops, but here the result would
+  -- no longer be a subset of @l@. Skip the arc clip in that case.
+  | isSelfWrapping l = Just l
+  | otherwise =
+      let arc = mk w blo 1 (bhi - blo)
+          pieces = [ p | li <- ssplit w l
+                       , Just p <- [arcMeetClosed w li arc] ]
+      in case compactify w pieces of
+           []  -> Nothing
+           [c] -> Just c
+           -- Multiple pieces means @l@ wraps mod 2^w and @[blo, bhi]@
+           -- carves out two disjoint arcs of @l@. A single-progression
+           -- cover would over-approximate beyond @l@. Fall back to @l@.
+           _   -> Just l
+
+-- | /O(w log w)/. One round of mutual refinement of a strides\/bitwise
+-- pair.
+--
+-- Refines the strides component using the bitwise component via
+-- 'refineByBits' — a direct stride-lift plus arc clip that doesn\'t
+-- detour through 'fromBitwise' or 'pseudoMeet'. Then refines the bitwise
+-- component using the already-refined strides component via
+-- 'toBitwise' + 'B.meet'. Returns 'Nothing' iff the joint represents an
+-- empty set.
+--
+-- Each component of the result is a subset of the corresponding input
+-- component ('reduceStepShrinks'). When @x@ lies in both inputs, @x@ lies
+-- in both outputs ('correct_reduceStep') — refinement only drops witnesses
+-- that the /other/ component already excluded.
+--
+-- == Example
+--
+-- evens × \"bit 1 forced to 1\" reduces to the exact joint @{2, 6, 10, 14}@:
+--
+-- >>> import qualified What4.Domains.BV.Bitwise as B
+-- >>> let evens = mk4 0 2 7
+-- >>> let bm = B.range w4 0b0010 0b1111
+-- >>> :{
+-- fmap (\(s, b) -> (display s, B.bitbounds b))
+--      (reduceStep w4 evens bm)
+-- :}
+-- Just ("[..*...*...*...*.]  = [2,6,10,14]",(2,14))
+reduceStep ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  B.Domain w ->
+  Maybe (Domain w, B.Domain w)
+reduceStep w s b = do
+  s' <- refineByBits w s b
+  let b' = B.meet b (toBitwise s')
+  if B.isBottom b' then Nothing else Just (s', b')
+
+-- | /O(w^2 log w)/. Iterate 'reduceStep' to a fixed point. Each non-trivial
+-- step strictly reduces 'size' of one component, so the loop runs at most
+-- @O(w)@ times before stabilizing.
+reduce ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  B.Domain w ->
+  Maybe (Domain w, B.Domain w)
+reduce w = go
+  where
+    go s b = do
+      (s', b') <- reduceStep w s b
+      if s' == s && b' == b
+        then Just (s, b)
+        else go s' b'
+
+-- ------------------------------------------------------------------
 -- * Generators
 
 -- | Generator for a proper 'Domain' at width @w@.
@@ -5601,6 +5932,203 @@ correct_compactify w cs =
       []     -> True
       (c:cs') -> Prelude.and [ mask c == mask c' | c' <- cs' ]
     wrapsMod c = start c + n c * stride c > mask c
+
+-- ------------------------------------------------------------------
+-- ** Reduced product with bitwise
+
+-- | The two halves of 'knownZerosOnesNat' are bit-disjoint: no bit is
+-- both forced-to-0 and forced-to-1 (which would mean @b@ has no
+-- members). Equivalently, the @lo .|. hi@ representation of a 'B.Domain'
+-- never has @lo@ exceeding @hi@.
+knownZerosOnesNatDisjoint :: B.Domain w -> Property
+knownZerosOnesNatDisjoint b =
+  let (zeros, ones) = knownZerosOnesNat b
+  in property ((zeros .&. ones) == 0)
+
+-- | A value @x@ is a member of @b@ iff its forced positions agree with
+-- @(zeros, ones)@: bits forced to 0 are 0 in @x@, bits forced to 1 are
+-- 1 in @x@.
+knownZerosOnesNatMember :: B.Domain w -> Natural -> Property
+knownZerosOnesNatMember b x =
+  let (zeros, ones) = knownZerosOnesNat b
+      bm            = integerToNatural (B.bvdMask b)
+      x'            = x .&. bm
+      agrees        = (zeros .&. x') == 0 && (ones .&. (bm `Bits.xor` x')) == 0
+  in property (B.member b (toInteger x') == agrees)
+
+-- | 'liftForcedBits' shrinks: when 'Just', the result is contained in
+-- the input under 'leqExact'.
+liftForcedBitsShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+liftForcedBitsShrinks w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case liftForcedBits w s (knownZerosOnesNat b) of
+      Nothing -> property True
+      Just s' -> property (leqExact s' s)
+
+-- | 'liftForcedBits' produces a result whose low bits are consistent
+-- with the forced bits of @b@: the @start@ of the result (and hence
+-- every member, since they share their low @strideGcd s'@ bits) agrees
+-- with @(zeros, ones)@ at positions @0..log2 (strideGcd s') - 1@.
+liftForcedBitsMember ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+liftForcedBitsMember w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case liftForcedBits w s (knownZerosOnesNat b) of
+      Nothing -> property True
+      Just s' ->
+        let (zeros, ones) = knownZerosOnesNat b
+            lowMask = strideGcd s' - 1
+            startLow = start s' .&. lowMask
+        in property ((zeros .&. startLow) == 0
+                  && (ones .&. (lowMask `Bits.xor` startLow)) == 0)
+
+-- | 'arcClipBitwise' shrinks: when 'Just', the result is contained in
+-- the input under 'leqExact'.
+arcClipBitwiseShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Natural -> Property
+arcClipBitwiseShrinks w s lo hi =
+  proper s ==>
+    let lo' = lo .&. mask s
+        hi' = hi .&. mask s
+    in lo' <= hi' ==>
+       case arcClipBitwise w s (lo', hi') of
+         Nothing -> property True
+         Just s' -> property (leqExact s' s)
+
+-- | 'arcClipBitwise' is sound: any element of the input that lies in
+-- @[blo, bhi]@ is in the result. (Conversely, any element of the result
+-- is in the input by 'arcClipBitwiseShrinks'.)
+arcClipBitwiseMember ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Natural -> Natural -> Property
+arcClipBitwiseMember w s lo hi x =
+  proper s ==>
+    let lo' = lo .&. mask s
+        hi' = hi .&. mask s
+        x'  = x .&. mask s
+    in lo' <= hi' ==>
+       member s x' ==>
+       Prelude.not (isSelfWrapping s) ==>
+       lo' <= x' && x' <= hi' ==>
+         case arcClipBitwise w s (lo', hi') of
+           Nothing -> property False
+           Just s' -> property (member s' x')
+
+-- | 'refineByBits' is sound: any @x@ in both inputs is in the result
+-- (and the result is 'Nothing' only when no such @x@ exists).
+correct_refineByBits ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Natural -> Property
+correct_refineByBits w s b x =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    member s x ==> B.member b (toInteger x) ==>
+      case refineByBits w s b of
+        Nothing -> property False
+        Just s' -> property (member s' x)
+
+-- | 'refineByBits' shrinks: the result is contained in the input strides
+-- component (under 'leqExact').
+refineByBitsShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+refineByBitsShrinks _w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case refineByBits _w s b of
+      Nothing -> property True
+      Just s' -> property (leqExact s' s)
+
+-- | 'refineByBits' is at least as precise as the round-trip
+-- @pseudoMeet s (fromBitwise b)@ /on non-self-wrapping/ inputs.
+-- 'pseudoMeet' lacks the lower-bound axiom on wrapping operands, so the
+-- round-trip can return a result not contained in @s@; on self-wrapping
+-- inputs the comparison has no clear winner.
+refineByBitsDominatesRoundTripNonSelfWrap ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+refineByBitsDominatesRoundTripNonSelfWrap w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    Prelude.not (isSelfWrapping s) ==>
+      case (refineByBits w s b, fromBitwise w b >>= pseudoMeet w s) of
+        (Nothing, _)        -> property True
+        (Just s', Nothing)  -> property (leqExact s' s)
+        (Just s', Just rt)
+          | leqExact rt s   -> property (size s' <= size rt)
+          | otherwise       -> property True
+
+-- | 'reduceStep' is sound: any value @x@ in /both/ input components is in
+-- both output components when the step succeeds; if the step returns
+-- 'Nothing', no such @x@ exists.
+correct_reduceStep ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Natural -> Property
+correct_reduceStep w s b x =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    member s x ==> B.member b (toInteger x) ==>
+      case reduceStep w s b of
+        Nothing       -> property False
+        Just (s', b') ->
+          property (member s' x && B.member b' (toInteger x))
+
+-- | 'reduce' is sound under the same correctness statement as 'reduceStep'.
+correct_reduce ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Natural -> Property
+correct_reduce w s b x =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    member s x ==> B.member b (toInteger x) ==>
+      case reduce w s b of
+        Nothing       -> property False
+        Just (s', b') ->
+          property (member s' x && B.member b' (toInteger x))
+
+-- | 'reduceStep' only shrinks: each output component is contained in the
+-- corresponding input.
+reduceStepShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+reduceStepShrinks w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case reduceStep w s b of
+      Nothing       -> property True
+      Just (s', b') -> property (leqExact s' s && B.leq b' b)
+
+-- | 'reduce' only shrinks (the iterated form of 'reduceStepShrinks').
+reduceShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+reduceShrinks w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case reduce w s b of
+      Nothing       -> property True
+      Just (s', b') -> property (leqExact s' s && B.leq b' b)
+
+-- | 'reduce' reaches a fixed point: re-running 'reduce' on its own output
+-- changes nothing.
+reduceIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+reduceIdempotent w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case reduce w s b of
+      Nothing       -> property True
+      Just (s', b') ->
+        property (reduce w s' b' == Just (s', b'))
+
+-- | When 'reduce' returns 'Nothing', the joint really is empty: no @x@
+-- can be a member of both components. Contrapositive of soundness, but a
+-- useful direct check that we don\'t spuriously reject.
+reduceConflictMeansEmpty ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Natural -> Property
+reduceConflictMeansEmpty w s b x =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case reduce w s b of
+      Just _  -> property True
+      Nothing -> property (Prelude.not (member s x && B.member b (toInteger x)))
 
 -- | 'trimSelfWrap' produces a non-self-wrapping result.
 trimSelfWrapNotSelfWrapping ::

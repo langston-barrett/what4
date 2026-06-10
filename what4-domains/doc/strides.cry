@@ -1253,6 +1253,120 @@ largestJust ma mb = case ma of
     Just b -> if size a >= size b then Just a else Just b
 
 // ------------------------------------------------------------------
+// * Reduced product with bitwise
+
+knownZerosOnesNat : {n} (fin n) => Bits::Dom n -> ([n], [n])
+knownZerosOnesNat b = (~ b.himask, b.lomask)
+
+// One step of `liftForcedBits` at the current stride boundary.
+// `done` short-circuits remaining iterations once a non-forced bit is
+// seen; `valid` flags the parity-wrong-on-singleton failure.
+liftStrideStep :
+  {n} (fin n, n >= 2) =>
+  ([n], [n]) -> (Domain n, Bit, Bit) -> [n] -> (Domain n, Bit, Bit)
+liftStrideStep (zeros, ones) (c, done, valid) _i =
+  if done \/ ~ valid \/ c.n == 0 then (c, done, valid)
+  else if ~ (forcedZero \/ forcedOne) then (c, True, valid)
+  else if wantOdd /\ c.n == 0 then (c, done, False)
+  else if newStride == 0 then (mk newStart 1 0, True, valid)
+  else (mk newStart newStride newN, done, valid)
+  where
+    g          = strideGcd c
+    forcedZero = (zeros && g) != 0
+    forcedOne  = (ones  && g) != 0
+    startBitV  = (c.start && g) != 0
+    wantOdd    = if forcedZero then startBitV else ~ startBitV
+    newStride  = c.stride << 1
+    newStart   = if wantOdd then c.start + c.stride else c.start
+    newN : [n + 1]
+    newN = if wantOdd then (c.n - 1) / 2 else c.n / 2
+
+// Unrolled `n` times: every successful step strictly increases
+// `strideGcd`, so at most `n` steps are reachable.
+liftForcedBits :
+  {n} (fin n, n >= 2) =>
+  Domain n -> ([n], [n]) -> Maybe (Domain n)
+liftForcedBits s (zeros, ones) =
+  if s.n == 0 then
+    (if (zeros && s.start) == 0 /\ (ones && ~ s.start) == 0
+       then Just s
+       else Nothing)
+  else if (zeros && s.start && lowMask) != 0 then Nothing
+  else if (ones  && ~ s.start && lowMask) != 0 then Nothing
+  else if final.2 then Just final.0
+  else Nothing
+  where
+    lowMask = strideGcd s - 1
+    init : (Domain n, Bit, Bit)
+    init = (s, False, True)
+    iters : [n + 1](Domain n, Bit, Bit)
+    iters = [init] # [ liftStrideStep (zeros, ones) state i
+                     | state <- iters
+                     | i <- [0 .. n - 1]
+                     ]
+    final = iters ! 0
+
+// Skips the `compactify` merge attempt the Haskell does when both
+// pieces survive: Cryptol can't represent variable-length lists.
+// Sound but slightly less precise; the Haskell falls back to `l`
+// in the same case anyway when no exact merge exists.
+arcClipBitwise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> ([n], [n]) -> Maybe (Domain n)
+arcClipBitwise l (blo, bhi) =
+  if isSelfWrapping l then Just l
+  else case ssplit l of
+    One l1 -> arcMeetClosed l1 arc
+    Two l1 l2 -> case arcMeetClosed l1 arc of
+      Nothing -> case arcMeetClosed l2 arc of
+        Nothing -> Nothing
+        Just c2 -> Just c2
+      Just c1 -> case arcMeetClosed l2 arc of
+        Nothing -> Just c1
+        Just _  -> Just l
+  where
+    arc : Domain n
+    arc = mk blo 1 (zext (bhi - blo))
+
+refineByBits :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Maybe (Domain n)
+refineByBits s b =
+  case liftForcedBits s (knownZerosOnesNat b) of
+    Nothing -> Nothing
+    Just l  -> arcClipBitwise l (b.lomask, b.himask)
+
+reduceStep :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
+reduceStep s b =
+  case refineByBits s b of
+    Nothing -> Nothing
+    Just s' ->
+      if Bits::nonempty b' then Just (s', b') else Nothing
+      where b' = Bits::meet b (toBitwise s')
+
+// Iterate `reduceStep` to a fixed point. Each non-trivial step strictly
+// shrinks one component, so unrolling `n + 1` iterations suffices.
+reduceIter :
+  {n} (fin n, n >= 2) =>
+  Maybe (Domain n, Bits::Dom n) -> Maybe (Domain n, Bits::Dom n)
+reduceIter state = case state of
+  Nothing -> Nothing
+  Just (s, b) -> case reduceStep s b of
+    Nothing -> Nothing
+    Just (s', b') ->
+      if s' == s /\ b' == b then Just (s, b) else Just (s', b')
+
+reduce :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
+reduce s b = iters ! 0
+  where
+    iters : [n + 2](Maybe (Domain n, Bits::Dom n))
+    iters = [Just (s, b)] # [ reduceIter state | state <- iters | _ <- [0 .. n] ]
+
+// ------------------------------------------------------------------
 // * Correctness properties
 
 // ------------------------------------------------------------------
@@ -2403,6 +2517,147 @@ lowerBoundDominatedByPseudoMeet a b =
         Nothing -> False
         Just up -> leqExact lo up
 
+// Reduced product with bitwise
+
+knownZerosOnesNatDisjoint : {n} (fin n) => Bits::Dom n -> Property
+knownZerosOnesNatDisjoint b =
+  Bits::nonempty b ==> (zeros && ones) == 0
+  where (zeros, ones) = knownZerosOnesNat b
+
+knownZerosOnesNatMember : {n} (fin n) => Bits::Dom n -> [n] -> Property
+knownZerosOnesNatMember b x =
+  Bits::mem b x == ((zeros && x) == 0 /\ (ones && ~ x) == 0)
+  where (zeros, ones) = knownZerosOnesNat b
+
+// Restricted to nonempty `b`: an empty bitwise domain has
+// `zeros && ones != 0`, which violates `liftStrideStep`'s exclusivity
+// assumption.
+liftForcedBitsShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Bits::Dom n -> Property
+liftForcedBitsShrinks s b =
+  proper s ==> Bits::nonempty b ==>
+    case liftForcedBits s (knownZerosOnesNat b) of
+      Nothing -> True
+      Just s' -> leqExact s' s
+
+liftForcedBitsMember :
+  {n} (fin n, n >= 2) => Domain n -> Bits::Dom n -> Property
+liftForcedBitsMember s b =
+  proper s ==> Bits::nonempty b ==>
+    case liftForcedBits s (knownZerosOnesNat b) of
+      Nothing -> True
+      Just s' ->
+        (zeros && startLow) == 0 /\ (ones && (lowMask ^ startLow)) == 0
+        where
+          (zeros, ones) = knownZerosOnesNat b
+          lowMask = strideGcd s' - 1
+          startLow = s'.start && lowMask
+
+arcClipBitwiseShrinks :
+  {n} (fin n, n >= 2) => Domain n -> [n] -> [n] -> Property
+arcClipBitwiseShrinks s lo hi =
+  proper s ==> lo <= hi ==>
+    case arcClipBitwise s (lo, hi) of
+      Nothing -> True
+      Just s' -> leqExact s' s
+
+arcClipBitwiseMember :
+  {n} (fin n, n >= 2) => Domain n -> [n] -> [n] -> [n] -> Property
+arcClipBitwiseMember s lo hi x =
+  proper s ==> lo <= hi ==>
+    member s x ==> ~ (isSelfWrapping s) ==>
+      lo <= x ==> x <= hi ==>
+        case arcClipBitwise s (lo, hi) of
+          Nothing -> False
+          Just s' -> member s' x
+
+correct_refineByBits :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+correct_refineByBits s b x =
+  proper s ==> member s x ==> Bits::mem b x ==>
+    case refineByBits s b of
+      Nothing -> False
+      Just s' -> member s' x
+
+refineByBitsShrinks :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Property
+refineByBitsShrinks s b =
+  proper s ==>
+    case refineByBits s b of
+      Nothing -> True
+      Just s' -> leqExact s' s
+
+correct_reduceStep :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+correct_reduceStep s b x =
+  proper s ==> member s x ==> Bits::mem b x ==>
+    case reduceStep s b of
+      Nothing       -> False
+      Just (s', b') -> member s' x /\ Bits::mem b' x
+
+reduceStepShrinks :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Property
+reduceStepShrinks s b =
+  proper s ==>
+    case reduceStep s b of
+      Nothing       -> True
+      Just (s', b') -> leqExact s' s /\ Bits::leq b' b
+
+correct_reduce :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+correct_reduce s b x =
+  proper s ==> member s x ==> Bits::mem b x ==>
+    case reduce s b of
+      Nothing       -> False
+      Just (s', b') -> member s' x /\ Bits::mem b' x
+
+reduceShrinks :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Property
+reduceShrinks s b =
+  proper s ==>
+    case reduce s b of
+      Nothing       -> True
+      Just (s', b') -> leqExact s' s /\ Bits::leq b' b
+
+reduceIdempotent :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Property
+reduceIdempotent s b =
+  proper s ==>
+    case reduce s b of
+      Nothing       -> True
+      Just (s', b') -> case reduce s' b' of
+        Nothing         -> False
+        Just (s'', b'') -> s'' == s' /\ b'' == b'
+
+reduceConflictMeansEmpty :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+reduceConflictMeansEmpty s b x =
+  proper s ==>
+    case reduce s b of
+      Just _  -> True
+      Nothing -> ~ (member s x /\ Bits::mem b x)
+
+// `refineByBits` is at least as precise as the round-trip
+// `pseudoMeet s (fromBitwise b)` on non-self-wrapping inputs.
+refineByBitsDominatesRoundTripNonSelfWrap :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Property
+refineByBitsDominatesRoundTripNonSelfWrap s b =
+  proper s ==> ~ (isSelfWrapping s) ==>
+    case refineByBits s b of
+      Nothing -> True
+      Just s' -> case pseudoMeet s (fromBitwise b) of
+        Nothing -> leqExact s' s
+        Just rt -> if leqExact rt s then size s' <= size rt else True
+
 trimSelfWrapNotSelfWrapping : {n} (fin n, n >= 2) => Domain n -> Property
 trimSelfWrapNotSelfWrapping a =
   proper a ==> ~ (isSelfWrapping (trimSelfWrap a))
@@ -2434,6 +2689,20 @@ trimSelfWrapIdempotent a =
 // property p_pseudoMeetPreciseCommutative    = pseudoMeetPreciseCommutative`{4}
 property p_pseudoMeetIdempotent            = pseudoMeetIdempotent`{4}
 property p_pseudoMeetPreciseIdempotent     = pseudoMeetPreciseIdempotent`{4}
+
+property p_knownZerosOnesNatDisjoint     = knownZerosOnesNatDisjoint`{4}
+property p_knownZerosOnesNatMember       = knownZerosOnesNatMember`{4}
+property p_liftForcedBitsShrinks         = liftForcedBitsShrinks`{4}
+property p_liftForcedBitsMember          = liftForcedBitsMember`{4}
+
+// Properties below go through `arcMeetClosed` and inherit the
+// `solveLinearDiophantine` unfolding cost (cf. `lowerBound`).
+// property p_arcClipBitwiseShrinks    = arcClipBitwiseShrinks`{4}
+// property p_arcClipBitwiseMember     = arcClipBitwiseMember`{4}
+// property p_correct_refineByBits     = correct_refineByBits`{4}
+// property p_refineByBitsShrinks      = refineByBitsShrinks`{4}
+// property p_correct_reduceStep       = correct_reduceStep`{4}
+// property p_reduceStepShrinks        = reduceStepShrinks`{4}
 
 property p_correct_pseudoJoin              = correct_pseudoJoin`{4}
 // This precise join soundness lemma is materially slower than the surrounding
