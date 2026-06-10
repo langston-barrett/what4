@@ -759,12 +759,9 @@ bandSingleton k c =
     nSteps : [n + 1]
     nSteps = if hi < cosetLo then 0 else zext ((hi - cosetLo) / d)
 
-// CLP report §3.3.4 (cheap O(w) variant): stride @d = min(g1, g2)@, upper
-// bound = @min(end of operandRange a, end of operandRange b)@, lower bound
-// = coset rep of @start a && start b@. A singleton operand routes through
-// 'bandSingleton'.
-band : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-band a b =
+// See @andFast@ in What4.Domains.BV.Strides.
+bandFast : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+bandFast a b =
   if a.n == 0 then bandSingleton a.start b
   else if b.n == 0 then bandSingleton b.start a
   else mk cosetLo d nSteps
@@ -780,11 +777,49 @@ band a b =
     nSteps : [n + 1]
     nSteps = if sub_ < cosetLo then 0 else zext ((sub_ - cosetLo) / d)
 
-// /Hacker's Delight/ §4.3 tight bounds: strictly at least as precise as
-// 'band', but more expensive (Warren's loop runs @w@ iterations of
-// @O(w)@ bitwise-and on naturals).
+// See @psplit@ in What4.Domains.BV.Strides.
+psplit : {n} (fin n, n >= 2) => Domain n -> [2](Maybe (Domain n))
+psplit c =
+  if c.n == 0 \/ c.n + 1 == orbitLen c \/ t' == 0
+    then [Just c, Nothing]
+    else [Just (mk c.start t' (zext nEven)), Just (mk sOdd t' (zext nOdd))]
+  where
+    t' = 2 * c.stride
+    nEven = c.n / 2
+    nOdd  = (c.n - 1) / 2
+    sOdd  = c.start + c.stride
+
+// See @psplitOp2@ in What4.Domains.BV.Strides.
+psplitOp2 :
+  {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Domain n) -> Domain n -> Domain n -> Domain n
+psplitOp2 op a b =
+  if size raw <= size pj then raw else pj
+  where
+    raw = op a b
+    // Up to 4 pieces; absent halves are filled with the raw call (a no-op
+    // under pseudoJoin since raw covers everything anyway).
+    pieces : [4](Domain n)
+    pieces = [ pieceAt mai mbj
+             | mai <- psplit a
+             , mbj <- psplit b ]
+    pieceAt mai mbj = case mai of
+      Nothing -> raw
+      Just ai -> case mbj of
+        Nothing -> raw
+        Just bj -> op ai bj
+    pj = foldl pseudoJoin raw pieces
+
+// See @and@ in What4.Domains.BV.Strides.
+band : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+band = psplitOp2 bandFast
+
+// See @andPrecise@ in What4.Domains.BV.Strides.
 bandPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-bandPrecise a b =
+bandPrecise = psplitOp2 bandPreciseRaw
+
+bandPreciseRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+bandPreciseRaw a b =
   if a.n == 0 then bandSingleton a.start b
   else if b.n == 0 then bandSingleton b.start a
   else mk cosetLo d nSteps
@@ -802,7 +837,9 @@ bandPrecise a b =
     nSteps : [n + 1]
     nSteps = if wHi < cosetLo then 0 else zext ((wHi - cosetLo) / d)
 
-// De Morgan: @x | y = ~(~x & ~y)@.
+borFast : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+borFast a b = bnot (bandFast (bnot a) (bnot b))
+
 bor : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 bor a b = bnot (band (bnot a) (bnot b))
 
@@ -847,10 +884,10 @@ correct_orPrecise a b x y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     member (borPrecise a b) (x || y)
 
-// @bandPrecise@ is at least as precise as @band@ on the 'leqExact' order.
-andPreciseDominatesAnd : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-andPreciseDominatesAnd a b =
-  proper a ==> proper b ==> leqExact (bandPrecise a b) (band a b)
+// See @andPreciseDominatesAndFast@ in What4.Domains.BV.Strides.
+andPreciseDominatesAndFast : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+andPreciseDominatesAndFast a b =
+  proper a ==> proper b ==> size (bandPrecise a b) <= size (bandFast a b)
 
 correct_andSingleton : {n} (fin n, n >= 2) => [n] -> Domain n -> [n] -> Property
 correct_andSingleton k c y =
@@ -862,7 +899,7 @@ property p_operandRangeCorrect     = operandRangeCorrect`{4}
 property p_correct_andSingleton    = correct_andSingleton`{4}
 property p_correct_andPrecise      = correct_andPrecise`{4}
 property p_correct_orPrecise       = correct_orPrecise`{4}
-property p_andPreciseDominatesAnd  = andPreciseDominatesAnd`{4}
+property p_andPreciseDominatesAndFast = andPreciseDominatesAndFast`{4}
 
 // ------------------------------------------------------------------
 // * Concatenation, extension, selection, and truncation
@@ -879,8 +916,26 @@ concat a b = fromArith (Arith::concat (toArith a) (toArith b))
 // ------------------------------------------------------------------
 // * Shifts and rotations
 
+// See @psplitOp2R@ in What4.Domains.BV.Strides.
+psplitOp2R :
+  {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Domain n) -> Domain n -> Domain n -> Domain n
+psplitOp2R op a b =
+  if size raw <= size pj then raw else pj
+  where
+    raw = op a b
+    pieces : [2](Domain n)
+    pieces = [ pieceAt mbj | mbj <- psplit b ]
+    pieceAt mbj = case mbj of
+      Nothing -> raw
+      Just bj -> op a bj
+    pj = foldl pseudoJoin raw pieces
+
 shl : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-shl a b =
+shl = psplitOp2R shlRaw
+
+shlRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+shlRaw a b =
   if cStride == 0 then mk 0 1 0
   else if leqExact mulResult arithResult then mulResult
   else arithResult
@@ -899,7 +954,10 @@ arcNoWrap c =
   (zext c.start + zext c.n * zext c.stride : [2 * n + 1]) <= zext (~ zero : [n])
 
 lshr : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-lshr a b =
+lshr = psplitOp2R lshrRaw
+
+lshrRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+lshrRaw a b =
   if b.n == 0 /\ kFitsCtz /\ (kI == 0 \/ arcNoWrap a)
     then mk (a.start >> kI) (a.stride >> kI) a.n
   else mk lo 1 (zext (hi - lo))
@@ -912,7 +970,10 @@ lshr a b =
     hi = u_a >> l_b
 
 ashr : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-ashr a b =
+ashr = psplitOp2R ashrRaw
+
+ashrRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+ashrRaw a b =
   if b.n == 0 /\ kI == 0 then a
   else if b.n == 0 /\ kFitsCtz /\ arcNoWrap a /\ allPositive
     then mk (a.start >> kI) (a.stride >> kI) a.n
@@ -933,10 +994,16 @@ ashr a b =
     hi = if u_a <$ 0 then u_a >>$ u_b else u_a >>$ l_b
 
 rol : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-rol = liftBitwise2 Bits::rolAbstract
+rol = psplitOp2 rolRaw
+
+rolRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+rolRaw = liftBitwise2 Bits::rolAbstract
 
 ror : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-ror = liftBitwise2 Bits::rorAbstract
+ror = psplitOp2 rorRaw
+
+rorRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+rorRaw = liftBitwise2 Bits::rorAbstract
 
 // ------------------------------------------------------------------
 // * Hull
@@ -1922,6 +1989,44 @@ ultExactFalseSeparated a b =
 reverseDSameSet : {n} (fin n, n >= 2) => Domain n -> Property
 reverseDSameSet a = proper a ==> eqExact (reverseD a) a
 
+// Every piece returned by 'psplit' is 'proper'.
+psplitProper : {n} (fin n, n >= 2) => Domain n -> Property
+psplitProper c =
+  proper c ==> all maybeProper (psplit c)
+  where
+    maybeProper : Maybe (Domain n) -> Bool
+    maybeProper m = case m of
+      Nothing -> True
+      Just x  -> proper x
+
+// Every member of a 'psplit' piece is a member of the original.
+psplitCovers : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+psplitCovers c x =
+  proper c /\ inSomePiece ==> member c x
+  where
+    inSomePiece = any (memberMaybe x) (psplit c)
+    memberMaybe : [n] -> Maybe (Domain n) -> Bool
+    memberMaybe v m = case m of
+      Nothing -> False
+      Just d  -> member d v
+
+// 'psplit' partitions @c@: every member of @c@ lies in some piece.
+psplitPartitions : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+psplitPartitions c x =
+  proper c /\ member c x ==> any (memberMaybe x) (psplit c)
+  where
+    memberMaybe : [n] -> Maybe (Domain n) -> Bool
+    memberMaybe v m = case m of
+      Nothing -> False
+      Just d  -> member d v
+
+// Soundness of 'psplitOp2' for the bitwise-AND specialization (matches the
+// Haskell test).
+psplitOp2Sound : {n} (fin n, n >= 2) => Domain n -> [n] -> Domain n -> [n] -> Property
+psplitOp2Sound a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    member (psplitOp2 bandFast a b) (x && y)
+
 addSubSizeCorrect : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 addSubSizeCorrect a b =
   proper a ==> proper b ==>
@@ -1951,6 +2056,10 @@ property p_correct_neg = correct_neg`{4}
 property p_correct_add = correct_add`{4}
 property p_correct_sub = correct_sub`{4}
 property p_reverseDSameSet = reverseDSameSet`{4}
+property p_psplitProper = psplitProper`{4}
+property p_psplitCovers = psplitCovers`{4}
+property p_psplitPartitions = psplitPartitions`{4}
+property p_psplitOp2Sound = psplitOp2Sound`{4}
 property p_addSubSizeCorrect = addSubSizeCorrect`{4}
 property p_addRobustClosedFormAgrees = addRobustClosedFormAgrees`{4}
 property p_addRobustDominatesRaw = addRobustDominatesRaw`{4}
@@ -2635,19 +2744,22 @@ property p_subset_concat = subset_concat`{2, 2}
 // ------------------------------------------------------------------
 // ** Shifts and rotations
 
+// These check the @*Raw@ kernel against the arith abstraction; the
+// 'psplitOp2R'-wrapped public versions (@shl@ etc.) can soundly land on a
+// coset that the arith arc does not contain.
 subset_shl : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
 subset_shl a b x =
-  proper a ==> proper b ==> member (shl a b) x ==>
+  proper a ==> proper b ==> member (shlRaw a b) x ==>
     Arith::mem (Arith::shl (toArith a) (toArith b)) x
 
 subset_lshr : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
 subset_lshr a b x =
-  proper a ==> proper b ==> member (lshr a b) x ==>
+  proper a ==> proper b ==> member (lshrRaw a b) x ==>
     Arith::mem (Arith::lshr (toArith a) (toArith b)) x
 
 subset_ashr : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
 subset_ashr a b x =
-  proper a ==> proper b ==> member (ashr a b) x ==>
+  proper a ==> proper b ==> member (ashrRaw a b) x ==>
     Arith::mem (Arith::ashr (toArith a) (toArith b)) x
 
 // Disabled for the same reason as @p_correct_shl@: @shl@ reduces to @mul@,

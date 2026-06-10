@@ -262,6 +262,19 @@ tests = TT.testGroup "Strides"
   , genTest "reverseDSameSet" $
       do SW n <- genWidthSmall
          S.reverseDSameSet n <$> S.genDomain n
+  , genTest "psplitProper" $
+      do SW n <- genWidth
+         S.psplitProper n <$> S.genDomain n
+  , genTest "psplitCovers" $
+      do SW n <- genWidthSmall
+         S.psplitCovers n <$> S.genDomain n
+  , genTest "psplitPartitions" $
+      do SW n <- genWidthSmall
+         S.psplitPartitions n <$> S.genDomain n
+  , genTest "psplitOp2Sound" $
+      do SW n <- genWidth
+         S.psplitOp2Sound n <$> S.genDomain n <*> genNatBV n
+                            <*> S.genDomain n <*> genNatBV n
   , genTest "correct_add" $
       do SW n <- genWidth
          S.correct_add n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
@@ -400,9 +413,9 @@ tests = TT.testGroup "Strides"
   , genTest "operandRangeCorrect" $
       do SW n <- genWidth
          S.operandRangeCorrect <$> S.genDomain n <*> genNatBV n
-  , genTest "andPreciseDominatesAnd" $
+  , genTest "andPreciseDominatesAndFast" $
       do SW n <- genWidth
-         S.andPreciseDominatesAnd n <$> S.genDomain n <*> S.genDomain n
+         S.andPreciseDominatesAndFast n <$> S.genDomain n <*> S.genDomain n
 
   -- Concatenation, extension, selection, and truncation
   , genTest "correct_zero_ext" $
@@ -643,16 +656,16 @@ tests = TT.testGroup "Strides"
       do SW n <- genWidth
          S.trimSelfWrapIdempotent n <$> S.genDomain n
   -- @S.andPrecise@ and the bitwise lift are /incomparable/ on the
-  -- 'leqExact' order: at @w = 4@, Z3 refutes both directions of dominance.
-  -- These manual counter-examples were extracted from those refutations.
+  -- 'leqExact' order: at @w = 4@, exhaustive enumeration finds witnesses
+  -- in both directions.
   , TT.testCase "andPrecise incomparable with bitwise lift" $
       let w4 = knownNat @4
           mk s st nn = S.mk w4 s st nn
           liftBand a b =
             fromJust (S.fromBitwise w4 (B.and (S.toBitwise a) (S.toBitwise b)))
           -- Witness: @S.andPrecise a1 b1@ contains an element the lift does not.
-          a1 = mk 0 1 1
-          b1 = mk 0 2 1
+          a1 = mk 4 1 0
+          b1 = mk 4 1 2
           -- Witness: lift contains an element @S.andPrecise a2 b2@ does not.
           a2 = mk 2 4  2
           b2 = mk 12 10 6

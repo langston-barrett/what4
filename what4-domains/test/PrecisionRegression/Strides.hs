@@ -41,8 +41,10 @@ results =
   , binaryResult stridesEnum "sdivSmtlib" (S.sdivSmtlib w4) cSdivSmtlib
   , binaryResult stridesEnum "sremSmtlib" (S.sremSmtlib w4) cSremSmtlib
   , unaryResult stridesEnum "not" (S.not w4) cNot
+  , binaryResult stridesEnum "andFast" (S.andFast w4) cAnd
   , binaryResult stridesEnum "and" (S.and w4) cAnd
   , binaryResult stridesEnum "andPrecise" (S.andPrecise w4) cAnd
+  , binaryResult stridesEnum "orFast" (S.orFast w4) cOr
   , binaryResult stridesEnum "or" (S.or w4) cOr
   , binaryResult stridesEnum "orPrecise" (S.orPrecise w4) cOr
   , binaryResult stridesEnum "xor" (S.xor w4) cXor
