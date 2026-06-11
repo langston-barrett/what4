@@ -338,6 +338,7 @@ module What4.Domains.BV.Strides
   , hull
   , fromArith
   , toBitwise
+  , forcedBits
   , fromBitwise
   -- ** Canonicalization
   , Canonical
@@ -433,6 +434,8 @@ module What4.Domains.BV.Strides
   , roundtripArith
   , toBitwiseCorrect
   , strideBitwiseCorrect
+  , forcedBitsDisjoint
+  , forcedBitsMember
   , fromBitwiseCorrect
   -- ** Internal helpers
   , modNegCorrect
@@ -1195,52 +1198,72 @@ fromArith w = \case
         Nothing -> Nothing
         Just (lo, sz) -> Just (mk w (integerToNatural lo) 1 (integerToNatural sz))
 
--- TODO: The arith<->bitwise helpers below duplicate
--- 'arithToBitwiseDomain'/'bitwiseToArithDomain' in "What4.Domains.BV". Once
--- those are moved into a common module that 'Strides' can import (e.g. by adding a
--- dep from 'BV.Bitwise' to 'BV.Arith'), inline-call them instead.
+-- TODO: The bitwise->arith helper below duplicates
+-- 'bitwiseToArithDomain' in "What4.Domains.BV". Once that is moved into a
+-- common module that 'Strides' can import (e.g. by adding a dep from
+-- 'BV.Bitwise' to 'BV.Arith'), inline-call it instead.
 
--- | /O(w log w)/. Convert a progression to a bitwise domain.
+-- | /O(w)/. Convert a progression to a bitwise domain.
+--
+-- A thin wrapper around 'forcedBits': the resulting bitwise domain has
+-- forced-1 bits exactly @ones@ and forced-0 bits exactly @zeros@. Both
+-- the low (stride pinning) and high (span pinning) sources contribute.
 toBitwise :: Domain w -> B.Domain w
--- Two independently sound bitwise sources are 'B.meet'-ed:
---
---   * 'arcBitwise': the bits constant across the wrapped-interval arc
---     'toArith' yields.
---   * 'strideBitwise': the low @v@ bits, where @stride = 2^v · m@ with @m@
---     odd; see that function's docstring.
---
--- The arc path alone can lose the stride-bit information (e.g.
--- @start=1, stride=4, n=3@ at @w=4@ has arc @[1, 13]@, which has /no/
--- constant bits, even though the orbit @{1, 5, 9, 13}@ has its low two
--- bits fixed to @01@).
-toBitwise c = B.meet (arcBitwise c) (strideBitwise c)
+toBitwise = strideBitwise
 
--- | /O(w log w)/. Bitwise domain from the arc 'toArith' produces.
-arcBitwise :: Domain w -> B.Domain w
-arcBitwise = arithToBitwise . toArith
-
--- | /O(w)/. Bitwise domain from the stride alone: every orbit element
--- shares its low @v@ bits with @start@, where @stride = 2^v · m@ for odd
--- @m@. (Each step adds a multiple of @2^v@, leaving the low @v@ bits
--- unchanged.) The high bits are unconstrained.
+-- | /O(w)/. Bitwise domain capturing every bit forced by the progression.
+-- Equivalent to 'toBitwise'; named for compatibility with downstream
+-- callers that distinguish stride-derived bitwise info from arc-derived
+-- info. Span pinning (see 'forcedBits') subsumes the high-bit information
+-- the arc-based path would have contributed.
 strideBitwise :: Domain w -> B.Domain w
-strideBitwise c = B.interval imask fixedLow (fixedLow Bits..|. highMask)
-  where
-    imask    = toInteger (mask c)
-    lowMask  = toInteger (strideGcd c) - 1
-    highMask = imask `Bits.xor` lowMask
-    fixedLow = toInteger (start c) Bits..&. lowMask
+strideBitwise c =
+  let imask = toInteger (mask c)
+      (zeros, ones) = forcedBits c
+  in B.interval imask (toInteger ones) (imask `Bits.xor` toInteger zeros)
 
-arithToBitwise :: A.Domain w -> B.Domain w
-arithToBitwise a =
-  let imask = A.bvdMask a in
-  case A.arithDomainData a of
-    Nothing -> B.interval imask 0 imask
-    Just (alo, _) -> B.interval imask lo hi
-      where
-        u = A.unknowns a
-        hi = alo Bits..|. u
-        lo = hi `Bits.xor` u
+-- | /O(w)/. Bits forced to known values across the whole orbit, as a
+-- @(zeros, ones)@ pair: a bit set in @zeros@ is @0@ in every member; a
+-- bit set in @ones@ is @1@ in every member; a bit in neither may take
+-- both values. The two values are bit-disjoint
+-- (see 'forcedBitsDisjoint'), and every member of the progression
+-- agrees with them ('forcedBitsMember').
+--
+-- Two independent sound sources are unioned:
+--
+--   * /Stride pinning./ Writing @stride = 2^v · m@ with @m@ odd, every
+--     orbit element shares its low @v@ bits with @start@. (Each step
+--     adds a multiple of @2^v@, leaving the low @v@ bits unchanged.)
+--   * /Span pinning./ Let @R = n · stride@ be the integer span of the
+--     orbit. Every bit position @k@ with @2^k > R@ and
+--     @bit_k(start) == bit_k(start + R)@ is fixed at that common value.
+--     (Crossing a @2^k@ boundary flips bit @k@ via a carry; the span
+--     bound @2^k > R@ caps the boundary crossings at one, and
+--     endpoint-bit agreement rules even that one out.)
+--
+-- The two contributions are bit-disjoint: stride pinning sets bits
+-- @[0, v)@; span pinning only sets bits @≥ v + 1@ (because
+-- @R ≥ stride ≥ 2^v@ means @intLog2 R ≥ v@, so the span mask starts at
+-- bit @v + 1@).
+forcedBits :: Domain w -> (Natural, Natural)
+forcedBits c@Domain{start = s, mask = m} =
+  let notN x       = m `Bits.xor` x             -- @~x@ at the operand's width
+      g            = strideGcd c
+      lowMask      = g - 1                       -- bits [0, v)
+      lowOnes      = s Bits..&. lowMask
+      lowZeros     = lowMask Bits..&. notN s
+      span_        = n c * stride c
+      -- Bits @k@ with @2^k > span_@. When @span_ >= 2^w@, no bit at the
+      -- operand's width is above the span, so the mask is @0@.
+      belowSpan    = integerToNatural (Arith.bitsBelow (toInteger span_))
+                       Bits..&. m
+      spanMask     = notN belowSpan
+      sEnd         = (s + span_) Bits..&. m
+      agree        = notN (s `Bits.xor` sEnd)
+      highForced   = agree Bits..&. spanMask
+      highOnes     = highForced Bits..&. s
+      highZeros    = highForced Bits..&. notN s
+  in (lowZeros Bits..|. highZeros, lowOnes Bits..|. highOnes)
 
 -- | /O(w)/. Convert a bitwise domain to a progression.
 fromBitwise :: NatRepr w -> B.Domain w -> Maybe (Domain w)
@@ -2549,7 +2572,11 @@ sremSmtlib w = liftArith2 w (A.sremSmtlib w)
 -- as input to interval-based bitwise bound algorithms (e.g. 'warrenAndLo').
 --
 --   * Non-wrap, non-self-wrap: @[start, end]@.
---   * Wrap (orbit straddles 0, but not self-wrap): @[0, mask]@.
+--   * Wrap (orbit straddles 0, but not self-wrap): with @k = (mask - start)
+--     `div` stride@ the largest pre-wrap index, the orbit splits into a
+--     pre-wrap arc capped at @start + k * stride@ and a post-wrap arc whose
+--     least member is @start + (k + 1) * stride - (mask + 1)@. Both endpoints
+--     are actual orbit members, so this is the tightest single-interval cover.
 --   * Self-wrap: the coset arc @[start mod g, mask - g + 1 + start mod g]@.
 operandRange :: Domain w -> (Natural, Natural)
 operandRange c@Domain{start = s, stride = t, n = nn, mask = m} =
@@ -2557,7 +2584,11 @@ operandRange c@Domain{start = s, stride = t, n = nn, mask = m} =
   let !span_ = nn * t
       !lo = s `Prelude.mod` strideGcd c
   in if span_ >= m then (lo, m - (strideGcd c - 1) + lo)  -- self-wrap
-     else if s + span_ > m then (0, m)                    -- wrap (not self)
+     else if s + span_ > m then                           -- wrap (not self)
+       let !k = (m - s) `Prelude.div` t
+           !preMax = s + k * t
+           !postMin = s + (k + 1) * t - (m + 1)
+       in (postMin, preMax)
      else (s, s + span_)                                  -- no wrap
 
 -- | /O(w^2)/. Tight unsigned lower bound on @{ x .&. y | alo <= x <= ahi,
@@ -2640,47 +2671,37 @@ not w c@Domain{stride, n = nn, mask} =
   assert (proper c) $
   mk w (mask - end c) stride nn
 
--- | /O(w)/. The result stride for bitwise AND of two non-singleton
--- progressions, before the cheap-bound or Warren-bound coset reduction
--- adjusts it.
+-- | /O(w)/. The result stride for bitwise AND of two progressions, given
+-- the @(zeros, ones)@ forced-bits picture (see 'forcedBits') of each
+-- operand and the common @mask@.
 --
--- Writing operand strides as @ga = 2^v_a · m_a@ and @gb = 2^v_b · m_b@
--- (m_a, m_b odd), each operand has bits @0..v_x - 1@ fixed (equal to the
--- corresponding bits of its start) and bit @v_x@ alternating with index
--- parity. WLOG @v_a ≤ v_b@. For each bit position @i@ in @[v_a, v_b)@:
+-- Per-bit AND rule: bit @k@ of @x .&. y@ is
 --
---   * Bit @i@ of @b@ is fixed at @bit_i(start_b)@.
---   * Bit @i@ of @a@ alternates (or is fixed at @bit_i(start_a)@ if @i < v_a@,
---     which can't happen here since @i ≥ v_a@; or is fixed if the orbit is
---     too short to vary it, which we ignore — yields a sound but possibly
---     loose bound).
---   * Result bit @i@ = @0@ iff @bit_i(start_b) = 0@ (a 0 in @b@ forces 0
---     regardless of @a@'s value).
+--   * forced to @0@ if bit @k@ is forced to @0@ in /either/ operand;
+--   * forced to @1@ if bit @k@ is forced to @1@ in /both/ operands;
+--   * otherwise free.
 --
--- So the result stride is the lowest power of two @2^k@ such that bit @k@
--- of the result is /not/ pinned — i.e., the lowest @k ∈ [v_a, v_b]@ at which
--- @bit_k(start_b) = 1@, or @v_b@ if every such bit is @0@. Computed in
--- closed form by masking @start_b@ to the bit range and taking the lowest
--- set bit.
+-- The result stride is @2^k@ for the lowest free bit @k@. Returns
+-- @mask + 1@ when every bit is forced (the result is a singleton); the
+-- caller detects this and returns the singleton directly.
 --
--- When @v_a == v_b@, both operands have bit @v_a@ alternating, so result bit
--- @v_a@ takes both 0 and 1 across the orbits and no pin applies; we return
--- @ga@.
+-- Both stride pinning and span pinning contribute through 'forcedBits',
+-- so this rule is strictly tighter than the old version that consumed
+-- only @(start, strideGcd)@ pairs.
 --
 -- 'orFast' inherits this rule via De Morgan: @x | y = ~(~x & ~y)@, and
--- complementing an operand flips its low-@v@ bits, so the AND rule applied
--- to @not a, not b@ gives exactly the OR pinning rule on the originals.
-andResultStride :: Natural -> Natural -> Natural -> Natural -> Natural
-andResultStride sa ga sb gb =
-  case compare ga gb of
-    LT -> probe sb ga gb
-    GT -> probe sa gb ga
-    EQ -> ga
-  where
-    probe pinStart gLo gHi =
-      let !range = (gHi - 1) - (gLo - 1)  -- bits @[log2 gLo .. log2 gHi)@ set
-          !bits  = pinStart Bits..&. range
-      in if bits == 0 then gHi else lowestSetBit bits
+-- complementing an operand swaps its zeros/ones forced-bits halves.
+andResultStride ::
+  Natural {- ^ @mask@ -} ->
+  (Natural, Natural) {- ^ @forcedBits a@ -} ->
+  (Natural, Natural) {- ^ @forcedBits b@ -} ->
+  Natural
+andResultStride !m (!za, !oa) (!zb, !ob) =
+  let !forced0 = za Bits..|. zb
+      !forced1 = oa Bits..&. ob
+      !forced  = forced0 Bits..|. forced1
+      !free    = m `Bits.xor` forced  -- forced ⊆ m, so xor = set difference
+  in if free == 0 then m + 1 else lowestSetBit free
 
 -- | /O(w)/. The cheap bitwise-AND kernel: a single arithmetic pass, no parity
 -- splitting or Warren bounds. See 'and' for the default ('psplitOp2'-wrapped)
@@ -2722,16 +2743,20 @@ andFast w a b =
     (0, _) -> andSingleton w (start a) b
     (_, 0) -> andSingleton w (start b) a
     _ ->
-      let !ga = strideGcd a
-          !gb = strideGcd b
-          !d = andResultStride (start a) ga (start b) gb
-          !(_, aHi) = operandRange a
-          !(_, bHi) = operandRange b
-          !sub_ = min aHi bHi
-          !sStart = (start a Bits..&. start b) Bits..&. mask a
-          !cosetLo = sStart Bits..&. (d - 1)
-          !nSteps = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
-      in mk w cosetLo d nSteps
+      let !m = mask a
+          !fa@(_, oa) = forcedBits a
+          !fb@(_, ob) = forcedBits b
+          !d = andResultStride m fa fb
+      -- Every result bit is forced — return the unique value @oa .&. ob@.
+      in if d > m then mk w (oa Bits..&. ob) 1 0
+         else
+           let !(_, aHi) = operandRange a
+               !(_, bHi) = operandRange b
+               !sub_ = min aHi bHi
+               !sStart = (start a Bits..&. start b) Bits..&. m
+               !cosetLo = sStart Bits..&. (d - 1)
+               !nSteps = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
+           in mk w cosetLo d nSteps
 
 -- | /O(w)/. Bitwise AND. Wraps 'andFast' through 'psplitOp2': each 'psplit'
 -- piece of an operand has one more fixed low bit than the operand itself, so
@@ -2752,36 +2777,36 @@ and w = psplitOp2 w (andFast w)
 -- from forcing the result into one arithmetic progression).
 --
 -- ANDing every element of @c@ with the constant @k@ clears the result bits
--- wherever @k@ is @0@ and leaves the rest equal to @c@\'s bits. Writing
--- @stride c = 2^v · m@ (m odd), @c@\'s low @v@ bits are constant (equal to
--- @start c@\'s), so:
+-- wherever @k@ is @0@, fixes them where @c@'s bit is forced, and lets them
+-- vary only where @k@'s bit is set /and/ @c@'s bit is free. So:
 --
---   * The fixed low bits of every result are @k & start c & (g - 1)@, where
---     @g = 2^v = strideGcd c@.
---   * Above bit @v@, @c@ advances in steps that are multiples of @g@, but
---     @k@ masks those steps down to multiples of @d = lowestSetBit (k & ~(g-1))@.
---     This @d ≥ g@ is the result stride.
---   * If @k@ has no set bits at or above bit @v@ (@k & ~(g-1) == 0@), every
---     result collapses to the single fixed value @k & start c@.
+--   * The fixed low bits of every result are @k & start c & forced bits of c@,
+--     captured by @base = k & start c & m@ (since @start c@ agrees with
+--     every forced bit of @c@).
+--   * The result stride is @d = lowestSetBit (k & freeBits c)@, where
+--     @freeBits c = m XOR (zeros ∪ ones)@ from 'forcedBits'. Both
+--     stride pinning (low @v@ bits) and span pinning (high bits when
+--     @c@\'s span is short) contribute, so @d@ can be larger than the
+--     old @lowestSetBit (k & ~(g-1))@.
+--   * If @k@ has no set bits at any free position, every result collapses
+--     to @base@.
 --
 -- The upper bound @min(k, hi c)@ holds since @k & y ≤ k@ and @k & y ≤ y@; the
--- coset rep is @(k & start c) & (d - 1)@.
+-- coset rep is @base & (d - 1)@.
 andSingleton :: (1 <= w) => NatRepr w -> Natural -> Domain w -> Domain w
 andSingleton w k c =
   assert (proper c) $
-  let !g     = strideGcd c
-      !m      = mask c
-      !highMask = m `Bits.xor` (g - 1)
-      !kHigh  = k Bits..&. highMask
-      !base   = (k Bits..&. start c) Bits..&. m
-  -- A singleton @c@ has no varying bits (its stride is the dummy @1@), so
-  -- @{k} & {c} = {k & start c}@ exactly; the coset reasoning below assumes
-  -- @c@'s bits above @strideGcd c@ actually vary, so guard it out. Likewise
-  -- when @k@ masks away every varying bit, the result is the single value.
-  in if n c == 0 || kHigh == 0
+  let !m              = mask c
+      !(zeros, ones)  = forcedBits c
+      !free           = m `Bits.xor` (zeros Bits..|. ones)
+      !kFree          = k Bits..&. free
+      !base           = (k Bits..&. start c) Bits..&. m
+  -- A singleton @c@ (or one whose free bits are all cleared by @k@) has
+  -- @{k} & c = {base}@ exactly.
+  in if n c == 0 || kFree == 0
        then mk w base 1 0
        else
-         let !d  = lowestSetBit kHigh
+         let !d  = lowestSetBit kFree
              !(_, cHi) = operandRange c
              !hi = min (k Bits..&. m) cHi
              !cosetLo = base Bits..&. (d - 1)
@@ -2810,18 +2835,21 @@ andPreciseRaw w a b =
     (0, _) -> andSingleton w (start a) b
     (_, 0) -> andSingleton w (start b) a
     _ ->
-      let !ga = strideGcd a
-          !gb = strideGcd b
-          !d = andResultStride (start a) ga (start b) gb
-          !(aLo, aHi) = operandRange a
-          !(bLo, bHi) = operandRange b
-          !wLo = warrenAndLo (mask a) aLo aHi bLo bHi
-          !wHi = warrenAndHi (mask a) aLo aHi bLo bHi
-          !sStart = (start a Bits..&. start b) Bits..&. mask a
-          !sStartCoset = sStart Bits..&. (d - 1)
-          !cosetLo = wLo + (modSub (mask a) sStartCoset wLo Bits..&. (d - 1))
-          !nSteps = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
-      in mk w cosetLo d nSteps
+      let !m = mask a
+          !fa@(_, oa) = forcedBits a
+          !fb@(_, ob) = forcedBits b
+          !d = andResultStride m fa fb
+      in if d > m then mk w (oa Bits..&. ob) 1 0
+         else
+           let !(aLo, aHi) = operandRange a
+               !(bLo, bHi) = operandRange b
+               !wLo = warrenAndLo m aLo aHi bLo bHi
+               !wHi = warrenAndHi m aLo aHi bLo bHi
+               !sStart = (start a Bits..&. start b) Bits..&. m
+               !sStartCoset = sStart Bits..&. (d - 1)
+               !cosetLo = wLo + (modSub m sStartCoset wLo Bits..&. (d - 1))
+               !nSteps = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
+           in mk w cosetLo d nSteps
 
 -- | /O(w)/. The cheap bitwise-OR kernel (De Morgan over 'andFast'). See 'or'
 -- for the default ('psplitOp2'-wrapped) variant and 'orPrecise' for the
@@ -4841,6 +4869,25 @@ strideBitwiseCorrect :: (1 <= w) => NatRepr w -> Domain w -> Natural -> Property
 strideBitwiseCorrect _w c x =
   proper c ==> member c x' ==>
     property (B.member (strideBitwise c) (toInteger x'))
+  where
+    x' = modMask c x
+
+-- | The two halves of 'forcedBits' are bit-disjoint: no bit is both
+-- forced-to-0 and forced-to-1.
+forcedBitsDisjoint :: Domain w -> Property
+forcedBitsDisjoint c =
+  proper c ==>
+    let (zeros, ones) = forcedBits c
+    in property ((zeros .&. ones) == 0)
+
+-- | Every element of a progression agrees with the forced-bits picture:
+-- bits in @zeros@ are @0@ in @x@; bits in @ones@ are @1@ in @x@.
+forcedBitsMember :: Domain w -> Natural -> Property
+forcedBitsMember c x =
+  proper c ==> member c x' ==>
+    let (zeros, ones) = forcedBits c
+    in property ((zeros .&. x') == 0
+              && (ones .&. (mask c `Bits.xor` x')) == 0)
   where
     x' = modMask c x
 
