@@ -763,15 +763,25 @@ bandSingleton k c =
     nSteps = if hi < cosetLo then 0 else zext ((hi - cosetLo) / d)
 
 // See @andFast@ in What4.Domains.BV.Strides.
+// See @andResultStride@ in What4.Domains.BV.Strides.
+andResultStride : {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> [n]
+andResultStride sa ga sb gb =
+  if ga < gb then probe sb ga gb
+  else if ga > gb then probe sa gb ga
+  else ga
+  where
+    probe pinStart gLo gHi = if bits == 0 then gHi else lowestSetBit bits
+      where
+        range = (gHi - 1) - (gLo - 1)
+        bits  = pinStart && range
+
 bandFast : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 bandFast a b =
   if a.n == 0 then bandSingleton a.start b
   else if b.n == 0 then bandSingleton b.start a
   else mk cosetLo d nSteps
   where
-    g1 = strideGcd a
-    g2 = strideGcd b
-    d  = if g1 <= g2 then g1 else g2
+    d = andResultStride a.start (strideGcd a) b.start (strideGcd b)
     (_, aHi) = operandRange a
     (_, bHi) = operandRange b
     sub_ = if aHi <= bHi then aHi else bHi
@@ -827,9 +837,7 @@ bandPreciseRaw a b =
   else if b.n == 0 then bandSingleton b.start a
   else mk cosetLo d nSteps
   where
-    g1 = strideGcd a
-    g2 = strideGcd b
-    d  = if g1 <= g2 then g1 else g2
+    d = andResultStride a.start (strideGcd a) b.start (strideGcd b)
     (aLo, aHi) = operandRange a
     (bLo, bHi) = operandRange b
     wLo = warrenAndLo aLo aHi bLo bHi
