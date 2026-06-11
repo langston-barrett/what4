@@ -2640,6 +2640,48 @@ not w c@Domain{stride, n = nn, mask} =
   assert (proper c) $
   mk w (mask - end c) stride nn
 
+-- | /O(w)/. The result stride for bitwise AND of two non-singleton
+-- progressions, before the cheap-bound or Warren-bound coset reduction
+-- adjusts it.
+--
+-- Writing operand strides as @ga = 2^v_a · m_a@ and @gb = 2^v_b · m_b@
+-- (m_a, m_b odd), each operand has bits @0..v_x - 1@ fixed (equal to the
+-- corresponding bits of its start) and bit @v_x@ alternating with index
+-- parity. WLOG @v_a ≤ v_b@. For each bit position @i@ in @[v_a, v_b)@:
+--
+--   * Bit @i@ of @b@ is fixed at @bit_i(start_b)@.
+--   * Bit @i@ of @a@ alternates (or is fixed at @bit_i(start_a)@ if @i < v_a@,
+--     which can't happen here since @i ≥ v_a@; or is fixed if the orbit is
+--     too short to vary it, which we ignore — yields a sound but possibly
+--     loose bound).
+--   * Result bit @i@ = @0@ iff @bit_i(start_b) = 0@ (a 0 in @b@ forces 0
+--     regardless of @a@'s value).
+--
+-- So the result stride is the lowest power of two @2^k@ such that bit @k@
+-- of the result is /not/ pinned — i.e., the lowest @k ∈ [v_a, v_b]@ at which
+-- @bit_k(start_b) = 1@, or @v_b@ if every such bit is @0@. Computed in
+-- closed form by masking @start_b@ to the bit range and taking the lowest
+-- set bit.
+--
+-- When @v_a == v_b@, both operands have bit @v_a@ alternating, so result bit
+-- @v_a@ takes both 0 and 1 across the orbits and no pin applies; we return
+-- @ga@.
+--
+-- 'orFast' inherits this rule via De Morgan: @x | y = ~(~x & ~y)@, and
+-- complementing an operand flips its low-@v@ bits, so the AND rule applied
+-- to @not a, not b@ gives exactly the OR pinning rule on the originals.
+andResultStride :: Natural -> Natural -> Natural -> Natural -> Natural
+andResultStride sa ga sb gb =
+  case compare ga gb of
+    LT -> probe sb ga gb
+    GT -> probe sa gb ga
+    EQ -> ga
+  where
+    probe pinStart gLo gHi =
+      let !range = (gHi - 1) - (gLo - 1)  -- bits @[log2 gLo .. log2 gHi)@ set
+          !bits  = pinStart Bits..&. range
+      in if bits == 0 then gHi else lowestSetBit bits
+
 -- | /O(w)/. The cheap bitwise-AND kernel: a single arithmetic pass, no parity
 -- splitting or Warren bounds. See 'and' for the default ('psplitOp2'-wrapped)
 -- variant and 'andPrecise' for the tightest one.
@@ -2680,13 +2722,15 @@ andFast w a b =
     (0, _) -> andSingleton w (start a) b
     (_, 0) -> andSingleton w (start b) a
     _ ->
-      let !d  = min (strideGcd a) (strideGcd b)
+      let !ga = strideGcd a
+          !gb = strideGcd b
+          !d = andResultStride (start a) ga (start b) gb
           !(_, aHi) = operandRange a
           !(_, bHi) = operandRange b
-          !sub_    = min aHi bHi
-          !sStart  = (start a Bits..&. start b) Bits..&. mask a
+          !sub_ = min aHi bHi
+          !sStart = (start a Bits..&. start b) Bits..&. mask a
           !cosetLo = sStart Bits..&. (d - 1)
-          !nSteps  = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
+          !nSteps = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
       in mk w cosetLo d nSteps
 
 -- | /O(w)/. Bitwise AND. Wraps 'andFast' through 'psplitOp2': each 'psplit'
@@ -2766,15 +2810,17 @@ andPreciseRaw w a b =
     (0, _) -> andSingleton w (start a) b
     (_, 0) -> andSingleton w (start b) a
     _ ->
-      let !d  = min (strideGcd a) (strideGcd b)
+      let !ga = strideGcd a
+          !gb = strideGcd b
+          !d = andResultStride (start a) ga (start b) gb
           !(aLo, aHi) = operandRange a
           !(bLo, bHi) = operandRange b
           !wLo = warrenAndLo (mask a) aLo aHi bLo bHi
           !wHi = warrenAndHi (mask a) aLo aHi bLo bHi
-          !sStart  = (start a Bits..&. start b) Bits..&. mask a
+          !sStart = (start a Bits..&. start b) Bits..&. mask a
           !sStartCoset = sStart Bits..&. (d - 1)
           !cosetLo = wLo + (modSub (mask a) sStartCoset wLo Bits..&. (d - 1))
-          !nSteps  = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
+          !nSteps = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
       in mk w cosetLo d nSteps
 
 -- | /O(w)/. The cheap bitwise-OR kernel (De Morgan over 'andFast'). See 'or'
