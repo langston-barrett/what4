@@ -245,6 +245,12 @@ tests = TT.testGroup "Strides"
   , genTest "strideBitwiseCorrect" $
       do SW n <- genWidth
          S.strideBitwiseCorrect n <$> S.genDomain n <*> genNatBV n
+  , genTest "forcedBitsDisjoint" $
+      do SW n <- genWidth
+         S.forcedBitsDisjoint <$> S.genDomain n
+  , genTest "forcedBitsMember" $
+      do SW n <- genWidth
+         S.forcedBitsMember <$> S.genDomain n <*> genNatBV n
   , genTest "fromBitwiseCorrect" $
       do SW n <- genWidth
          S.fromBitwiseCorrect n <$> B.genDomain n <*> chooseInteger (0, maxUnsigned n)
@@ -712,11 +718,17 @@ tests = TT.testGroup "Strides"
           liftBand a b =
             fromJust (S.fromBitwise w4 (B.and (S.toBitwise a) (S.toBitwise b)))
           -- Witness: @S.andPrecise a1 b1@ contains an element the lift does not.
-          a1 = mk 4 1 0
-          b1 = mk 4 1 2
+          -- a1 = {0..4}, b1 = {2,10}; concrete AND = {0,2}, but
+          -- @andPrecise@ widens to @{0,2,4}@, while the lift recovers
+          -- @{0,2}@ exactly through forced-bit refinement.
+          a1 = mk 0 1 4
+          b1 = mk 2 8 1
           -- Witness: lift contains an element @S.andPrecise a2 b2@ does not.
-          a2 = mk 2 4  2
-          b2 = mk 12 10 6
+          -- a2 = b2 = {0,1,2}; concrete AND = {0,1,2}, @andPrecise@
+          -- recovers it exactly, while the lift drops the orbit-shortness
+          -- info and yields @{0,1,2,3}@.
+          a2 = mk 0 1 2
+          b2 = mk 0 1 2
       in do
         TT.assertBool "andPrecise a1 b1 not <= lift a1 b1"
           (not (S.leqExact (S.andPrecise w4 a1 b1) (liftBand a1 b1)))

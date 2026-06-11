@@ -210,16 +210,46 @@ fromArith : {n} (fin n, n >= 1) => Dom n -> Domain n
 fromArith a = { start = a.lo, stride = 1, n = zext a.sz }
 
 toBitwise : {n} (fin n, n >= 2) => Domain n -> Bits::Dom n
-toBitwise c = Bits::meet (arcBitwise c) (strideBitwise c)
+toBitwise = strideBitwise
 
-arcBitwise : {n} (fin n, n >= 2) => Domain n -> Bits::Dom n
-arcBitwise c = BV::arithToBitDom (toArith c)
-
+// Thin wrapper over @forcedBits@: forced-1 bits are exactly @ones@,
+// forced-0 bits are exactly @zeros@. Span pinning subsumes the
+// arc-based pinning the old @arcBitwise@ contributed.
 strideBitwise : {n} (fin n, n >= 2) => Domain n -> Bits::Dom n
-strideBitwise c = { lomask = fixedLow, himask = fixedLow || (~lowMask) }
+strideBitwise c = { lomask = ones, himask = ~ zeros }
   where
-    lowMask = strideGcd c - 1
-    fixedLow = c.start && lowMask
+    (zeros, ones) = forcedBits c
+
+// Bits forced across the whole orbit, as a (zeros, ones) pair.
+//
+//   * Stride pinning: bits @[0, v)@ equal @start@'s bits, where
+//     @stride = 2^v · m@ with @m@ odd.
+//   * Span pinning: let @R = n · stride@ be the integer span (mod
+//     @2^n@; computed in 2n-bit arithmetic to avoid wrap). Every bit
+//     position @k@ with @2^k > R@ and @bit_k(start) == bit_k(start +
+//     R)@ is fixed at that common value.
+//
+// The two contributions are bit-disjoint.
+forcedBits : {n} (fin n, n >= 2) => Domain n -> ([n], [n])
+forcedBits c = (lowZeros || highZeros, lowOnes || highOnes)
+  where
+    g       = strideGcd c
+    lowMask = g - 1
+    lowOnes = c.start && lowMask
+    lowZeros = lowMask && (~ c.start)
+    span : [2 * n]
+    span = zext c.n * zext c.stride
+    spanMaskWide : [2 * n]
+    spanMaskWide = ~ (Bits::bitsBelow span)
+    spanMask : [n]
+    spanMask = drop`{n} spanMaskWide
+    sEnd : [n]
+    sEnd = c.start + drop`{n} span
+    agree : [n]
+    agree = ~ (c.start ^ sEnd)
+    highForced = agree && spanMask
+    highOnes  = highForced && c.start
+    highZeros = highForced && (~ c.start)
 
 fromBitwise : {n} (fin n, n >= 2) => Bits::Dom n -> Domain n
 fromBitwise b = mk b.lomask st nSteps
@@ -732,56 +762,82 @@ warrenAndHi alo ahi blo bhi = (final.0) && (final.1)
 // to Warren's bounds:
 //
 //   * non-wrap, non-self-wrap: @[start, end]@.
-//   * wrap (crosses 0, non-self-wrap): @[0, ~0]@ — the orbit straddles 0.
+//   * wrap (crosses 0, non-self-wrap): with @k = (~0 - start) / stride@ the
+//     largest pre-wrap index, the orbit splits into a pre-wrap arc capped at
+//     @start + k * stride@ and a post-wrap arc whose least member is @start +
+//     (k + 1) * stride - 2^n@. Both endpoints are actual orbit members, so
+//     this is the tightest single-interval cover.
 //   * self-wrap: the coset arc @[start % g, ~0 - (g - 1) + start % g]@.
 operandRange : {n} (fin n, n >= 2) => Domain n -> ([n], [n])
 operandRange c =
   if isSelfWrapping c then (lo, lo + ~ 0 - (g - 1))
-  else if (zext c.start + span : [2 * n + 1]) > zext (~ 0 : [n]) then (0, ~ 0)
+  else if (zext c.start + span : [2 * n + 1]) > zext (~ 0 : [n])
+       then (postMin, preMax)
   else (c.start, c.start + drop`{1} c.n * c.stride)
   where
     g = strideGcd c
     lo = c.start % g
     span : [2 * n + 1]
     span = zext c.n * zext c.stride
+    k = (~ 0 - c.start) / c.stride
+    preMax = c.start + k * c.stride
+    postMin = c.start + (k + 1) * c.stride  // wraps mod 2^n by construction
 
 // See @andSingleton@ in What4.Domains.BV.Strides.
+//
+// Span pinning lets bits in @c@'s @zeros@ count as already-cleared, and
+// bits in @c@'s @ones@ count as already-set, so the only bits that vary
+// across the orbit are those in @c@'s @free@ mask. The result stride
+// is the lowest set bit of @k && free@.
 bandSingleton : {n} (fin n, n >= 2) => [n] -> Domain n -> Domain n
 bandSingleton k c =
   if c.n == 0 then mk base 1 0
-  else if kHigh == 0 then mk base 1 0
+  else if kFree == 0 then mk base 1 0
   else mk cosetLo d nSteps
   where
-    g = strideGcd c
-    kHigh = k && (~ (g - 1))
-    base = k && c.start
-    d = lowestSetBit kHigh
+    (zeros, ones) = forcedBits c
+    free  = ~ (zeros || ones)
+    kFree = k && free
+    base  = k && c.start
+    d = lowestSetBit kFree
     (_, cHi) = operandRange c
     hi = if k <= cHi then k else cHi
     cosetLo = base && (d - 1)
     nSteps : [n + 1]
     nSteps = if hi < cosetLo then 0 else zext ((hi - cosetLo) / d)
 
-// See @andFast@ in What4.Domains.BV.Strides.
 // See @andResultStride@ in What4.Domains.BV.Strides.
-andResultStride : {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> [n]
-andResultStride sa ga sb gb =
-  if ga < gb then probe sb ga gb
-  else if ga > gb then probe sa gb ga
-  else ga
+//
+// Per-bit AND rule: bit @k@ is forced to @0@ if either operand forces
+// it to @0@; forced to @1@ if both force it to @1@; otherwise free.
+// The result stride is @2^k@ for the lowest free bit @k@. When every
+// bit is forced (no free bit), the orbit collapses to a singleton; we
+// signal that by returning @0@, and the caller short-circuits to that
+// singleton.
+andResultStride :
+  {n} (fin n, n >= 2) =>
+  ([n], [n]) -> ([n], [n]) -> [n]
+andResultStride (za, oa) (zb, ob) =
+  if free == 0 then 0
+  else lowestSetBit free
   where
-    probe pinStart gLo gHi = if bits == 0 then gHi else lowestSetBit bits
-      where
-        range = (gHi - 1) - (gLo - 1)
-        bits  = pinStart && range
+    forced0 = za || zb
+    forced1 = oa && ob
+    free    = ~ (forced0 || forced1)
 
+// See @andFast@ in What4.Domains.BV.Strides.
 bandFast : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 bandFast a b =
   if a.n == 0 then bandSingleton a.start b
   else if b.n == 0 then bandSingleton b.start a
+  else if d == 0 then mk (oa && ob) 1 0
   else mk cosetLo d nSteps
   where
-    d = andResultStride a.start (strideGcd a) b.start (strideGcd b)
+    fa = forcedBits a
+    fb = forcedBits b
+    (_, oa) = fa
+    (_, ob) = fb
+    d = andResultStride fa fb
     (_, aHi) = operandRange a
     (_, bHi) = operandRange b
     sub_ = if aHi <= bHi then aHi else bHi
@@ -835,9 +891,14 @@ bandPreciseRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 bandPreciseRaw a b =
   if a.n == 0 then bandSingleton a.start b
   else if b.n == 0 then bandSingleton b.start a
+  else if d == 0 then mk (oa && ob) 1 0
   else mk cosetLo d nSteps
   where
-    d = andResultStride a.start (strideGcd a) b.start (strideGcd b)
+    fa = forcedBits a
+    fb = forcedBits b
+    (_, oa) = fa
+    (_, ob) = fb
+    d = andResultStride fa fb
     (aLo, aHi) = operandRange a
     (bLo, bHi) = operandRange b
     wLo = warrenAndLo aLo aHi bLo bHi
@@ -2649,6 +2710,20 @@ knownZerosOnesNatMember b x =
   Bits::mem b x == ((zeros && x) == 0 /\ (ones && ~ x) == 0)
   where (zeros, ones) = knownZerosOnesNat b
 
+// The two halves of `forcedBits` are bit-disjoint.
+forcedBitsDisjoint : {n} (fin n, n >= 2) => Domain n -> Property
+forcedBitsDisjoint c =
+  proper c ==> (zeros && ones) == 0
+  where (zeros, ones) = forcedBits c
+
+// Every member agrees with the forced-bits picture: zeros are 0 and
+// ones are 1 in every member of the progression.
+forcedBitsMember : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
+forcedBitsMember c x =
+  proper c ==> member c x ==>
+    (zeros && x) == 0 /\ (ones && ~ x) == 0
+  where (zeros, ones) = forcedBits c
+
 // Restricted to nonempty `b`: an empty bitwise domain has
 // `zeros && ones != 0`, which violates `liftStrideStep`'s exclusivity
 // assumption.
@@ -2814,6 +2889,8 @@ property p_knownZerosOnesNatDisjoint     = knownZerosOnesNatDisjoint`{4}
 property p_knownZerosOnesNatMember       = knownZerosOnesNatMember`{4}
 property p_liftForcedBitsShrinks         = liftForcedBitsShrinks`{4}
 property p_liftForcedBitsMember          = liftForcedBitsMember`{4}
+property p_forcedBitsDisjoint            = forcedBitsDisjoint`{4}
+property p_forcedBitsMember              = forcedBitsMember`{4}
 
 // Properties below go through `arcMeetClosed` and inherit the
 // `solveLinearDiophantine` unfolding cost (cf. `lowerBound`).
