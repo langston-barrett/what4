@@ -34,6 +34,7 @@ module Main (main) where
 
 import           Control.Monad (forM)
 import           Data.Char (isAlphaNum)
+import           Data.List (tails)
 import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as T
@@ -85,6 +86,7 @@ main :: IO ()
 main = TT.defaultMain $ TT.testGroup "Test coverage"
   [ haskellInvocationTests
   , cryptolCorrespondenceTests
+  , exportOrderTests
   ]
 
 ------------------------------------------------------------------------
@@ -284,6 +286,214 @@ checkHaskellFile m = do
             ("Haskell predicates in " <> T.pack (hsModFile m)
              <> " with no matching Cryptol counterpart in doc/*.cry:")
             : map ("  " <>) missing
+
+------------------------------------------------------------------------
+-- Export order matches definition order; export sections match body sections
+
+exportOrderTests :: TT.TestTree
+exportOrderTests = TT.testGroup "Export order matches definition order"
+  [ testCase "src/What4/Domains/BV/Strides.hs" checkStridesExportOrder ]
+
+checkStridesExportOrder :: Assertion
+checkStridesExportOrder = do
+  src <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
+  checkExportOrder         "src/What4/Domains/BV/Strides.hs" src
+  checkExportSections      "src/What4/Domains/BV/Strides.hs" src
+  checkSectionNesting      "src/What4/Domains/BV/Strides.hs" src
+  checkPropertiesMatchOps  "src/What4/Domains/BV/Strides.hs" src
+
+-- | Assert that exported names appear in the same order as their definitions.
+checkExportOrder :: FilePath -> Text -> Assertion
+checkExportOrder f src = do
+  let exports = extractExports src
+      defs    = extractDefs src
+  assertNonEmpty f "export" exports
+  assertNonEmpty f "definition" defs
+  case firstOutOfOrder exports defs of
+    Nothing    -> pure ()
+    Just (a, b) -> assertFailure $ T.unpack $
+      "In " <> T.pack f <> ": '" <> a
+      <> "' is exported before '" <> b
+      <> "' but defined after it"
+
+-- | Assert that @-- *@-family section headers in the export list appear in the
+-- same relative order in the body. Exact text matching means @-- *@ and
+-- @-- **@ headers are never treated as the same. Headers with no body
+-- counterpart are silently skipped.
+checkExportSections :: FilePath -> Text -> Assertion
+checkExportSections f src = do
+  let expSecs  = extractExportSections src
+      bodySecs = extractBodySections src
+  assertNonEmpty f "export section" expSecs
+  assertNonEmpty f "body section" bodySecs
+  case firstOutOfOrder expSecs bodySecs of
+    Nothing     -> pure ()
+    Just (a, b) -> assertFailure $ T.unpack $
+      "In " <> T.pack f <> ": export section '" <> a
+      <> "' comes before '" <> b
+      <> "' in the export list but after it in the body"
+
+-- | Assert that section headers are properly nested: a header at depth @d@ may
+-- only appear after a header at depth @d - 1@ (or @d@) has been seen. E.g.
+-- @-- ***@ requires a prior @-- **@. Checked in both the export list and body.
+checkSectionNesting :: FilePath -> Text -> Assertion
+checkSectionNesting f src = do
+  checkNesting "export list" (extractExportSections src)
+  checkNesting "body"        (extractBodySections src)
+  where
+    checkNesting loc secs =
+      case badNesting secs of
+        Nothing      -> pure ()
+        Just (d, hd) -> assertFailure $ T.unpack $
+          "In " <> T.pack f <> " " <> loc <> ": section '" <> hd
+          <> "' at depth " <> T.pack (show d)
+          <> " has no enclosing section at depth " <> T.pack (show (d - 1))
+
+    badNesting secs = go 0 secs
+      where
+        go _    []     = Nothing
+        go maxD (h:hs) =
+          let d = secDepth h
+          in if d > maxD + 1
+               then Just (d, h)
+               else go (max maxD d) hs
+
+-- | Assert that the @-- **@ subsections under @-- * Properties@ in the body
+-- appear in the same order as the correspondingly-named @-- *@ sections in the
+-- operations part of the body (one level shallower). Sections with no
+-- operations counterpart (e.g. @-- ** Generators@, @-- ** Internal helpers@)
+-- are silently skipped.
+checkPropertiesMatchOps :: FilePath -> Text -> Assertion
+checkPropertiesMatchOps f src = do
+  let opsSecs   = opsSections src          -- "Construction", "Queries", …
+      propsSecs  = propsSections src        -- "Construction", "Queries", …
+  case firstOutOfOrder propsSecs opsSecs of
+    Nothing     -> pure ()
+    Just (a, b) -> assertFailure $ T.unpack $
+      "In " <> T.pack f <> ": Properties subsection '" <> a
+      <> "' comes before '" <> b
+      <> "' but the corresponding operations section comes after it"
+
+-- | Section names (no @-- *@ prefix) of real @-- *@ headers in the operations
+-- body (before @-- * Properties@), excluding "Internal helpers"/"Definitions".
+opsSections :: Text -> [Text]
+opsSections src =
+  [ secName l
+  | (prev, l) <- zip ls (drop 1 ls)
+  , "-- ---" `T.isPrefixOf` prev
+  , "-- * "  `T.isPrefixOf` l
+  , secName l `notElem` ["Internal helpers", "Definitions"]
+  ]
+  where
+    ls = takeWhile (\l -> not ("-- * Generators" `T.isPrefixOf` l)
+                       && not ("-- * Properties" `T.isPrefixOf` l))
+                   (bodyLines src)
+    secName = T.strip . T.drop 4
+
+-- | Section names (no @-- **@ prefix) of @-- **@ headers inside
+-- @-- * Properties@ in the body.
+propsSections :: Text -> [Text]
+propsSections src =
+  [ T.strip (T.drop 5 l)
+  | (prev, l) <- zip ls (drop 1 ls)
+  , "-- ---" `T.isPrefixOf` prev
+  , "-- ** "  `T.isPrefixOf` l
+  , T.strip (T.drop 5 l) `notElem` ["Internal helpers", "Definitions", "Helpers"]
+  ]
+  where
+    ls = dropWhile (not . ("-- * Properties" `T.isPrefixOf`)) (bodyLines src)
+
+-- | Number of leading @*@ characters after @"-- "@ in a section header.
+secDepth :: Text -> Int
+secDepth = T.length . T.takeWhile (== '*') . T.drop 3
+
+-- | Given a list of items in "declared order" and a list in "definition order",
+-- return the first adjacent pair @(a, b)@ where @a@ is declared before @b@ but
+-- defined after it. Items not found in the definition list are ignored.
+firstOutOfOrder :: [Text] -> [Text] -> Maybe (Text, Text)
+firstOutOfOrder declared defined =
+  let defPos      = zip defined [0 :: Int ..]
+      withPos     = [ (nm, p) | nm <- declared, Just p <- [lookup nm defPos] ]
+  in  case [ (a, b)
+           | (a, pa) : rest <- tails withPos
+           , (b, pb)        <- take 1 rest
+           , pa > pb
+           ] of
+        (pair : _) -> Just pair
+        []         -> Nothing
+
+-- | The lines of @src@ between @module@ and @) where@ (the export list).
+exportListLines :: Text -> [Text]
+exportListLines src =
+  takeWhile (not . (") where" `T.isPrefixOf`) . T.stripStart) $
+  drop 1 $
+  dropWhile (not . ("module " `T.isPrefixOf`)) (T.lines src)
+
+-- | The lines of @src@ after @) where@ (the module body).
+bodyLines :: Text -> [Text]
+bodyLines src =
+  drop 1 $
+  dropWhile (not . (") where" `T.isPrefixOf`) . T.stripStart) (T.lines src)
+
+-- | Extract exported names from the module header, in source order.
+-- Lines of the form @, <ident>@ are entries; comment lines and blank lines
+-- are skipped.
+extractExports :: Text -> [Text]
+extractExports src =
+  [ nm
+  | l <- exportListLines src
+  , Just nm <- [exportName l]
+  ]
+  where
+    exportName l =
+      case T.stripStart l of
+        t | Just t' <- T.stripPrefix ", " t
+          -> let nm = T.takeWhile isIdentChar t'
+             in if T.null nm then Nothing else Just nm
+        _ -> Nothing
+
+-- | Extract all @-- *@-family section headers from the export list, stripping
+-- leading whitespace. The @*@ count is preserved so @-- *@, @-- **@, and
+-- @-- ***@ remain distinct.
+extractExportSections :: Text -> [Text]
+extractExportSections src =
+  [ T.stripStart l
+  | l <- exportListLines src
+  , "-- *" `T.isPrefixOf` T.stripStart l
+  ]
+
+-- | Extract real @-- *@-family section headers from the file body, in order.
+-- A real header is a @-- *@ line immediately preceded by a @-- ---@ separator.
+-- "Internal helpers" and "Definitions" subsections appear in the operations
+-- half of the file and have no export-list counterpart; they are excluded.
+extractBodySections :: Text -> [Text]
+extractBodySections src =
+  [ l
+  | (prev, l) <- zip ls (drop 1 ls)
+  , "-- ---" `T.isPrefixOf` prev
+  , "-- *"   `T.isPrefixOf` l
+  , not (secName l `elem` ["Internal helpers", "Definitions"])
+  ]
+  where
+    ls = bodyLines src
+    secName = T.strip . T.dropWhile (== '*') . T.drop 3
+
+-- | Extract top-level definition names from a Haskell source file, in order.
+-- Only the first occurrence of each name is kept (multi-equation definitions).
+extractDefs :: Text -> [Text]
+extractDefs src = dedupe $ concatMap defName (bodyLines src)
+  where
+    defName l
+      | T.null l                           = []
+      | isIndented l                       = []
+      | "--" `T.isPrefixOf` T.stripStart l = []
+      | otherwise =
+          let nm = T.takeWhile isIdentChar l
+          in if T.null nm then [] else [nm]
+    isIndented l = case T.uncons l of
+      Just (c, _) -> c == ' ' || c == '\t'
+      Nothing     -> False
+    dedupe = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
 ------------------------------------------------------------------------
 -- Source extraction
