@@ -429,6 +429,7 @@ module What4.Domains.BV.Strides
   -- * Reduced product with bitwise
   -- $reduced
   , refineByBits
+  , refineByBitsPrecise
   , reduceStep
   , reduce
   -- * Generators
@@ -671,7 +672,9 @@ module What4.Domains.BV.Strides
   , arcClipBitwiseMember
   , correct_refineByBits
   , refineByBitsShrinks
-  , refineByBitsDominatesRoundTripNonSelfWrap
+  , correct_refineByBitsPrecise
+  , refineByBitsPreciseShrinks
+  , refineByBitsPreciseDominatesRoundTripNonSelfWrap
   , correct_reduceStep
   , correct_reduce
   , reduceStepShrinks
@@ -1510,25 +1513,25 @@ leq :: Domain w -> Domain w -> Bool
 -- @Z\/2^w@ is @⟨2^v⟩@. We accept @a ⊆ b@ if /any/ of:
 --
 --   (1) /Equal/: @a == b@. Transitive on the nose.
---   (2) /Singleton/: @a@ is a single element and lies in @b@. Composes
---       with the others by membership transitivity.
---   (3) /Full b/, in three parts:
---         (3a) @b@ spans its full orbit (@n b + 1 == orbitLen b@);
---         (3b) /Coset/: @start a − start b ∈ ⟨stride b⟩@; and
---         (3c) /Subgroup/: @⟨stride a⟩ ⊆ ⟨stride b⟩@, i.e. @strideGcd b@
+--   (2) /Full b/, in three parts:
+--         (2a) @b@ spans its full orbit (@n b + 1 == orbitLen b@);
+--         (2b) /Coset/: @start a − start b ∈ ⟨stride b⟩@; and
+--         (2c) /Subgroup/: @⟨stride a⟩ ⊆ ⟨stride b⟩@, i.e. @strideGcd b@
 --              divides @stride a@.
 --       If both @b@ and @c@ are full, the coset and subgroup containments
 --       chain: @⟨stride a⟩ ⊆ ⟨stride b⟩ ⊆ ⟨stride c⟩@, etc.
+--
+-- A singleton-on-orbit fast path would also be sound and would catch
+-- additional cases, but membership testing is /O(w log w)/ ('member'); we
+-- keep that path in 'leqPrecise' instead so 'leq' stays /O(w)/.
 leq a b = assert (proper a) $ assert (proper b) $
   equal               -- (1)
-  || singletonInB     -- (2)
-  || (bIsFull         -- (3a)
-        && cosetMatches      -- (3b)
-        && subgroupContained -- (3c)
+  || (bIsFull         -- (2a)
+        && cosetMatches      -- (2b)
+        && subgroupContained -- (2c)
      )
   where
     equal             = a == b
-    singletonInB      = n a == 0 && member b (start a)
     bIsFull           = n b + 1 == orbitLen b
     cosetMatches      = wrapOffset b (start a) `mod` strideGcd b == 0
     subgroupContained = stride a `mod` strideGcd b == 0
@@ -3668,7 +3671,7 @@ lcmNat :: Natural -> Natural -> Natural
 lcmNat x y = (x `Prelude.div` Prelude.gcd x y) * y
 {-# INLINE lcmNat #-}
 
--- | /O(w log w)/. Restrict a stride-1 progression @arith@ to the values
+-- | /O(w)/. Restrict a stride-1 progression @arith@ to the values
 -- congruent to @s@ modulo @d@: i.e., produce the stride-@d@ progression
 -- whose elements are exactly @arith ∩ (s + d·Z)@.
 --
@@ -4643,9 +4646,33 @@ refineByBits ::
   Domain w ->
   B.Domain w ->
   Maybe (Domain w)
-refineByBits w s b = do
+refineByBits = refineByBitsBy compactify
+
+-- | /O(w^2)/. Like 'refineByBits', but uses 'compactifyPrecise' (and
+-- thus 'leqExact') for the post-arc-clip merge. Catches the
+-- complementary-singleton case described in 'arcClipBitwise' that
+-- 'refineByBits' misses, at the cost of a higher per-call complexity.
+refineByBitsPrecise ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  B.Domain w ->
+  Maybe (Domain w)
+refineByBitsPrecise = refineByBitsBy compactifyPrecise
+
+-- | The shared structure of 'refineByBits' and 'refineByBitsPrecise',
+-- parameterized over the compactify variant used inside 'arcClipBitwise'.
+refineByBitsBy ::
+  (1 <= w) =>
+  -- | 'compactify' or 'compactifyPrecise'
+  (NatRepr w -> [Domain w] -> [Domain w]) ->
+  NatRepr w ->
+  Domain w ->
+  B.Domain w ->
+  Maybe (Domain w)
+refineByBitsBy compactifyOp w s b = do
   l <- liftForcedBits w s zo
-  arcClipBitwise w l (blo, bhi)
+  arcClipBitwise compactifyOp w l (blo, bhi)
   where
     zo = knownZerosOnesNat b
     (bloI, bhiI) = B.bitbounds b
@@ -4758,18 +4785,25 @@ liftForcedBits w s (zeros, ones)
                              then Nothing  -- only i=0 available, parity wrong
                              else go (mk w newStart newStride newN)
 
--- | /O(w log w)/. Intersect a progression with the unsigned arc
--- @[blo, bhi]@ (the unsigned bounds of a 'B.Domain'). Above the
--- contiguous run of forced bits 'liftForcedBits' consumes, scattered
--- forced bits aren\'t representable as a stride lift, but they still
--- show up in @b@\'s numeric bounds — e.g. @b@ with bit 1 forced and bit
--- 0 free at @w = 2@ has @(blo, bhi) = (2, 3)@.
+-- | /O(w log w)/, with the supplied 'compactify'-style merger. Intersect
+-- a progression with the unsigned arc @[blo, bhi]@ (the unsigned bounds
+-- of a 'B.Domain'). Above the contiguous run of forced bits
+-- 'liftForcedBits' consumes, scattered forced bits aren\'t representable
+-- as a stride lift, but they still show up in @b@\'s numeric bounds —
+-- e.g. @b@ with bit 1 forced and bit 0 free at @w = 2@ has
+-- @(blo, bhi) = (2, 3)@.
 --
 -- 'ssplit's the input at the unsigned pole and runs 'arcMeetClosed' on
--- each non-wrap piece, then 'compactify's. When the result splits into
--- multiple progressions (because the input wraps mod @2^w@ and the arc
--- carves out two disjoint pieces), the input is returned unchanged
--- rather than over-approximating with a single-progression cover.
+-- each non-wrap piece, then folds with the supplied merger. Pass
+-- 'compactify' for /O(w log w)/ overall, or 'compactifyPrecise' for an
+-- /O(w^2)/ variant that catches one extra merge — two complementary
+-- singletons whose union is a stride-@(2^w − 1)@ progression — that the
+-- 'leq'-based 'compactify' misses since it lacks the singleton-on-orbit
+-- containment check (kept out of 'leq' to preserve its /O(w)/ bound).
+-- When the result splits into multiple progressions (because the input
+-- wraps mod @2^w@ and the arc carves out two disjoint pieces), the input
+-- is returned unchanged rather than over-approximating with a
+-- single-progression cover.
 --
 -- /Skipped/ on self-wrapping inputs: 'ssplit' over-approximates them to
 -- the full coset, which would break the subset guarantee. The caller
@@ -4780,12 +4814,14 @@ liftForcedBits w s (zeros, ones)
 -- preserved ('arcClipBitwiseMember').
 arcClipBitwise ::
   (1 <= w) =>
+  -- | 'compactify' or 'compactifyPrecise'
+  (NatRepr w -> [Domain w] -> [Domain w]) ->
   NatRepr w ->
   Domain w ->
   -- | @(blo, bhi)@: an unsigned arc with @blo <= bhi <= mask@.
   (Natural, Natural) ->
   Maybe (Domain w)
-arcClipBitwise w l (blo, bhi)
+arcClipBitwise compactifyOp w l (blo, bhi)
   -- 'ssplit' on a self-wrapping orbit over-approximates to the full
   -- coset — fine for over-approximating ops, but here the result would
   -- no longer be a subset of @l@. Skip the arc clip in that case.
@@ -4794,7 +4830,7 @@ arcClipBitwise w l (blo, bhi)
       let arc = mk w blo 1 (bhi - blo)
           pieces = [ p | li <- ssplit w l
                        , Just p <- [arcMeetClosed w li arc] ]
-      in case compactify w pieces of
+      in case compactifyOp w pieces of
            []  -> Nothing
            [c] -> Just c
            -- Multiple pieces means @l@ wraps mod 2^w and @[blo, bhi]@
@@ -7182,7 +7218,7 @@ arcClipBitwiseShrinks w s lo hi =
     let lo' = lo .&. mask s
         hi' = hi .&. mask s
     in lo' <= hi' ==>
-       case arcClipBitwise w s (lo', hi') of
+       case arcClipBitwise compactify w s (lo', hi') of
          Nothing -> property True
          Just s' -> property (leqExact s' s)
 
@@ -7201,7 +7237,7 @@ arcClipBitwiseMember w s lo hi x =
        member s x' ==>
        Prelude.not (isSelfWrapping s) ==>
        lo' <= x' && x' <= hi' ==>
-         case arcClipBitwise w s (lo', hi') of
+         case arcClipBitwise compactify w s (lo', hi') of
            Nothing -> property False
            Just s' -> property (member s' x')
 
@@ -7228,18 +7264,47 @@ refineByBitsShrinks _w s b =
       Nothing -> property True
       Just s' -> property (leqExact s' s)
 
--- | 'refineByBits' is at least as precise as the round-trip
+-- | 'refineByBitsPrecise' is sound: any @x@ in both inputs is in the result
+-- (and the result is 'Nothing' only when no such @x@ exists).
+correct_refineByBitsPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Natural -> Property
+correct_refineByBitsPrecise w s b x =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    member s x ==> B.member b (toInteger x) ==>
+      case refineByBitsPrecise w s b of
+        Nothing -> property False
+        Just s' -> property (member s' x)
+
+-- | 'refineByBitsPrecise' shrinks: the result is contained in the input
+-- strides component (under 'leqExact').
+refineByBitsPreciseShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+refineByBitsPreciseShrinks _w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case refineByBitsPrecise _w s b of
+      Nothing -> property True
+      Just s' -> property (leqExact s' s)
+
+-- | 'refineByBitsPrecise' is at least as precise as the round-trip
 -- @pseudoMeet s (fromBitwise b)@ /on non-self-wrapping/ inputs.
 -- 'pseudoMeet' lacks the lower-bound axiom on wrapping operands, so the
 -- round-trip can return a result not contained in @s@; on self-wrapping
 -- inputs the comparison has no clear winner.
-refineByBitsDominatesRoundTripNonSelfWrap ::
+--
+-- The plain 'refineByBits' does /not/ satisfy this property: its
+-- 'compactify' merger uses 'leq', which lacks the singleton-on-orbit
+-- containment check, so two complementary singletons (like @{1}@ and
+-- @{0}@) fail to merge into the stride-@(2^w − 1)@ progression that
+-- the round-trip's 'pseudoMeet' produces.
+refineByBitsPreciseDominatesRoundTripNonSelfWrap ::
   (1 <= w) =>
   NatRepr w -> Domain w -> B.Domain w -> Property
-refineByBitsDominatesRoundTripNonSelfWrap w s b =
+refineByBitsPreciseDominatesRoundTripNonSelfWrap w s b =
   proper s ==> toInteger (mask s) == B.bvdMask b ==>
     Prelude.not (isSelfWrapping s) ==>
-      case (refineByBits w s b, fromBitwise w b >>= pseudoMeet w s) of
+      case (refineByBitsPrecise w s b, fromBitwise w b >>= pseudoMeet w s) of
         (Nothing, _)        -> property True
         (Just s', Nothing)  -> property (leqExact s' s)
         (Just s', Just rt)

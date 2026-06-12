@@ -309,10 +309,9 @@ member c v = onCoset /\ zext i <= c.n
 
 leq : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
 leq a b =
-  equal \/ singletonInB \/ (bIsFull /\ cosetMatches /\ subgroupContained)
+  equal \/ (bIsFull /\ cosetMatches /\ subgroupContained)
   where
     equal             = a == b
-    singletonInB      = a.n == 0 /\ member b a.start
     bIsFull           = b.n + 1 == orbitLen b
     cosetMatches      = wrapOffset b a.start % strideGcd b == 0
     subgroupContained = a.stride % strideGcd b == 0
@@ -1717,6 +1716,17 @@ refineByBits s b =
     Nothing -> Nothing
     Just l  -> arcClipBitwise l (b.lomask, b.himask)
 
+// Cryptol's `arcClipBitwise` already conservatively falls back to `l`
+// when both pieces survive, so it matches `refineByBits` (using the
+// `leq`-based `compactify`) rather than `refineByBitsPrecise`. This
+// stub is kept for naming parity with the Haskell, where the precise
+// variant uses `compactifyPrecise` (with `leqExact`) to catch one
+// extra merge case the `leq`-based path misses.
+refineByBitsPrecise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Maybe (Domain n)
+refineByBitsPrecise = refineByBits
+
 reduceStep :
   {n} (fin n, n >= 2) =>
   Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
@@ -3057,6 +3067,24 @@ refineByBitsShrinks s b =
       Nothing -> True
       Just s' -> leqExact s' s
 
+correct_refineByBitsPrecise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+correct_refineByBitsPrecise s b x =
+  proper s ==> member s x ==> Bits::mem b x ==>
+    case refineByBitsPrecise s b of
+      Nothing -> False
+      Just s' -> member s' x
+
+refineByBitsPreciseShrinks :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Property
+refineByBitsPreciseShrinks s b =
+  proper s ==>
+    case refineByBitsPrecise s b of
+      Nothing -> True
+      Just s' -> leqExact s' s
+
 correct_reduceStep :
   {n} (fin n, n >= 2) =>
   Domain n -> Bits::Dom n -> [n] -> Property
@@ -3113,14 +3141,20 @@ reduceConflictMeansEmpty s b x =
       Just _  -> True
       Nothing -> ~ (member s x /\ Bits::mem b x)
 
-// `refineByBits` is at least as precise as the round-trip
+// `refineByBitsPrecise` is at least as precise as the round-trip
 // `pseudoMeet s (fromBitwise b)` on non-self-wrapping inputs.
-refineByBitsDominatesRoundTripNonSelfWrap :
+//
+// The plain `refineByBits` does not satisfy this: its `compactify`
+// merger uses `leq`, which lacks the singleton-on-orbit containment
+// check, so two complementary singletons fail to merge into the
+// stride-`(2^w - 1)` progression that the round-trip's `pseudoMeet`
+// produces.
+refineByBitsPreciseDominatesRoundTripNonSelfWrap :
   {n} (fin n, n >= 2) =>
   Domain n -> Bits::Dom n -> Property
-refineByBitsDominatesRoundTripNonSelfWrap s b =
+refineByBitsPreciseDominatesRoundTripNonSelfWrap s b =
   proper s ==> ~ (isSelfWrapping s) ==>
-    case refineByBits s b of
+    case refineByBitsPrecise s b of
       Nothing -> True
       Just s' -> case pseudoMeet s (fromBitwise b) of
         Nothing -> leqExact s' s
