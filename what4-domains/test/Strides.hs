@@ -422,6 +422,9 @@ tests = TT.testGroup "Strides"
   , genTest "andPreciseDominatesAndFast" $
       do SW n <- genWidth
          S.andPreciseDominatesAndFast n <$> S.genDomain n <*> S.genDomain n
+  , genTest "xorFastDominatesIdentity" $
+      do SW n <- genWidth
+         S.xorFastDominatesIdentity n <$> S.genDomain n <*> S.genDomain n
 
   -- Concatenation, extension, selection, and truncation
   , genTest "correct_zero_ext" $

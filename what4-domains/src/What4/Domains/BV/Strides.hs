@@ -384,6 +384,7 @@ module What4.Domains.BV.Strides
   , orFast
   , or
   , orPrecise
+  , xorFast
   , xor
   -- * Concatenation, extension, selection, and truncation
   , zext
@@ -552,6 +553,7 @@ module What4.Domains.BV.Strides
   , warrenAndHiCorrect
   , operandRangeCorrect
   , andPreciseDominatesAndFast
+  , xorFastDominatesIdentity
   -- ** Concatenation, extension, selection, and truncation
   , correct_zero_ext
   , correct_sign_ext
@@ -2873,8 +2875,60 @@ or w a b = not w (and w (not w a) (not w b))
 orPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 orPrecise w a b = not w (andPrecise w (not w a) (not w b))
 
+-- | /O(w)/. The cheap bitwise-XOR kernel: a single 'forcedBits'-driven pass.
+-- See 'xor' for the default ('psplitOp2'-wrapped) variant.
+--
+-- == Examples
+--
+-- XOR of evens with evens stays in the evens coset (low bit pinned to 0):
+--
+-- >>> let evens = mk4 0 2 7
+-- >>> display (xorFast w4 evens evens)
+-- "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+xorFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+-- Per-bit XOR rule on 'forcedBits' @(zeros, ones)@:
+--
+--   * forced to @0@ if both operands force the bit to the same value
+--     (@(za .&. zb) | (oa .&. ob)@);
+--   * forced to @1@ if the operands force the bit to different values
+--     (@(za .&. ob) | (oa .&. zb)@);
+--   * otherwise free (free in /either/ operand → free in XOR).
+--
+-- Equivalently, a bit is forced in @x XOR y@ iff it is forced in /both/
+-- operands. The result stride is @2^k@ for the lowest free bit @k@; if every
+-- bit is forced, the result is the singleton @forcedOnes@.
+--
+-- The bit-pinning bounds give a sound upper bound @hi = m XOR forcedZeros@
+-- (every result bit not forced to @0@ may be @1@) and a lower bound
+-- @lo = forcedOnes@. These match what @liftBitwise2 B.xor@ would derive, but
+-- writing the kernel directly lets 'xor' wrap it through 'psplitOp2' for the
+-- same precision boost @and@\/@or@ get.
+xorFast w a b =
+  assert (proper a) $
+  assert (proper b) $
+  let !m              = mask a
+      !(za, oa)       = forcedBits a
+      !(zb, ob)       = forcedBits b
+      !forcedZeros    = (za Bits..&. zb) Bits..|. (oa Bits..&. ob)
+      !forcedOnes     = (za Bits..&. ob) Bits..|. (oa Bits..&. zb)
+      !forced         = forcedZeros Bits..|. forcedOnes
+      !free           = m `Bits.xor` forced
+  in if free == 0 then mk w forcedOnes 1 0
+     else
+       let !d       = lowestSetBit free
+           !hi      = m `Bits.xor` forcedZeros
+           !cosetLo = forcedOnes Bits..&. (d - 1)
+           !nSteps  = (hi - cosetLo) `divByPow2` d
+       in mk w cosetLo d nSteps
+
+-- | /O(w)/. Bitwise XOR. Wraps 'xorFast' through 'psplitOp2': each 'psplit'
+-- piece pins one more low bit than its operand, so XOR-ing the pieces and
+-- pseudo-joining can be tighter than the single 'xorFast' call. The
+-- min-by-size guard inside 'psplitOp2' keeps the raw call's result whenever
+-- it is at least as tight, so 'xor' is never larger than 'xorFast' by
+-- cardinality.
 xor :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-xor w = liftBitwise2 w B.xor
+xor w = psplitOp2 w (xorFast w)
 
 -- ------------------------------------------------------------------
 -- * Concatenation, extension, selection, and truncation
@@ -5519,6 +5573,23 @@ andPreciseDominatesAndFast ::
 andPreciseDominatesAndFast w a b =
   proper a ==> proper b ==>
     property (size (andPrecise w a b) <= size (andFast w a b))
+
+-- | The 'forcedBits'-based 'xorFast' is contained in (in particular, no
+-- larger than) the identity-based @(a | b) & ~(a & b)@ built from
+-- 'andFast'\/'orFast'\/'not'.
+--
+-- Direct check: the forced-bits picture for XOR is exactly what the identity
+-- yields after composing the per-bit AND/OR/NOT rules, but composing through
+-- intermediate progressions can lose the cross-bit coset structure. The
+-- direct kernel preserves every forced bit and the lowest-free-bit stride
+-- without going through 'mk'\\/'fromBitwise' twice.
+xorFastDominatesIdentity ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+xorFastDominatesIdentity w a b =
+  proper a ==> proper b ==>
+    property (leqExact (xorFast w a b) idXor)
+  where
+    idXor = andFast w (orFast w a b) (not w (andFast w a b))
 
 -- ------------------------------------------------------------------
 -- ** Concatenation, extension, selection, and truncation
