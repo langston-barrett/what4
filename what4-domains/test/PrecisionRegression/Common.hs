@@ -42,6 +42,8 @@ module PrecisionRegression.Common
   , cUdivSmtlib, cUremSmtlib, cSdivSmtlib, cSremSmtlib
   , cShl, cLshr, cAshr, cRol, cRor
   , cJoin, cMeet
+  , cAssumeUlt, cAssumeUle, cAssumeUgt, cAssumeUge
+  , cAssumeSlt, cAssumeSle, cAssumeSgt, cAssumeSge
     -- * Driver
   , domainTests
   ) where
@@ -326,6 +328,22 @@ cJoin xs ys = Set.fromList xs `Set.union` Set.fromList ys
 -- | Oracle for lattice 'meet': set intersection of value-sets.
 cMeet :: [Natural] -> [Natural] -> Set.Set Natural
 cMeet xs ys = Set.fromList xs `Set.intersection` Set.fromList ys
+
+-- | Oracle for @assumeOp a b@: @{ x ∈ γ(a) | ∃ y ∈ γ(b). x op y }@.
+cAssumeBy :: (Natural -> Natural -> Bool) -> [Natural] -> [Natural] -> Set.Set Natural
+cAssumeBy op xs ys = Set.fromList [ x | x <- xs, any (op x) ys ]
+
+cAssumeUlt, cAssumeUle, cAssumeUgt, cAssumeUge,
+ cAssumeSlt, cAssumeSle, cAssumeSgt, cAssumeSge ::
+  [Natural] -> [Natural] -> Set.Set Natural
+cAssumeUlt = cAssumeBy (<)
+cAssumeUle = cAssumeBy (<=)
+cAssumeUgt = cAssumeBy (>)
+cAssumeUge = cAssumeBy (>=)
+cAssumeSlt = cAssumeBy (\x y -> toSigned4 x <  toSigned4 y)
+cAssumeSle = cAssumeBy (\x y -> toSigned4 x <= toSigned4 y)
+cAssumeSgt = cAssumeBy (\x y -> toSigned4 x >  toSigned4 y)
+cAssumeSge = cAssumeBy (\x y -> toSigned4 x >= toSigned4 y)
 
 ------------------------------------------------------------------------
 -- CSV rendering

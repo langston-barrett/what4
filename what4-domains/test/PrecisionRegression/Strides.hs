@@ -59,6 +59,14 @@ results =
   , latticeResult stridesEnum "pseudoJoin" (S.pseudoJoin w4) cJoin
   , latticeResult stridesEnum "pseudoJoinPrecise" (S.pseudoJoinPrecise w4) cJoin
   , latticeResult stridesEnum "boundingBoxJoin" (S.boundingBoxJoin w4) cJoin
+  , latticeMaybeResult stridesEnum "assumeUlt" (S.assumeUlt w4) cAssumeUlt
+  , latticeMaybeResult stridesEnum "assumeUle" (S.assumeUle w4) cAssumeUle
+  , latticeMaybeResult stridesEnum "assumeUgt" (S.assumeUgt w4) cAssumeUgt
+  , latticeMaybeResult stridesEnum "assumeUge" (S.assumeUge w4) cAssumeUge
+  , latticeMaybeResult stridesEnum "assumeSlt" (S.assumeSlt w4) cAssumeSlt
+  , latticeMaybeResult stridesEnum "assumeSle" (S.assumeSle w4) cAssumeSle
+  , latticeMaybeResult stridesEnum "assumeSgt" (S.assumeSgt w4) cAssumeSgt
+  , latticeMaybeResult stridesEnum "assumeSge" (S.assumeSge w4) cAssumeSge
   ]
 
 csvPath :: FilePath

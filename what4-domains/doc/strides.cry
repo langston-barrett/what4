@@ -1418,6 +1418,160 @@ largestJust ma mb = case ma of
     Just b -> if size a >= size b then Just a else Just b
 
 // ------------------------------------------------------------------
+// * Branch-condition assumptions
+//
+// `assumeOp a b` returns a sound over-approximation of
+//
+//   { x ∈ γ(a) | ∃ y ∈ γ(b). x op y }
+//
+// Returns `Nothing` when this set is provably empty.
+
+assumeUlt : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeUlt a b =
+  if bhi == 0 \/ alo >= bhi then Nothing
+  else assumeUnsignedRange a 0 (bhi - 1)
+  where
+    (alo, _ahi) = Arith::ubounds (toArith a)
+    (_blo, bhi) = Arith::ubounds (toArith b)
+
+assumeUle : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeUle a b =
+  if alo > bhi then Nothing
+  else assumeUnsignedRange a 0 bhi
+  where
+    (alo, _ahi) = Arith::ubounds (toArith a)
+    (_blo, bhi) = Arith::ubounds (toArith b)
+
+assumeUgt : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeUgt a b =
+  if blo == ~ 0 \/ ahi <= blo then Nothing
+  else assumeUnsignedRange a (blo + 1) (~ 0)
+  where
+    (_alo, ahi) = Arith::ubounds (toArith a)
+    (blo, _bhi) = Arith::ubounds (toArith b)
+
+assumeUge : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeUge a b =
+  if ahi < blo then Nothing
+  else assumeUnsignedRange a blo (~ 0)
+  where
+    (_alo, ahi) = Arith::ubounds (toArith a)
+    (blo, _bhi) = Arith::ubounds (toArith b)
+
+// Refine `a` by intersecting with the unsigned range `[lo, hi]`.
+assumeUnsignedRange :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> [n] -> Maybe (Domain n)
+assumeUnsignedRange a lo hi = pseudoMeet a (fromArith (Arith::range lo hi))
+
+// Sign of a sign-coherent piece (a piece of `signPieces`).
+enum Sign = Pos | Neg
+
+pieceSign : {n} (fin n, n >= 2) => Domain n -> Sign
+pieceSign c = if c.start @ 0 then Neg else Pos
+
+assumeSlt : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeSlt = assumeSignedBy sltCase
+  where
+    sltCase ai bj sa sb = case sa of
+      Pos -> case sb of
+        Pos -> assumeUlt ai bj
+        Neg -> Nothing
+      Neg -> case sb of
+        Pos -> Just ai
+        Neg -> assumeUlt ai bj
+
+assumeSle : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeSle = assumeSignedBy sleCase
+  where
+    sleCase ai bj sa sb = case sa of
+      Pos -> case sb of
+        Pos -> assumeUle ai bj
+        Neg -> Nothing
+      Neg -> case sb of
+        Pos -> Just ai
+        Neg -> assumeUle ai bj
+
+assumeSgt : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeSgt = assumeSignedBy sgtCase
+  where
+    sgtCase ai bj sa sb = case sa of
+      Pos -> case sb of
+        Pos -> assumeUgt ai bj
+        Neg -> Just ai
+      Neg -> case sb of
+        Pos -> Nothing
+        Neg -> assumeUgt ai bj
+
+assumeSge : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeSge = assumeSignedBy sgeCase
+  where
+    sgeCase ai bj sa sb = case sa of
+      Pos -> case sb of
+        Pos -> assumeUge ai bj
+        Neg -> Just ai
+      Neg -> case sb of
+        Pos -> Nothing
+        Neg -> assumeUge ai bj
+
+// Signed-assume driver: split both operands at the sign boundary
+// (giving up to 4 pieces each), dispatch per sign-pair, accumulate
+// contributions per `aᵢ` with `pseudoJoin`, clamp by `aᵢ`, then
+// `pseudoJoin` across `aᵢ` and clamp by `a` itself.
+assumeSignedBy :
+  {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Sign -> Sign -> Maybe (Domain n)) ->
+  Domain n -> Domain n -> Maybe (Domain n)
+assumeSignedBy perPair a b =
+  case finalRaw of
+    Nothing -> Nothing
+    Just c -> Just (if leqExact c a then c else a)
+  where
+    aPieces : [4](Maybe (Domain n))
+    aPieces = signPieces a
+    bPieces : [4](Maybe (Domain n))
+    bPieces = signPieces b
+    perAi : [4](Maybe (Domain n))
+    perAi = [ combinePieceContribsMaybe ai
+                [ pairContrib perPair ai bj | bj <- bPieces ]
+            | ai <- aPieces
+            ]
+    finalRaw : Maybe (Domain n)
+    finalRaw = foldl pseudoJoinMaybe Nothing perAi
+
+pairContrib :
+  {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Sign -> Sign -> Maybe (Domain n)) ->
+  Maybe (Domain n) -> Maybe (Domain n) -> Maybe (Domain n)
+pairContrib perPair mai mbj = case mai of
+  Nothing -> Nothing
+  Just a' -> case mbj of
+    Nothing -> Nothing
+    Just b' -> perPair a' b' (pieceSign a') (pieceSign b')
+
+// Combine the `[4](Maybe (Domain n))` contributions for a single
+// `aᵢ` (`Nothing` when `aᵢ` itself is absent), folding with
+// `pseudoJoin` and clamping by `aᵢ`.
+combinePieceContribsMaybe :
+  {n} (fin n, n >= 2) =>
+  Maybe (Domain n) -> [4](Maybe (Domain n)) -> Maybe (Domain n)
+combinePieceContribsMaybe mai contribs = case mai of
+  Nothing -> Nothing
+  Just ai ->
+    case foldl pseudoJoinMaybe Nothing contribs of
+      Nothing -> Nothing
+      Just c  -> Just (if leqExact c ai then c else ai)
+
+pseudoJoinMaybe :
+  {n} (fin n, n >= 2) =>
+  Maybe (Domain n) -> Maybe (Domain n) -> Maybe (Domain n)
+pseudoJoinMaybe ma mb = case ma of
+  Nothing -> mb
+  Just a -> case mb of
+    Nothing -> Just a
+    Just b -> Just (pseudoJoin a b)
+
+// ------------------------------------------------------------------
 // * Reduced product with bitwise
 
 knownZerosOnesNat : {n} (fin n) => Bits::Dom n -> ([n], [n])
@@ -2896,6 +3050,236 @@ trimSelfWrapIdempotent : {n} (fin n, n >= 2) => Domain n -> Property
 trimSelfWrapIdempotent a =
   proper a ==> trimSelfWrap (trimSelfWrap a) == trimSelfWrap a
 
+// ------------------------------------------------------------------
+// ** Branch-condition assumptions
+
+correct_assumeUlt :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeUlt a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x < y ==>
+    case assumeUlt a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeUle :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeUle a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x <= y ==>
+    case assumeUle a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeUgt :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeUgt a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x > y ==>
+    case assumeUgt a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeUge :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeUge a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x >= y ==>
+    case assumeUge a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeSlt :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeSlt a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x <$ y ==>
+    case assumeSlt a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeSle :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeSle a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x <=$ y ==>
+    case assumeSle a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeSgt :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeSgt a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x >$ y ==>
+    case assumeSgt a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeSge :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeSge a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x >=$ y ==>
+    case assumeSge a b of
+      Just c -> member c x
+      Nothing -> False
+
+assumeUltShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeUltShrinks a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeUlt a b of
+        Nothing -> True
+        Just c  -> leqExact c a
+
+assumeUleShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeUleShrinks a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeUle a b of
+        Nothing -> True
+        Just c  -> leqExact c a
+
+assumeUgtShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeUgtShrinks a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeUgt a b of
+        Nothing -> True
+        Just c  -> leqExact c a
+
+assumeUgeShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeUgeShrinks a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeUge a b of
+        Nothing -> True
+        Just c  -> leqExact c a
+
+assumeSltShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSltShrinks a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeSlt a b of
+        Nothing -> True
+        Just c  -> leqExact c a
+
+assumeSleShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSleShrinks a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeSle a b of
+        Nothing -> True
+        Just c  -> leqExact c a
+
+assumeSgtShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSgtShrinks a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeSgt a b of
+        Nothing -> True
+        Just c  -> leqExact c a
+
+assumeSgeShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSgeShrinks a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeSge a b of
+        Nothing -> True
+        Just c  -> leqExact c a
+
+// Equality of `Maybe (Domain n)` via `leqExact` on the `Just` payloads.
+eqMaybeAssume :
+  {n} (fin n, n >= 2) => Maybe (Domain n) -> Maybe (Domain n) -> Bit
+eqMaybeAssume mx my = case mx of
+  Nothing -> case my of
+    Nothing -> True
+    Just _  -> False
+  Just x -> case my of
+    Nothing -> False
+    Just y  -> leqExact x y /\ leqExact y x
+
+assumeUltIdempotent :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeUltIdempotent a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeUlt a b of
+        Nothing -> True
+        Just c  -> eqMaybeAssume (assumeUlt c b) (Just c)
+
+assumeUleIdempotent :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeUleIdempotent a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeUle a b of
+        Nothing -> True
+        Just c  -> eqMaybeAssume (assumeUle c b) (Just c)
+
+assumeUgtIdempotent :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeUgtIdempotent a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeUgt a b of
+        Nothing -> True
+        Just c  -> eqMaybeAssume (assumeUgt c b) (Just c)
+
+assumeUgeIdempotent :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeUgeIdempotent a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeUge a b of
+        Nothing -> True
+        Just c  -> eqMaybeAssume (assumeUge c b) (Just c)
+
+assumeSltIdempotent :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSltIdempotent a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeSlt a b of
+        Nothing -> True
+        Just c  -> eqMaybeAssume (assumeSlt c b) (Just c)
+
+assumeSleIdempotent :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSleIdempotent a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeSle a b of
+        Nothing -> True
+        Just c  -> eqMaybeAssume (assumeSle c b) (Just c)
+
+assumeSgtIdempotent :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSgtIdempotent a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeSgt a b of
+        Nothing -> True
+        Just c  -> eqMaybeAssume (assumeSgt c b) (Just c)
+
+assumeSgeIdempotent :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSgeIdempotent a b =
+  proper a ==> proper b ==>
+    ~ (wraps a) ==> ~ (wraps b) ==>
+      case assumeSge a b of
+        Nothing -> True
+        Just c  -> eqMaybeAssume (assumeSge c b) (Just c)
+
 
 
 // Properties going through 'pseudoMeetStrides' unfold both 'solveLinearDiophantine'
@@ -2926,6 +3310,34 @@ property p_forcedBitsMember              = forcedBitsMember`{4}
 // property p_refineByBitsShrinks      = refineByBitsShrinks`{4}
 // property p_correct_reduceStep       = correct_reduceStep`{4}
 // property p_reduceStepShrinks        = reduceStepShrinks`{4}
+
+// Assume properties go through `pseudoMeet`, which inherits the same
+// `solveLinearDiophantine` unfolding cost. Verified by random testing
+// (Cryptol's `:check`) and by Hedgehog/QuickCheck on the Haskell side.
+// property p_correct_assumeUlt        = correct_assumeUlt`{4}
+// property p_correct_assumeUle        = correct_assumeUle`{4}
+// property p_correct_assumeUgt        = correct_assumeUgt`{4}
+// property p_correct_assumeUge        = correct_assumeUge`{4}
+// property p_correct_assumeSlt        = correct_assumeSlt`{4}
+// property p_correct_assumeSle        = correct_assumeSle`{4}
+// property p_correct_assumeSgt        = correct_assumeSgt`{4}
+// property p_correct_assumeSge        = correct_assumeSge`{4}
+// property p_assumeUltShrinks         = assumeUltShrinks`{4}
+// property p_assumeUleShrinks         = assumeUleShrinks`{4}
+// property p_assumeUgtShrinks         = assumeUgtShrinks`{4}
+// property p_assumeUgeShrinks         = assumeUgeShrinks`{4}
+// property p_assumeSltShrinks         = assumeSltShrinks`{4}
+// property p_assumeSleShrinks         = assumeSleShrinks`{4}
+// property p_assumeSgtShrinks         = assumeSgtShrinks`{4}
+// property p_assumeSgeShrinks         = assumeSgeShrinks`{4}
+// property p_assumeUltIdempotent      = assumeUltIdempotent`{4}
+// property p_assumeUleIdempotent      = assumeUleIdempotent`{4}
+// property p_assumeUgtIdempotent      = assumeUgtIdempotent`{4}
+// property p_assumeUgeIdempotent      = assumeUgeIdempotent`{4}
+// property p_assumeSltIdempotent      = assumeSltIdempotent`{4}
+// property p_assumeSleIdempotent      = assumeSleIdempotent`{4}
+// property p_assumeSgtIdempotent      = assumeSgtIdempotent`{4}
+// property p_assumeSgeIdempotent      = assumeSgeIdempotent`{4}
 
 property p_correct_pseudoJoin              = correct_pseudoJoin`{4}
 // This precise join soundness lemma is materially slower than the surrounding

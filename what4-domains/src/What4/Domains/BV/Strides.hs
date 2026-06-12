@@ -415,6 +415,15 @@ module What4.Domains.BV.Strides
   , pseudoJoinPrecise
   , boundingBoxJoin
   , exactJoin
+  -- * Branch-condition assumptions
+  , assumeUlt
+  , assumeUle
+  , assumeUgt
+  , assumeUge
+  , assumeSlt
+  , assumeSle
+  , assumeSgt
+  , assumeSge
   -- * Reduced product with bitwise
   -- $reduced
   , refineByBits
@@ -625,6 +634,31 @@ module What4.Domains.BV.Strides
   , exactJoinAssociative
   -- *** Compactification
   , correct_compactify
+  -- ** Branch-condition assumptions
+  , correct_assumeUlt
+  , correct_assumeUle
+  , correct_assumeUgt
+  , correct_assumeUge
+  , correct_assumeSlt
+  , correct_assumeSle
+  , correct_assumeSgt
+  , correct_assumeSge
+  , assumeUltShrinks
+  , assumeUleShrinks
+  , assumeUgtShrinks
+  , assumeUgeShrinks
+  , assumeSltShrinks
+  , assumeSleShrinks
+  , assumeSgtShrinks
+  , assumeSgeShrinks
+  , assumeUltIdempotent
+  , assumeUleIdempotent
+  , assumeUgtIdempotent
+  , assumeUgeIdempotent
+  , assumeSltIdempotent
+  , assumeSleIdempotent
+  , assumeSgtIdempotent
+  , assumeSgeIdempotent
   -- ** Reduced product with bitwise
   , knownZerosOnesNatDisjoint
   , knownZerosOnesNatMember
@@ -4101,6 +4135,216 @@ intersectionSize w c1 c2 =
   in min raw (min (size c1) (size c2))
 
 -- ------------------------------------------------------------------
+-- * Branch-condition assumptions
+
+-- $assume
+--
+-- The 'assumeUlt', 'assumeUle', 'assumeUgt', 'assumeUge', 'assumeSlt',
+-- 'assumeSle', 'assumeSgt', and 'assumeSge' operations refine the first
+-- operand's progression by a comparison constraint against the second:
+-- @assumeOp w a b@ returns a sound over-approximation of
+--
+-- @
+-- { x ∈ γ(a) | ∃ y ∈ γ(b). x \`op\` y }
+-- @
+--
+-- where @op@ is the corresponding (unsigned or signed) bitvector
+-- comparison. Returns 'Nothing' when this set is provably empty (the
+-- branch is infeasible). When the result is @Just c@, every value in
+-- @γ(a)@ that satisfies the constraint with /some/ value in @γ(b)@ is in
+-- @γ(c)@; @c@ may also include values not in @γ(a)@ (it is a sound
+-- over-approximation, not a strict subset).
+--
+-- These are the standard transfer functions for branch conditions in
+-- abstract interpretation: @if (x < y) then ... else ...@ refines the
+-- abstract value of @x@ on the @then@ branch via 'assumeUlt', and on the
+-- @else@ branch via 'assumeUge'.
+--
+-- Implemented by intersecting @a@ with the strided lift of an
+-- 'A.Domain' range derived from @b@'s ('A.ubounds' or 'A.sbounds')
+-- bounds:
+--
+--   * 'assumeUlt' / 'assumeUgt': constrain @x@ by @b@'s unsigned max\/min,
+--     respectively, narrowed by one (strict).
+--   * 'assumeUle' / 'assumeUge': constrain @x@ by @b@'s unsigned max\/min
+--     (non-strict).
+--   * 'assumeSlt' / 'assumeSle' / 'assumeSgt' / 'assumeSge': same, but
+--     against signed bounds; the resulting unsigned range can wrap mod
+--     @2^w@ when the signed bound straddles the sign boundary.
+
+-- | /O(w^2)/. Refine @a@ by the assumption @x < y@ (unsigned),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeUlt ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeUlt w a b
+  | bhi == 0  = Nothing  -- y < bhi == 0 is impossible
+  | alo >= bhi = Nothing  -- min(a) >= max(b) so x >= y always
+  | otherwise = assumeUnsignedRange w a 0 (bhi - 1)
+  where
+    (alo, _ahi) = A.ubounds (toArith a)
+    (_blo, bhi) = A.ubounds (toArith b)
+
+-- | /O(w^2)/. Refine @a@ by the assumption @x <= y@ (unsigned),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeUle ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeUle w a b
+  | alo > bhi = Nothing
+  | otherwise = assumeUnsignedRange w a 0 bhi
+  where
+    (alo, _ahi) = A.ubounds (toArith a)
+    (_blo, bhi) = A.ubounds (toArith b)
+
+-- | /O(w^2)/. Refine @a@ by the assumption @x > y@ (unsigned),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeUgt ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeUgt w a b
+  | blo == toInteger (mask a) = Nothing  -- x > 2^w - 1 impossible
+  | ahi <= blo = Nothing
+  | otherwise = assumeUnsignedRange w a (blo + 1) (toInteger (mask a))
+  where
+    (_alo, ahi) = A.ubounds (toArith a)
+    (blo, _bhi) = A.ubounds (toArith b)
+
+-- | /O(w^2)/. Refine @a@ by the assumption @x >= y@ (unsigned),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeUge ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeUge w a b
+  | ahi < blo = Nothing
+  | otherwise = assumeUnsignedRange w a blo (toInteger (mask a))
+  where
+    (_alo, ahi) = A.ubounds (toArith a)
+    (blo, _bhi) = A.ubounds (toArith b)
+
+-- | /O(w^2)/. Refine @a@ by the assumption @x < y@ (signed),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeSlt ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSlt w = assumeSignedBy w sltCase
+  where
+    -- (sign aᵢ, sign bⱼ) → contribution of @aᵢ@ to @{x ∈ aᵢ | ∃y ∈ bⱼ. x_s < y_s}@
+    sltCase ai bj sa sb = case (sa, sb) of
+      (Pos, Pos) -> assumeUlt w ai bj  -- both non-negative: signed = unsigned
+      (Neg, Neg) -> assumeUlt w ai bj  -- both negative: order agrees with unsigned
+      (Pos, Neg) -> Nothing            -- x ≥ 0 > y: always false
+      (Neg, Pos) -> Just ai            -- x < 0 ≤ y: always true
+
+-- | /O(w^2)/. Refine @a@ by the assumption @x <= y@ (signed),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeSle ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSle w = assumeSignedBy w sleCase
+  where
+    sleCase ai bj sa sb = case (sa, sb) of
+      (Pos, Pos) -> assumeUle w ai bj
+      (Neg, Neg) -> assumeUle w ai bj
+      (Pos, Neg) -> Nothing
+      (Neg, Pos) -> Just ai
+
+-- | /O(w^2)/. Refine @a@ by the assumption @x > y@ (signed),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeSgt ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSgt w = assumeSignedBy w sgtCase
+  where
+    sgtCase ai bj sa sb = case (sa, sb) of
+      (Pos, Pos) -> assumeUgt w ai bj
+      (Neg, Neg) -> assumeUgt w ai bj
+      (Pos, Neg) -> Just ai            -- x ≥ 0 > y: always true
+      (Neg, Pos) -> Nothing
+
+-- | /O(w^2)/. Refine @a@ by the assumption @x >= y@ (signed),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeSge ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSge w = assumeSignedBy w sgeCase
+  where
+    sgeCase ai bj sa sb = case (sa, sb) of
+      (Pos, Pos) -> assumeUge w ai bj
+      (Neg, Neg) -> assumeUge w ai bj
+      (Pos, Neg) -> Just ai
+      (Neg, Pos) -> Nothing
+
+-- | Sign of a sign-coherent piece (a piece of 'signPieces', which is
+-- non-wrap-mod-@2^w@ and lies entirely in either the non-negative or the
+-- negative signed half).
+data Sign = Pos | Neg
+  deriving (Eq, Show)
+
+-- | /O(w)/. Sign of a sign-coherent piece. Precondition: @c@ is a piece of
+-- 'signPieces' (so its 'start' fully determines its sign half).
+pieceSign :: NatRepr w -> Domain w -> Sign
+pieceSign w c
+  | start c < halfR = Pos
+  | otherwise       = Neg
+  where halfR = 1 `Bits.shiftL` (NR.widthVal w - 1)
+
+-- | /O(w^2)/. Refine @a@ by intersecting with the unsigned range @[lo, hi]@,
+-- where @0 <= lo <= hi <= 2^w - 1@. Returns 'Nothing' if the intersection is
+-- provably empty.
+assumeUnsignedRange ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Integer -> Integer -> Maybe (Domain w)
+assumeUnsignedRange w a lo hi =
+  case fromArith w (A.range w lo hi) of
+    Nothing -> Nothing
+    Just r  -> pseudoMeet w a r
+
+-- | Shared driver for 'assumeSlt', 'assumeSle', 'assumeSgt', 'assumeSge'.
+-- Splits both operands at the sign boundary with 'signPieces', dispatches
+-- per sign-pair to the supplied case analysis, and joins the surviving
+-- contributions with 'pseudoJoin'.
+--
+-- For each piece @aᵢ@ of @a@, contributions from different @bⱼ@'s are
+-- joined; if any contribution covers @aᵢ@ exactly, that piece is taken
+-- whole (this happens for the cross-sign always-true cases). Otherwise
+-- the pieces are joined across all @aᵢ@. This preserves @result ⊑ a@
+-- piecewise (each contribution is a subset of its @aᵢ@) and
+-- 'compactify' merges adjacent pieces when possible.
+assumeSignedBy ::
+  (1 <= w) =>
+  NatRepr w ->
+  -- | per-pair case analysis: @ai bj signOf-ai signOf-bj -> contribution of @ai@@
+  (Domain w -> Domain w -> Sign -> Sign -> Maybe (Domain w)) ->
+  Domain w -> Domain w -> Maybe (Domain w)
+assumeSignedBy w perPair a b =
+  case compactify w pieces of
+    []     -> Nothing
+    [c]    -> Just (clampToA c)
+    (c:cs) -> Just (clampToA (List.foldl' (pseudoJoin w) c cs))
+  where
+    aPieces = signPieces w a
+    bPieces = signPieces w b
+    -- For each aᵢ, fold the contributions from all bⱼ via pseudoJoin and
+    -- clamp by aᵢ itself: every contribution is already a subset of aᵢ,
+    -- so any join overshoot can be safely capped.
+    pieces = [ ci'
+             | ai <- aPieces
+             , let contribs = [ c
+                              | bj <- bPieces
+                              , Just c <- [perPair ai bj (pieceSign w ai) (pieceSign w bj)]
+                              ]
+             , Just ci' <- [combinePieceContribs w ai contribs]
+             ]
+    -- 'pseudoJoin' across pieces from different sign halves can overshoot
+    -- @a@; clamp the final union by @a@ itself. (Each piece is already
+    -- contained in some piece of @a@, so the true union is @⊆ a@.)
+    clampToA c = if leqExact c a then c else a
+
+-- | Combine per-piece contributions for a single @aᵢ@: join them with
+-- 'pseudoJoin', then clamp by @aᵢ@ to preserve the subset invariant
+-- (each contribution is already @⊑ aᵢ@, but 'pseudoJoin' may overshoot).
+combinePieceContribs ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> [Domain w] -> Maybe (Domain w)
+combinePieceContribs _w _ai []     = Nothing
+combinePieceContribs w  ai  (c:cs) =
+  let joined = List.foldl' (pseudoJoin w) c cs
+  in Just (if leqExact joined ai then joined else ai)
+
+-- ------------------------------------------------------------------
 -- * Reduced product with bitwise
 
 -- $reduced
@@ -6337,6 +6581,315 @@ correct_compactify w cs =
       []     -> True
       (c:cs') -> Prelude.and [ mask c == mask c' | c' <- cs' ]
     wrapsMod c = start c + n c * stride c > mask c
+
+-- ------------------------------------------------------------------
+-- ** Branch-condition assumptions
+
+-- | 'assumeUlt' is sound: every value @x ∈ a@ that satisfies @x < y@ for
+-- some @y ∈ b@ remains in the result.
+correct_assumeUlt ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeUlt w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> x < y ==>
+      case assumeUlt w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeUle' is sound.
+correct_assumeUle ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeUle w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> x <= y ==>
+      case assumeUle w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeUgt' is sound.
+correct_assumeUgt ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeUgt w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> x > y ==>
+      case assumeUgt w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeUge' is sound.
+correct_assumeUge ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeUge w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> x >= y ==>
+      case assumeUge w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeSlt' is sound: every value @x ∈ a@ that satisfies @x < y@
+-- (signed) for some @y ∈ b@ remains in the result.
+correct_assumeSlt ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSlt w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> toSigned w (toInteger x) < toSigned w (toInteger y) ==>
+      case assumeSlt w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeSle' is sound.
+correct_assumeSle ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSle w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> toSigned w (toInteger x) <= toSigned w (toInteger y) ==>
+      case assumeSle w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeSgt' is sound.
+correct_assumeSgt ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSgt w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> toSigned w (toInteger x) > toSigned w (toInteger y) ==>
+      case assumeSgt w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeSge' is sound.
+correct_assumeSge ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSge w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> toSigned w (toInteger x) >= toSigned w (toInteger y) ==>
+      case assumeSge w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeUlt' shrinks: when neither operand wraps mod @2^w@, the
+-- result is contained in the input under 'leqExact'. (Without the
+-- non-wrap guard, 'pseudoMeet' is sound but not generally a lower
+-- bound; cf. 'pseudoMeetLowerBound'.)
+assumeUltShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeUltShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeUlt w a b of
+        Nothing -> property True
+        Just c  -> property (leqExact c a)
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeUle' shrinks (under the non-wrap guard).
+assumeUleShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeUleShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeUle w a b of
+        Nothing -> property True
+        Just c  -> property (leqExact c a)
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeUgt' shrinks (under the non-wrap guard).
+assumeUgtShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeUgtShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeUgt w a b of
+        Nothing -> property True
+        Just c  -> property (leqExact c a)
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeUge' shrinks (under the non-wrap guard).
+assumeUgeShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeUgeShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeUge w a b of
+        Nothing -> property True
+        Just c  -> property (leqExact c a)
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeSlt' shrinks (under the non-wrap guard).
+assumeSltShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSltShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeSlt w a b of
+        Nothing -> property True
+        Just c  -> property (leqExact c a)
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeSle' shrinks (under the non-wrap guard).
+assumeSleShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSleShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeSle w a b of
+        Nothing -> property True
+        Just c  -> property (leqExact c a)
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeSgt' shrinks (under the non-wrap guard).
+assumeSgtShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSgtShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeSgt w a b of
+        Nothing -> property True
+        Just c  -> property (leqExact c a)
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeSge' shrinks (under the non-wrap guard).
+assumeSgeShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSgeShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeSge w a b of
+        Nothing -> property True
+        Just c  -> property (leqExact c a)
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- $idempotence
+--
+-- The 'assume*' operations are tested for idempotence: applying the same
+-- assumption twice yields the same result as applying it once,
+-- @assumeOp (assumeOp a b) b ≡ assumeOp a b@. Idempotence is /not/ a
+-- consequence of 'pseudoMeet'\'s self-idempotence (which only says
+-- @a ⊓ a = a@): each call meets @a@ with a fresh range built from @b@,
+-- and 'pseudoMeet' is non-associative, so we cannot derive
+-- @(a ⊓ r) ⊓ r = a ⊓ r@ from @r ⊓ r = r@ alone. The properties below
+-- check the equation empirically (under the non-wrap guard, where
+-- 'pseudoMeet' actually behaves as a lower bound).
+
+-- | 'assumeUlt' is idempotent under the non-wrap guard.
+assumeUltIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeUltIdempotent w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeUlt w a b of
+        Nothing -> property True
+        Just c  -> property (eqMaybeAssume (assumeUlt w c b) (Just c))
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeUle' is idempotent under the non-wrap guard.
+assumeUleIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeUleIdempotent w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeUle w a b of
+        Nothing -> property True
+        Just c  -> property (eqMaybeAssume (assumeUle w c b) (Just c))
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeUgt' is idempotent under the non-wrap guard.
+assumeUgtIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeUgtIdempotent w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeUgt w a b of
+        Nothing -> property True
+        Just c  -> property (eqMaybeAssume (assumeUgt w c b) (Just c))
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeUge' is idempotent under the non-wrap guard.
+assumeUgeIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeUgeIdempotent w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeUge w a b of
+        Nothing -> property True
+        Just c  -> property (eqMaybeAssume (assumeUge w c b) (Just c))
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeSlt' is idempotent under the non-wrap guard.
+assumeSltIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSltIdempotent w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeSlt w a b of
+        Nothing -> property True
+        Just c  -> property (eqMaybeAssume (assumeSlt w c b) (Just c))
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeSle' is idempotent under the non-wrap guard.
+assumeSleIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSleIdempotent w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeSle w a b of
+        Nothing -> property True
+        Just c  -> property (eqMaybeAssume (assumeSle w c b) (Just c))
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeSgt' is idempotent under the non-wrap guard.
+assumeSgtIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSgtIdempotent w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeSgt w a b of
+        Nothing -> property True
+        Just c  -> property (eqMaybeAssume (assumeSgt w c b) (Just c))
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | 'assumeSge' is idempotent under the non-wrap guard.
+assumeSgeIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSgeIdempotent w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
+      case assumeSge w a b of
+        Nothing -> property True
+        Just c  -> property (eqMaybeAssume (assumeSge w c b) (Just c))
+  where wrapsMod c = start c + n c * stride c > mask c
+
+-- | Equality of @Maybe (Domain w)@ via 'leqExact' on the @Just@ payloads.
+-- Used only by the assume idempotence properties; named to avoid clashing
+-- with other module-private @eqMaybe@ helpers.
+eqMaybeAssume :: Maybe (Domain w) -> Maybe (Domain w) -> Bool
+eqMaybeAssume Nothing  Nothing  = True
+eqMaybeAssume (Just x) (Just y) = leqExact x y && leqExact y x
+eqMaybeAssume _        _        = False
+
 -- ------------------------------------------------------------------
 -- ** Reduced product with bitwise
 
