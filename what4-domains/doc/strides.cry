@@ -1796,15 +1796,56 @@ refineByBitsPrecise :
   Domain n -> Bits::Dom n -> Maybe (Domain n)
 refineByBitsPrecise = refineByBits
 
+// Refine a bitwise domain `b` using a strides domain `s`. At least as
+// precise as `Bits::meet b (toBitwise s)`, strictly tighter on some
+// wrap-mod-2^n inputs whose pieces are partly carved away by `b`'s arc.
+//
+// `ssplit` decomposes `s` at the unsigned pole into one or two non-wrap
+// pieces. On non-wrap pieces `forcedBits` (called by `toBitwise`) is
+// bit-complete: every bit constant across the piece is detected. Each
+// piece is pre-clipped to `b`'s arc so the per-piece span shrinks before
+// `toBitwise` runs, pinning more high bits.
+refineBitsByStrides :
+  {n} (fin n, n >= 2) =>
+  Bits::Dom n -> Domain n -> Maybe (Bits::Dom n)
+refineBitsByStrides b s =
+  if isSelfWrapping s then
+    (if Bits::nonempty meetAll then Just meetAll else Nothing)
+  else case ssplit s of
+    One s1 -> case arcMeetClosed s1 arc of
+      Nothing -> Nothing
+      Just c1 ->
+        if Bits::nonempty b1 then Just b1 else Nothing
+        where b1 = Bits::meet b (toBitwise c1)
+    Two s1 s2 -> case arcMeetClosed s1 arc of
+      Nothing -> case arcMeetClosed s2 arc of
+        Nothing -> Nothing
+        Just c2 ->
+          if Bits::nonempty b2 then Just b2 else Nothing
+          where b2 = Bits::meet b (toBitwise c2)
+      Just c1 -> case arcMeetClosed s2 arc of
+        Nothing ->
+          if Bits::nonempty b1 then Just b1 else Nothing
+          where b1 = Bits::meet b (toBitwise c1)
+        Just c2 ->
+          if Bits::nonempty b' then Just b' else Nothing
+          where
+            b' = Bits::meet b (Bits::join (toBitwise c1) (toBitwise c2))
+  where
+    meetAll : Bits::Dom n
+    meetAll = Bits::meet b (toBitwise s)
+    arc : Domain n
+    arc = mk b.lomask 1 (zext (b.himask - b.lomask))
+
 reduceStep :
   {n} (fin n, n >= 2) =>
   Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
 reduceStep s b =
   case refineByBits s b of
     Nothing -> Nothing
-    Just s' ->
-      if Bits::nonempty b' then Just (s', b') else Nothing
-      where b' = Bits::meet b (toBitwise s')
+    Just s' -> case refineBitsByStrides b s' of
+      Nothing -> Nothing
+      Just b' -> Just (s', b')
 
 // Iterate `reduceStep` to a fixed point. Each non-trivial step strictly
 // shrinks one component, so unrolling `n + 1` iterations suffices.
@@ -3302,6 +3343,40 @@ refineByBitsPreciseDominatesRoundTripNonSelfWrap s b =
       Just s' -> case pseudoMeet s (fromBitwise b) of
         Nothing -> leqExact s' s
         Just rt -> if leqExact rt s then size s' <= size rt else True
+
+// `refineBitsByStrides` is sound: any `x` in both inputs is in the
+// result (and `Nothing` only when no such `x` exists).
+correct_refineBitsByStrides :
+  {n} (fin n, n >= 2) =>
+  Bits::Dom n -> Domain n -> [n] -> Property
+correct_refineBitsByStrides b s x =
+  proper s ==> member s x ==> Bits::mem b x ==>
+    case refineBitsByStrides b s of
+      Nothing -> False
+      Just b' -> Bits::mem b' x
+
+// `refineBitsByStrides` shrinks: the result is contained in the input
+// bitwise component.
+refineBitsByStridesShrinks :
+  {n} (fin n, n >= 2) =>
+  Bits::Dom n -> Domain n -> Property
+refineBitsByStridesShrinks b s =
+  proper s ==>
+    case refineBitsByStrides b s of
+      Nothing -> True
+      Just b' -> Bits::leq b' b
+
+// `refineBitsByStrides` is at least as precise as the single-shot
+// `Bits::meet b (toBitwise s)`. When the latter is bottom, so is the
+// former (returned as `Nothing`).
+refineBitsByStridesDominatesMeetToBitwise :
+  {n} (fin n, n >= 2) =>
+  Bits::Dom n -> Domain n -> Property
+refineBitsByStridesDominatesMeetToBitwise b s =
+  proper s ==>
+    case refineBitsByStrides b s of
+      Nothing -> True
+      Just b' -> Bits::leq b' (Bits::meet b (toBitwise s))
 
 trimSelfWrapNotSelfWrapping : {n} (fin n, n >= 2) => Domain n -> Property
 trimSelfWrapNotSelfWrapping a =

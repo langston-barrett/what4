@@ -45,6 +45,7 @@ import qualified What4.Domains.Arithmetic.Internal as ArithOpt
 import qualified CLP
 #endif
 import qualified Strides
+import qualified StridesBitwise
 import qualified StridedInterval
 
 
@@ -70,6 +71,7 @@ main = defaultMain $
     , CLP.tests
 #endif
     , Strides.tests
+    , StridesBitwise.tests
     , StridedInterval.tests
     ]
 
