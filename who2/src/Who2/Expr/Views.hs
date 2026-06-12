@@ -61,7 +61,7 @@ class HasBVViews f where
   asBVAdd :: (1 <= w) => E.Expr t f (BT.BaseBVType w) -> Maybe (SRS.SRSum (SR.SemiRingBV SR.BVArith w) (E.Expr t f))
 
   -- | View: is this BVMul? Returns the product.
-  asBVMul :: (1 <= w) => E.Expr t f (BT.BaseBVType w) -> Maybe (SRP.SRProd (SR.SemiRingBV SR.BVBits w) (E.Expr t f))
+  asBVMul :: (1 <= w) => E.Expr t f (BT.BaseBVType w) -> Maybe (SRP.SRProd (SR.SemiRingBV SR.BVArith w) (E.Expr t f))
 
   -- | View: is this BVAndBits? Returns the polarized bloom sequence.
   asBVAndBits :: (1 <= w) => E.Expr t f (BT.BaseBVType w) -> Maybe (PBS.PolarizedBloomSeq (E.Expr t f (BT.BaseBVType w)))
@@ -81,4 +81,4 @@ class HasBVViews f where
   asBVAddHC :: (1 <= w) => E.Expr t f (BT.BaseBVType w) -> Maybe (HCSR.SRSum (SR.SemiRingBV SR.BVArith w) (E.Expr t f))
 
   -- | View: is this BVMulHC? Returns the hash-consed product.
-  asBVMulHC :: (1 <= w) => E.Expr t f (BT.BaseBVType w) -> Maybe (HCPR.SRProd (SR.SemiRingBV SR.BVBits w) (E.Expr t f))
+  asBVMulHC :: (1 <= w) => E.Expr t f (BT.BaseBVType w) -> Maybe (HCPR.SRProd (SR.SemiRingBV SR.BVArith w) (E.Expr t f))

@@ -247,6 +247,7 @@ execCommand sym state maybeSolverCallback = \case
   -- Ignored commands (no-ops)
   [sexp|(set-info ..._)|] -> return $ Just $ Right state
   [sexp|(set-logic ..._)|] -> return $ Just $ Right state
+  [sexp|(set-option ..._)|] -> return $ Just $ Right state
 
   -- Unsupported commands
   SExp.SApp (SExp.SAtom cmd : _)
@@ -257,7 +258,7 @@ execCommand sym state maybeSolverCallback = \case
 
 unsupportedCommands :: [Text]
 unsupportedCommands =
-  ["get-model", "get-value", "echo", "set-option"]
+  ["get-model", "get-value", "echo"]
 
 -- | Check satisfiability by examining if assertions simplify to constants
 checkSat :: WI.IsSymExprBuilder sym => sym -> [WI.Pred sym] -> IO (WSR.SatResult () ())

@@ -32,6 +32,9 @@ module Who2.Config
   , normalizeBVNeg
   , normalizeBVUle
   , normalizeBVSle
+    -- * SemiRing canonicalization
+  , semiringSum
+  , semiringProduct
   ) where
 
 ------------------------------------------------------------------------

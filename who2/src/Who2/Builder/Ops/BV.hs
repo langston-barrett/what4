@@ -374,7 +374,7 @@ bvMulBloom alloc x y
   -- test: bvmul-commutative
   | otherwise =
       let w = EBV.width x
-          sr = SR.SemiRingBVRepr SR.BVBitsRepr w
+          sr = SR.SemiRingBVRepr SR.BVArithRepr w
           x' = E.minByHash x y
           y' = E.maxByHash x y
           wp = SRP.mul (SRP.var sr x') (SRP.var sr y')
@@ -421,7 +421,7 @@ bvMulHC alloc x y
   -- x * y = create product
   | otherwise =
       let w = EBV.width x
-          sr = SR.SemiRingBVRepr SR.BVBitsRepr w
+          sr = SR.SemiRingBVRepr SR.BVArithRepr w
           x' = E.minByHash x y
           y' = E.maxByHash x y
           wp = HCPR.mul (HCPR.var sr x') (HCPR.var sr y')
