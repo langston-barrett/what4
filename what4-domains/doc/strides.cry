@@ -3054,6 +3054,17 @@ eqMaybe ma mb = case ma of
 wraps : {n} (fin n, n >= 2) => Domain n -> Bit
 wraps c = (zext c.start : [2 * n + 1]) + (zext c.n) * (zext c.stride) > zext (~ 0 : [n])
 
+// Strict containment under `leqExact`: `a` is a proper subset of `b`.
+strictlyLess : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+strictlyLess a b = leqExact a b /\ ~ (leqExact b a)
+
+// `a` and `b` lie in the same coset of the same subgroup of `Z/2^n`: their
+// stride gcds agree and their starts are congruent modulo that gcd.
+sameOrbit : {n} (fin n, n >= 2) => Domain n -> Domain n -> Bit
+sameOrbit a b =
+  strideGcd a == strideGcd b /\
+  modSub a.start b.start && (strideGcd a - 1) == 0
+
 pseudoMeetLowerBound : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 pseudoMeetLowerBound a b =
   proper a ==> proper b ==>
@@ -3069,6 +3080,30 @@ pseudoMeetPreciseLowerBound a b =
       case pseudoMeetPrecise a b of
         Nothing -> True
         Just c -> leqExact c a /\ leqExact c b
+
+// `pseudoMeet` returns a maximal lower bound: no proper lower bound `c`
+// strictly contains the result. Restricted to non-wrapping operands so
+// `pseudoMeet` is itself a lower bound (cf. `pseudoMeetLowerBound`).
+pseudoMeetMaximalLowerBound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+pseudoMeetMaximalLowerBound a b c =
+  proper a ==> proper b ==> proper c ==>
+    ~(wraps a) ==> ~(wraps b) ==>
+      leqExact c a ==> leqExact c b ==>
+        case pseudoMeet a b of
+          Nothing -> True
+          Just r  -> ~ (strictlyLess r c)
+
+// `pseudoMeetPrecise` returns a maximal lower bound on non-wrapping operands.
+pseudoMeetPreciseMaximalLowerBound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+pseudoMeetPreciseMaximalLowerBound a b c =
+  proper a ==> proper b ==> proper c ==>
+    ~(wraps a) ==> ~(wraps b) ==>
+      leqExact c a ==> leqExact c b ==>
+        case pseudoMeetPrecise a b of
+          Nothing -> True
+          Just r  -> ~ (strictlyLess r c)
 
 pseudoMeetCommutative : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 pseudoMeetCommutative a b =
@@ -3142,6 +3177,41 @@ pseudoJoinPreciseRefinesJoin : {n} (fin n, n >= 2) => Domain n -> Domain n -> Pr
 pseudoJoinPreciseRefinesJoin a b =
   proper a ==> proper b ==>
     leqExact (pseudoJoinPrecise a b) (pseudoJoin a b)
+
+// On non-wrapping, stride-1 operands, `pseudoJoin` is minimal among
+// stride-1 upper bounds: no other stride-1 upper bound is strictly
+// contained in `pseudoJoin a b`.
+//
+// The stride-1 restriction is essential because `pseudoJoin` is built on
+// `toArith`, which over-approximates wider-stride progressions to their
+// arc hulls — so `A.join` may return an arc wider than needed when
+// `stride > 1`. For coarser-stride covers in particular, `pseudoJoin` is
+// not minimal — finding the minimum-cardinality covering progression
+// across all strides requires a number-theoretic search `pseudoJoin`
+// doesn't perform. Wrapping operands are excluded because `toArith`
+// over-approximates a self-wrapping orbit to its full coset arc.
+pseudoJoinMinimalUpperBound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+pseudoJoinMinimalUpperBound a b c =
+  proper a ==> proper b ==> proper c ==>
+    a.stride == 1 ==> b.stride == 1 ==> c.stride == 1 ==>
+      ~(wraps a) ==> ~(wraps b) ==>
+        leqExact a c ==> leqExact b c ==>
+          ~ (strictlyLess c r)
+  where r = pseudoJoin a b
+
+// `pseudoJoinPrecise` is minimal among stride-1 upper bounds on
+// non-wrapping stride-1 operands. See `pseudoJoinMinimalUpperBound` for
+// why each restriction is needed.
+pseudoJoinPreciseMinimalUpperBound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+pseudoJoinPreciseMinimalUpperBound a b c =
+  proper a ==> proper b ==> proper c ==>
+    a.stride == 1 ==> b.stride == 1 ==> c.stride == 1 ==>
+      ~(wraps a) ==> ~(wraps b) ==>
+        leqExact a c ==> leqExact b c ==>
+          ~ (strictlyLess c r)
+  where r = pseudoJoinPrecise a b
 
 nsplitUnion : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
 nsplitUnion a x =
@@ -3263,6 +3333,20 @@ pseudoJoinDominatesBoundingBoxJoin a b =
   proper a ==> proper b ==>
     size (pseudoJoin a b) <= size (boundingBoxJoin a b)
 
+// `boundingBoxJoin` returns a minimal upper bound /among non-wrapping
+// stride-1 progressions/. It always returns a stride-1 arithmetic interval,
+// so it is /not/ minimal across the full strided lattice — restricted here
+// to non-wrapping operands (so the operator doesn't saturate to top) and to
+// stride-1 candidates `c` (the only shape `boundingBoxJoin` could produce).
+boundingBoxJoinMinimalUpperBound :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n -> Property
+boundingBoxJoinMinimalUpperBound a b c =
+  proper a ==> proper b ==> proper c ==>
+    ~(wraps a) ==> ~(wraps b) ==>
+      c.stride == 1 ==> ~(wraps c) ==>
+        leqExact a c ==> leqExact b c ==>
+          ~ (strictlyLess c (boundingBoxJoin a b))
+
 correct_lowerBound : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> Property
 correct_lowerBound a b x =
   proper a ==> proper b ==>
@@ -3313,6 +3397,23 @@ lowerBoundIsLargestLowerBound a b =
       Nothing -> 0
     maxSize = foldl maxSz 0 (lowerBounds a b)
     maxSz s mc = if sizeOrZero mc > s then sizeOrZero mc else s
+
+// `lowerBound` is a maximal lower bound /among the elements of `lowerBounds`/:
+// no element of `lowerBounds a b` strictly contains `lowerBound a b`. Stronger
+// than `lowerBoundIsLargestLowerBound`, which only compares `size`; this
+// checks `leqExact` dominance. Whether `lowerBound` is maximal across /all/
+// lower bounds is open and not asserted here.
+lowerBoundMaximalAmongCandidates :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+lowerBoundMaximalAmongCandidates a b =
+  proper a ==> proper b ==>
+    case lowerBound a b of
+      Nothing -> True
+      Just r -> foldl (/\) True [notStrict mc r | mc <- lowerBounds a b]
+  where
+    notStrict mc r = case mc of
+      Just c -> ~ (strictlyLess r c)
+      Nothing -> True
 
 // Every result in `lowerBounds` is sound: every element is in both operands.
 correct_lowerBounds :
