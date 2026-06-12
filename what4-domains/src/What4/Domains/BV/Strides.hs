@@ -333,6 +333,10 @@ module What4.Domains.BV.Strides
   -- , singleton
   -- , fromRange
   -- , fromFoldable
+  -- * Canonicalization
+  , Canonical
+  , getCanonical
+  , canonicalize
   -- * Conversion
   , toArith
   , hull
@@ -340,11 +344,8 @@ module What4.Domains.BV.Strides
   , toBitwise
   , forcedBits
   , fromBitwise
-  -- ** Canonicalization
-  , Canonical
-  , getCanonical
-  , canonicalize
   -- * Queries
+  , eq
   , isSelfWrapping
   , member
   , leq
@@ -354,7 +355,6 @@ module What4.Domains.BV.Strides
   , toList
   , size
   -- , asSingleton
-  , eq
   -- , ubounds
   -- , sbounds
   -- , ult
@@ -362,9 +362,9 @@ module What4.Domains.BV.Strides
   -- , overlap
   -- * Arithmetic
   , negate
-  , reverseD
   , add
   , sub
+  , reverseD
   , scale
   , mul
   , udiv
@@ -417,26 +417,11 @@ module What4.Domains.BV.Strides
   , refineByBits
   , reduceStep
   , reduce
-  -- * Properties
-  -- ** Generators
+  -- * Generators
   , genDomain
   , genElement
   , genPair
-  -- ** Construction
-  -- , correct_singleton
-  , fromAscEltListMember
-  , fromAscEltListToListExactNonWrapping
-  -- ** Conversion
-  , toArithCorrect
-  , startEndArcCorrect
-  , cosetArcCorrect
-  , fromArithCorrect
-  , roundtripArith
-  , toBitwiseCorrect
-  , strideBitwiseCorrect
-  , forcedBitsDisjoint
-  , forcedBitsMember
-  , fromBitwiseCorrect
+  -- * Properties
   -- ** Internal helpers
   , modNegCorrect
   , modSubCorrect
@@ -455,6 +440,30 @@ module What4.Domains.BV.Strides
   , circLeqAnchorMin
   , circLeqAnchorMax
   , isSelfWrappingViaToList
+  -- ** Construction
+  -- , correct_singleton
+  , fromAscEltListMember
+  , fromAscEltListToListExactNonWrapping
+  -- ** Canonicalization
+  , canonLossless
+  , canonProper
+  , canonUnique
+  , canonIdempotent
+  , eqCorrect
+  , canonForwardOriented
+  , canonMatchesSearch
+  , canonHashRespectsEq
+  -- ** Conversion
+  , toArithCorrect
+  , startEndArcCorrect
+  , cosetArcCorrect
+  , fromArithCorrect
+  , roundtripArith
+  , toBitwiseCorrect
+  , strideBitwiseCorrect
+  , forcedBitsDisjoint
+  , forcedBitsMember
+  , fromBitwiseCorrect
   -- ** Queries
   -- , correct_asSingleton
   , startMember
@@ -481,14 +490,6 @@ module What4.Domains.BV.Strides
   , eqExactReflexive
   , eqExactSymmetric
   , eqExactTransitive
-  , canonLossless
-  , canonProper
-  , canonUnique
-  , canonIdempotent
-  , eqCorrect
-  , canonForwardOriented
-  , canonMatchesSearch
-  , canonHashRespectsEq
   -- , correct_ubounds
   -- , correct_sbounds
   -- , correct_ult
@@ -496,20 +497,20 @@ module What4.Domains.BV.Strides
   -- , correct_overlap
   -- ** Arithmetic
   , correct_neg
+  , correct_add
+  , correct_sub
   , reverseDSameSet
   , psplitProper
   , psplitCovers
   , psplitPartitions
   , psplitOp2Sound
-  , correct_add
-  , correct_sub
   , correct_scale
   , correct_mul
+  , addSubSizeCorrect
+  , addRobustClosedFormAgrees
   , addRobustDominatesRaw
   , subRobustDominatesRaw
   , mulRobustDominatesRaw
-  , addSubSizeCorrect
-  , addRobustClosedFormAgrees
   , correct_mulCorners
   , correct_mulNoStraddleU
   , correct_mulNoStraddleS
@@ -540,10 +541,10 @@ module What4.Domains.BV.Strides
   -- ** Bitwise operations
   , correct_not
   , correct_and
-  , correct_andPrecise
   , correct_or
-  , correct_orPrecise
   , correct_xor
+  , correct_andPrecise
+  , correct_orPrecise
   , correct_andSingleton
   , warrenAndLoCorrect
   , warrenAndHiCorrect
@@ -616,10 +617,6 @@ module What4.Domains.BV.Strides
   , correct_lowerBounds
   , lowerBoundsAllSubsets
   , correct_compactify
-  , trimSelfWrapNotSelfWrapping
-  , trimSelfWrapSubset
-  , trimSelfWrapIdentity
-  , trimSelfWrapIdempotent
   -- ** Reduced product with bitwise
   , knownZerosOnesNatDisjoint
   , knownZerosOnesNatMember
@@ -636,6 +633,10 @@ module What4.Domains.BV.Strides
   , reduceShrinks
   , reduceIdempotent
   , reduceConflictMeansEmpty
+  , trimSelfWrapNotSelfWrapping
+  , trimSelfWrapSubset
+  , trimSelfWrapIdentity
+  , trimSelfWrapIdempotent
     -- * Re-exports
     --
     -- | Re-exported so doctests (and downstream users) obtain @knownNat@\/@NatRepr@
@@ -927,19 +928,6 @@ circLeq :: Natural -> Natural -> Natural -> Natural -> Bool
 circLeq m x a b = (a + nx) .&. m <= (b + nx) .&. m
   where nx = modNeg m x
 
--- | /O(w)/. Does this progression self-wrap? A progression is self-wrapping if the
--- cumulative distance traversed by its orbit (@n * stride@, where @n@ is the
--- number of steps from @start@ to @end@) exceeds @2^w@. Geometrically: walking
--- around the number circle from @start@, the orbit passes its starting point
--- at least once before reaching @end@.
---
--- Note that all points in a valid progression are distinct by construction, so
--- self-wrapping does /not/ mean that the progression values multiple times. It
--- only describes how far the orbit traveled.
-isSelfWrapping :: Domain w -> Bool
-isSelfWrapping Domain{stride, n, mask} = n * stride > mask
-{-# INLINE isSelfWrapping #-}
-
 -- ------------------------------------------------------------------
 -- * Construction
 
@@ -1018,7 +1006,7 @@ fromAscEltList w =
       in Just (mk w x (fromInteger d) nn)
 
 -- ------------------------------------------------------------------
--- ** Canonicalization
+-- * Canonicalization
 
 -- | A progression in canonical form: the unique representative its set gets
 -- from 'canonicalize'. The constructor is hidden, so the only way to obtain a
@@ -1121,21 +1109,6 @@ canonicalize c@Domain{start = s, stride = t, n = nn, mask = m} = Canonical $
     mkChecked s' t' n' =
       let d = Domain { start = s', stride = t', n = n', mask = m }
       in assert (proper d) d
-
--- | /O(w)/. Exact set-equality: 'True' iff @a@ and @b@ denote the same set.
--- This is literally @'canonicalize' a == 'canonicalize' b@ — 'canonicalize' is
--- a lossless normal form, so structural equality of canonical forms /is/ set
--- equality (see 'eqCorrect'). At @O(w)@ it dominates the @O(w^2)@ 'eqExact'
--- oracle it is checked against.
---
--- == Examples
---
--- >>> eq (mk4 1 11 3) (mk4 2 5 3)   -- same set {1,2,7,12}, different strides
--- True
--- >>> eq (mk4 0 2 7) (mk4 0 4 3)    -- evens vs {0,4,8,12}
--- False
-eq :: Domain w -> Domain w -> Bool
-eq a b = canonicalize a == canonicalize b
 
 -- ------------------------------------------------------------------
 -- * Conversion
@@ -1278,6 +1251,34 @@ fromBitwise w b =
 
 -- ------------------------------------------------------------------
 -- * Queries
+
+-- | /O(w)/. Exact set-equality: 'True' iff @a@ and @b@ denote the same set.
+-- This is literally @'canonicalize' a == 'canonicalize' b@ — 'canonicalize' is
+-- a lossless normal form, so structural equality of canonical forms /is/ set
+-- equality (see 'eqCorrect'). At @O(w)@ it dominates the @O(w^2)@ 'eqExact'
+-- oracle it is checked against.
+--
+-- == Examples
+--
+-- >>> eq (mk4 1 11 3) (mk4 2 5 3)   -- same set {1,2,7,12}, different strides
+-- True
+-- >>> eq (mk4 0 2 7) (mk4 0 4 3)    -- evens vs {0,4,8,12}
+-- False
+eq :: Domain w -> Domain w -> Bool
+eq a b = canonicalize a == canonicalize b
+
+-- | /O(w)/. Does this progression self-wrap? A progression is self-wrapping if the
+-- cumulative distance traversed by its orbit (@n * stride@, where @n@ is the
+-- number of steps from @start@ to @end@) exceeds @2^w@. Geometrically: walking
+-- around the number circle from @start@, the orbit passes its starting point
+-- at least once before reaching @end@.
+--
+-- Note that all points in a valid progression are distinct by construction, so
+-- self-wrapping does /not/ mean that the progression values multiple times. It
+-- only describes how far the orbit traveled.
+isSelfWrapping :: Domain w -> Bool
+isSelfWrapping Domain{stride, n, mask} = n * stride > mask
+{-# INLINE isSelfWrapping #-}
 
 -- | /O(w log w)/. Test if the given value is a member of the progression.
 --
@@ -4382,7 +4383,7 @@ genPair w = do
   pure (c, x)
 
 -- ------------------------------------------------------------------
--- * Correctness properties
+-- * Properties
 
 -- ------------------------------------------------------------------
 -- ** Internal helpers
@@ -4567,170 +4568,6 @@ fromAscEltListToListExactNonWrapping w c =
     orbitDoesNotCrossZero = start c + n c * stride c <= mask c
 
 -- ------------------------------------------------------------------
--- ** Queries
-
--- | A progression always contains its own @start@.
-startMember :: Domain w -> Property
-startMember c = proper c ==> property (member c (start c))
-
--- | A progression always contains its own @end@.
-endMember :: Domain w -> Property
-endMember c = proper c ==> property (member c (end c))
-
--- | Every element produced by 'toList' is a member of the progression.
-toListMember :: Domain w -> Property
-toListMember c =
-  proper c ==> property (Prelude.all (member c) (toList c))
-
--- | If 'member' returns 'True' for some bitvector @x@, then @x@ appears in
--- 'toList'.
-memberToList :: Domain w -> Natural -> Property
-memberToList c x =
-  proper c ==> (member c x' ==> property (x' `elem` toList c))
-  where x' = modMask c x
-
--- | 'toList' produces no duplicate elements.
-toListNoDuplicates :: Domain w -> Property
-toListNoDuplicates c = proper c ==> property (noDuplicates (toList c))
-  where
-    noDuplicates xs = length xs == Set.size (Set.fromList xs)
-
--- | Soundness of 'leq': if @a \`leq\` b@ then every element of @a@ is in @b@.
-leqCorrect :: Domain w -> Domain w -> Property
-leqCorrect a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    leq a b ==> property (Prelude.all (member b) (toList a))
-
--- | 'leq' is reflexive.
-leqReflexive :: Domain w -> Property
-leqReflexive a = proper a ==> property (leq a a)
-
--- | 'leq' is transitive: if @a \`leq\` b@ and @b \`leq\` c@ then
--- @a \`leq\` c@. (Both 'leqPrecise' and 'leqExact' are reflexive but not
--- guaranteed transitive at the syntactic level; only 'leq' is.)
-leqTransitive :: Domain w -> Domain w -> Domain w -> Property
-leqTransitive a b c =
-  proper a ==> proper b ==> proper c ==>
-    mask a == mask b ==> mask b == mask c ==>
-      leq a b ==> leq b c ==> property (leq a c)
-
--- | 'leq' refines 'leqExact': @leq a b ==> leqExact a b@. ('leq' and
--- 'leqPrecise' are not comparable in general — neither refines the other.)
-leqRefinesLeqExact :: Domain w -> Domain w -> Property
-leqRefinesLeqExact a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    leq a b ==> property (leqExact a b)
-
--- | Soundness of 'leqPrecise': if @a \`leqPrecise\` b@ then every element
--- of @a@ is in @b@.
-leqPreciseCorrect :: Domain w -> Domain w -> Property
-leqPreciseCorrect a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    leqPrecise a b ==> property (Prelude.all (member b) (toList a))
-
--- | 'leqPrecise' is reflexive.
-leqPreciseReflexive :: Domain w -> Property
-leqPreciseReflexive a = proper a ==> property (leqPrecise a a)
-
--- | 'leqPrecise' refines 'leqExact': @leqPrecise a b ==> leqExact a b@.
--- Equivalently, 'leqPrecise' is a sound approximation of the semantic
--- containment that 'leqExact' decides.
-leqPreciseRefinesLeqExact :: Domain w -> Domain w -> Property
-leqPreciseRefinesLeqExact a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    leqPrecise a b ==> property (leqExact a b)
-
--- | Soundness of 'leqExact': @leqExact a b@ implies every element of @a@ is
--- in @b@.
-leqExactCorrect :: Domain w -> Domain w -> Property
-leqExactCorrect a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    leqExact a b ==> property (Prelude.all (member b) (toList a))
-
--- | Completeness of 'leqExact': if every element of @a@ is in @b@, then
--- @leqExact a b@. Together with 'leqExactCorrect' this says @leqExact@
--- decides semantic containment exactly.
-leqExactComplete :: Domain w -> Domain w -> Property
-leqExactComplete a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.all (member b) (toList a) ==> property (leqExact a b)
-
--- | 'leqExact' is reflexive.
-leqExactReflexive :: Domain w -> Property
-leqExactReflexive a = proper a ==> property (leqExact a a)
-
--- | 'leqExact' is transitive: if @a \`leqExact\` b@ and @b \`leqExact\` c@
--- then @a \`leqExact\` c@.
-leqExactTransitive :: Domain w -> Domain w -> Domain w -> Property
-leqExactTransitive a b c =
-  proper a ==> proper b ==> proper c ==>
-    mask a == mask b ==> mask b == mask c ==>
-      leqExact a b ==> leqExact b c ==> property (leqExact a c)
-
--- | 'leqExactPartial' is exact wherever it is defined: when it returns
--- @Just r@, that @r@ matches semantic containment (every element of @a@ is in
--- @b@). Compared against membership directly, not against 'leqExact', since
--- 'leqExact' is /defined/ in terms of 'leqExactPartial' and so would make the
--- check vacuous on the @Just@ branch. (On 'Nothing' the partial check
--- declines, and 'leqExact' falls back to 'leqExactWindow'.)
-leqExactPartialAgrees :: Domain w -> Domain w -> Property
-leqExactPartialAgrees a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    case leqExactPartial a b of
-      Just r  -> property (r == Prelude.all (member b) (toList a))
-      Nothing -> property True
-
--- | 'leqExactWindow' decides the 'leqExactPartial' 'Nothing' case correctly:
--- on the inputs where the partial check declines, the window count matches
--- semantic containment. Together with 'leqExactPartialAgrees' this validates
--- both arms of 'leqExact' against membership independently.
-leqExactWindowAgrees :: Domain w -> Domain w -> Property
-leqExactWindowAgrees a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    case leqExactPartial a b of
-      Just _  -> property True
-      Nothing -> property (leqExactWindow a b == Prelude.all (member b) (toList a))
-
--- | 'size' agrees with the length of 'toList'.
-sizeViaToList :: Domain w -> Property
-sizeViaToList c =
-  proper c ==> property (size c == fromIntegral (length (toList c)))
-
--- | Soundness of 'cosetsDisjoint': if it returns 'True', then @a@ and @b@
--- share no values. The contrapositive is the useful direction here — any
--- shared element witnesses non-disjoint cosets.
-cosetsDisjointCorrect :: Domain w -> Domain w -> Natural -> Property
-cosetsDisjointCorrect a b x =
-  proper a ==> proper b ==> mask a == mask b ==>
-    member a x' ==> member b x' ==>
-      property (Prelude.not (cosetsDisjoint a b))
-  where
-    x' = modMask a x
-
--- | Soundness of 'eqExact': it agrees with set equality of the orbits.
-eqExactCorrect :: Domain w -> Domain w -> Property
-eqExactCorrect a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    property (eqExact a b == (Set.fromList (toList a) == Set.fromList (toList b)))
-
--- | 'eqExact' is reflexive.
-eqExactReflexive :: Domain w -> Property
-eqExactReflexive a = proper a ==> property (eqExact a a)
-
--- | 'eqExact' is symmetric.
-eqExactSymmetric :: Domain w -> Domain w -> Property
-eqExactSymmetric a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    property (eqExact a b == eqExact b a)
-
--- | 'eqExact' is transitive.
-eqExactTransitive :: Domain w -> Domain w -> Domain w -> Property
-eqExactTransitive a b c =
-  proper a ==> proper b ==> proper c ==>
-    mask a == mask b ==> mask b == mask c ==>
-      eqExact a b ==> eqExact b c ==> property (eqExact a c)
-
--- ------------------------------------------------------------------
 -- ** Canonicalization
 
 -- | 'canonicalize' denotes the same set as its input.
@@ -4901,12 +4738,190 @@ fromBitwiseCorrect w b x =
       Just c -> property (member c (integerToNatural (x .&. maxUnsigned w)))
 
 -- ------------------------------------------------------------------
+-- ** Queries
+
+-- | A progression always contains its own @start@.
+startMember :: Domain w -> Property
+startMember c = proper c ==> property (member c (start c))
+
+-- | A progression always contains its own @end@.
+endMember :: Domain w -> Property
+endMember c = proper c ==> property (member c (end c))
+
+-- | Every element produced by 'toList' is a member of the progression.
+toListMember :: Domain w -> Property
+toListMember c =
+  proper c ==> property (Prelude.all (member c) (toList c))
+
+-- | If 'member' returns 'True' for some bitvector @x@, then @x@ appears in
+-- 'toList'.
+memberToList :: Domain w -> Natural -> Property
+memberToList c x =
+  proper c ==> (member c x' ==> property (x' `elem` toList c))
+  where x' = modMask c x
+
+-- | 'toList' produces no duplicate elements.
+toListNoDuplicates :: Domain w -> Property
+toListNoDuplicates c = proper c ==> property (noDuplicates (toList c))
+  where
+    noDuplicates xs = length xs == Set.size (Set.fromList xs)
+
+-- | Soundness of 'leq': if @a \`leq\` b@ then every element of @a@ is in @b@.
+leqCorrect :: Domain w -> Domain w -> Property
+leqCorrect a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    leq a b ==> property (Prelude.all (member b) (toList a))
+
+-- | 'leq' is reflexive.
+leqReflexive :: Domain w -> Property
+leqReflexive a = proper a ==> property (leq a a)
+
+-- | 'leq' is transitive: if @a \`leq\` b@ and @b \`leq\` c@ then
+-- @a \`leq\` c@. (Both 'leqPrecise' and 'leqExact' are reflexive but not
+-- guaranteed transitive at the syntactic level; only 'leq' is.)
+leqTransitive :: Domain w -> Domain w -> Domain w -> Property
+leqTransitive a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask b == mask c ==>
+      leq a b ==> leq b c ==> property (leq a c)
+
+-- | 'leq' refines 'leqExact': @leq a b ==> leqExact a b@. ('leq' and
+-- 'leqPrecise' are not comparable in general — neither refines the other.)
+leqRefinesLeqExact :: Domain w -> Domain w -> Property
+leqRefinesLeqExact a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    leq a b ==> property (leqExact a b)
+
+-- | Soundness of 'leqPrecise': if @a \`leqPrecise\` b@ then every element
+-- of @a@ is in @b@.
+leqPreciseCorrect :: Domain w -> Domain w -> Property
+leqPreciseCorrect a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    leqPrecise a b ==> property (Prelude.all (member b) (toList a))
+
+-- | 'leqPrecise' is reflexive.
+leqPreciseReflexive :: Domain w -> Property
+leqPreciseReflexive a = proper a ==> property (leqPrecise a a)
+
+-- | 'leqPrecise' refines 'leqExact': @leqPrecise a b ==> leqExact a b@.
+-- Equivalently, 'leqPrecise' is a sound approximation of the semantic
+-- containment that 'leqExact' decides.
+leqPreciseRefinesLeqExact :: Domain w -> Domain w -> Property
+leqPreciseRefinesLeqExact a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    leqPrecise a b ==> property (leqExact a b)
+
+-- | Soundness of 'leqExact': @leqExact a b@ implies every element of @a@ is
+-- in @b@.
+leqExactCorrect :: Domain w -> Domain w -> Property
+leqExactCorrect a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    leqExact a b ==> property (Prelude.all (member b) (toList a))
+
+-- | Completeness of 'leqExact': if every element of @a@ is in @b@, then
+-- @leqExact a b@. Together with 'leqExactCorrect' this says @leqExact@
+-- decides semantic containment exactly.
+leqExactComplete :: Domain w -> Domain w -> Property
+leqExactComplete a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    Prelude.all (member b) (toList a) ==> property (leqExact a b)
+
+-- | 'leqExact' is reflexive.
+leqExactReflexive :: Domain w -> Property
+leqExactReflexive a = proper a ==> property (leqExact a a)
+
+-- | 'leqExact' is transitive: if @a \`leqExact\` b@ and @b \`leqExact\` c@
+-- then @a \`leqExact\` c@.
+leqExactTransitive :: Domain w -> Domain w -> Domain w -> Property
+leqExactTransitive a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask b == mask c ==>
+      leqExact a b ==> leqExact b c ==> property (leqExact a c)
+
+-- | 'leqExactPartial' is exact wherever it is defined: when it returns
+-- @Just r@, that @r@ matches semantic containment (every element of @a@ is in
+-- @b@). Compared against membership directly, not against 'leqExact', since
+-- 'leqExact' is /defined/ in terms of 'leqExactPartial' and so would make the
+-- check vacuous on the @Just@ branch. (On 'Nothing' the partial check
+-- declines, and 'leqExact' falls back to 'leqExactWindow'.)
+leqExactPartialAgrees :: Domain w -> Domain w -> Property
+leqExactPartialAgrees a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case leqExactPartial a b of
+      Just r  -> property (r == Prelude.all (member b) (toList a))
+      Nothing -> property True
+
+-- | 'leqExactWindow' decides the 'leqExactPartial' 'Nothing' case correctly:
+-- on the inputs where the partial check declines, the window count matches
+-- semantic containment. Together with 'leqExactPartialAgrees' this validates
+-- both arms of 'leqExact' against membership independently.
+leqExactWindowAgrees :: Domain w -> Domain w -> Property
+leqExactWindowAgrees a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case leqExactPartial a b of
+      Just _  -> property True
+      Nothing -> property (leqExactWindow a b == Prelude.all (member b) (toList a))
+
+-- | 'size' agrees with the length of 'toList'.
+sizeViaToList :: Domain w -> Property
+sizeViaToList c =
+  proper c ==> property (size c == fromIntegral (length (toList c)))
+
+-- | Soundness of 'cosetsDisjoint': if it returns 'True', then @a@ and @b@
+-- share no values. The contrapositive is the useful direction here — any
+-- shared element witnesses non-disjoint cosets.
+cosetsDisjointCorrect :: Domain w -> Domain w -> Natural -> Property
+cosetsDisjointCorrect a b x =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x' ==> member b x' ==>
+      property (Prelude.not (cosetsDisjoint a b))
+  where
+    x' = modMask a x
+
+-- | Soundness of 'eqExact': it agrees with set equality of the orbits.
+eqExactCorrect :: Domain w -> Domain w -> Property
+eqExactCorrect a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (eqExact a b == (Set.fromList (toList a) == Set.fromList (toList b)))
+
+-- | 'eqExact' is reflexive.
+eqExactReflexive :: Domain w -> Property
+eqExactReflexive a = proper a ==> property (eqExact a a)
+
+-- | 'eqExact' is symmetric.
+eqExactSymmetric :: Domain w -> Domain w -> Property
+eqExactSymmetric a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    property (eqExact a b == eqExact b a)
+
+-- | 'eqExact' is transitive.
+eqExactTransitive :: Domain w -> Domain w -> Domain w -> Property
+eqExactTransitive a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask b == mask c ==>
+      eqExact a b ==> eqExact b c ==> property (eqExact a c)
+
+-- ------------------------------------------------------------------
 -- ** Arithmetic
 
 correct_neg :: (1 <= w) => NatRepr w -> Domain w -> Natural -> Property
 correct_neg w c x =
   proper c ==> member c x ==>
     property (member (negate w c) (asN w (Prelude.negate (toInteger x))))
+
+correct_add ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_add w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (add w a b) (asN w (toInteger x + toInteger y)))
+
+correct_sub ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_sub w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (sub w a b) (asN w (toInteger x - toInteger y)))
 
 -- | 'reverseD' denotes exactly the same set as its argument: the orbit walked
 -- backwards visits the same values. This is what makes the orientation-robust
@@ -4947,20 +4962,6 @@ psplitOp2Sound w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (psplitOp2 w (andFast w) a b) (x Bits..&. y))
 
-correct_add ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
-correct_add w a x b y =
-  proper a ==> proper b ==> member a x ==> member b y ==>
-    property (member (add w a b) (asN w (toInteger x + toInteger y)))
-
-correct_sub ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
-correct_sub w a x b y =
-  proper a ==> proper b ==> member a x ==> member b y ==>
-    property (member (sub w a b) (asN w (toInteger x - toInteger y)))
-
 correct_scale ::
   (1 <= w) =>
   NatRepr w -> Integer -> Domain w -> Natural -> Property
@@ -4974,31 +4975,6 @@ correct_mul ::
 correct_mul w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (mul w a b) (asN w (toInteger x * toInteger y)))
-
--- | The orientation-robust 'add' is never larger than the single-orientation
--- 'addRaw': trying both representatives and keeping the cardinality-minimum can
--- only help.
-addRobustDominatesRaw ::
-  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
-addRobustDominatesRaw w a b =
-  proper a ==> proper b ==>
-    property (size (add w a b) <= size (addRaw w a b))
-
--- | The orientation-robust 'sub' is never larger than the single-orientation
--- 'subRaw'.
-subRobustDominatesRaw ::
-  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
-subRobustDominatesRaw w a b =
-  proper a ==> proper b ==>
-    property (size (sub w a b) <= size (subRaw w a b))
-
--- | The orientation-robust 'mul' is never larger than the single-orientation
--- 'mulRaw'.
-mulRobustDominatesRaw ::
-  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
-mulRobustDominatesRaw w a b =
-  proper a ==> proper b ==>
-    property (size (mul w a b) <= size (mulRaw w a b))
 
 -- | The closed-form 'addSubSize' equals the materialized size of 'addRaw' (and,
 -- since @start'@ doesn\'t affect the count, of 'subRaw') at /every/ orientation
@@ -5029,6 +5005,31 @@ addRobustClosedFormAgrees w a b =
   proper a ==> proper b ==>
     property (size (add w a b) == size (orientRobust w (addRaw w) a b)
            && size (sub w a b) == size (orientRobust w (subRaw w) a b))
+
+-- | The orientation-robust 'add' is never larger than the single-orientation
+-- 'addRaw': trying both representatives and keeping the cardinality-minimum can
+-- only help.
+addRobustDominatesRaw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addRobustDominatesRaw w a b =
+  proper a ==> proper b ==>
+    property (size (add w a b) <= size (addRaw w a b))
+
+-- | The orientation-robust 'sub' is never larger than the single-orientation
+-- 'subRaw'.
+subRobustDominatesRaw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+subRobustDominatesRaw w a b =
+  proper a ==> proper b ==>
+    property (size (sub w a b) <= size (subRaw w a b))
+
+-- | The orientation-robust 'mul' is never larger than the single-orientation
+-- 'mulRaw'.
+mulRobustDominatesRaw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+mulRobustDominatesRaw w a b =
+  proper a ==> proper b ==>
+    property (size (mul w a b) <= size (mulRaw w a b))
 
 
 correct_mulCorners ::
@@ -5747,24 +5748,14 @@ correct_pseudoJoin w a x b _y =
     member a x ==>
       property (member (pseudoJoin w a b) x)
 
--- | 'pseudoJoin' is commutative up to 'leqExact'.
-pseudoJoinCommutative ::
+-- | 'pseudoJoinPrecise' is sound: every member of either operand is in the result.
+correct_pseudoJoinPrecise ::
   (1 <= w) =>
-  NatRepr w -> Domain w -> Domain w -> Property
-pseudoJoinCommutative w a b =
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_pseudoJoinPrecise w a x b _y =
   proper a ==> proper b ==> mask a == mask b ==>
-    let ab = pseudoJoin w a b
-        ba = pseudoJoin w b a
-    in property (leqExact ab ba && leqExact ba ab)
-
--- | 'pseudoJoin' is idempotent up to 'leqExact'.
-pseudoJoinIdempotent ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Property
-pseudoJoinIdempotent w a =
-  proper a ==>
-    let aa = pseudoJoin w a a
-    in property (leqExact aa a && leqExact a aa)
+    member a x ==>
+      property (member (pseudoJoinPrecise w a b) x)
 
 -- | 'pseudoJoin' is an upper bound when neither operand wraps mod @2^w@: in
 -- that regime the closed-form path returns a sound cover whose hull is the
@@ -5782,34 +5773,6 @@ pseudoJoinUpperBound w a b =
   where
     wraps c = start c + n c * stride c > mask c
 
--- | 'pseudoJoinPrecise' is sound: every member of either operand is in the result.
-correct_pseudoJoinPrecise ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
-correct_pseudoJoinPrecise w a x b _y =
-  proper a ==> proper b ==> mask a == mask b ==>
-    member a x ==>
-      property (member (pseudoJoinPrecise w a b) x)
-
--- | 'pseudoJoinPrecise' is commutative up to 'leqExact'.
-pseudoJoinPreciseCommutative ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Domain w -> Property
-pseudoJoinPreciseCommutative w a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    let ab = pseudoJoinPrecise w a b
-        ba = pseudoJoinPrecise w b a
-    in property (leqExact ab ba && leqExact ba ab)
-
--- | 'pseudoJoinPrecise' is idempotent up to 'leqExact'.
-pseudoJoinPreciseIdempotent ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Property
-pseudoJoinPreciseIdempotent w a =
-  proper a ==>
-    let aa = pseudoJoinPrecise w a a
-    in property (leqExact aa a && leqExact a aa)
-
 -- | 'pseudoJoinPrecise' is an upper bound when neither operand wraps mod @2^w@.
 pseudoJoinPreciseUpperBound ::
   (1 <= w) =>
@@ -5821,6 +5784,44 @@ pseudoJoinPreciseUpperBound w a b =
       in property (leqExact a ab && leqExact b ab)
   where
     wraps c = start c + n c * stride c > mask c
+
+-- | 'pseudoJoin' is commutative up to 'leqExact'.
+pseudoJoinCommutative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+pseudoJoinCommutative w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    let ab = pseudoJoin w a b
+        ba = pseudoJoin w b a
+    in property (leqExact ab ba && leqExact ba ab)
+
+-- | 'pseudoJoinPrecise' is commutative up to 'leqExact'.
+pseudoJoinPreciseCommutative ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+pseudoJoinPreciseCommutative w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    let ab = pseudoJoinPrecise w a b
+        ba = pseudoJoinPrecise w b a
+    in property (leqExact ab ba && leqExact ba ab)
+
+-- | 'pseudoJoin' is idempotent up to 'leqExact'.
+pseudoJoinIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+pseudoJoinIdempotent w a =
+  proper a ==>
+    let aa = pseudoJoin w a a
+    in property (leqExact aa a && leqExact a aa)
+
+-- | 'pseudoJoinPrecise' is idempotent up to 'leqExact'.
+pseudoJoinPreciseIdempotent ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+pseudoJoinPreciseIdempotent w a =
+  proper a ==>
+    let aa = pseudoJoinPrecise w a a
+    in property (leqExact aa a && leqExact a aa)
 
 -- | 'pseudoJoinPrecise' refines 'pseudoJoin': anything 'pseudoJoinPrecise'
 -- contains, 'pseudoJoin' contains too.
