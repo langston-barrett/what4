@@ -918,8 +918,27 @@ bor a b = bnot (band (bnot a) (bnot b))
 borPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 borPrecise a b = bnot (bandPrecise (bnot a) (bnot b))
 
+// See @xorFast@ in What4.Domains.BV.Strides.
+bxorFast : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+bxorFast a b =
+  if d == 0 then mk forcedOnes 1 0
+  else mk cosetLo d nSteps
+  where
+    (za, oa) = forcedBits a
+    (zb, ob) = forcedBits b
+    forcedZeros = (za && zb) || (oa && ob)
+    forcedOnes  = (za && ob) || (oa && zb)
+    forced = forcedZeros || forcedOnes
+    free   = ~ forced
+    d = if free == 0 then 0 else lowestSetBit free
+    hi = ~ forcedZeros
+    cosetLo = forcedOnes && (d - 1)
+    nSteps : [n + 1]
+    nSteps = if hi < cosetLo then 0 else zext ((hi - cosetLo) / d)
+
+// See @xor@ in What4.Domains.BV.Strides.
 bxor : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-bxor = liftBitwise2 Bits::bxor
+bxor = psplitOp2 bxorFast
 
 // /Hacker's Delight/ §4.3 minAND/maxAND tightness: for any @x ∈ [alo, ahi]@,
 // @y ∈ [blo, bhi]@, @warrenAndLo <= x && y <= warrenAndHi@.
@@ -961,6 +980,12 @@ andPreciseDominatesAndFast : {n} (fin n, n >= 2) => Domain n -> Domain n -> Prop
 andPreciseDominatesAndFast a b =
   proper a ==> proper b ==> size (bandPrecise a b) <= size (bandFast a b)
 
+// See @xorFastDominatesIdentity@ in What4.Domains.BV.Strides.
+xorFastDominatesIdentity : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+xorFastDominatesIdentity a b =
+  proper a ==> proper b ==>
+    leqExact (bxorFast a b) (bandFast (borFast a b) (bnot (bandFast a b)))
+
 correct_andSingleton : {n} (fin n, n >= 2) => [n] -> Domain n -> [n] -> Property
 correct_andSingleton k c y =
   proper c ==> member c y ==> member (bandSingleton k c) (k && y)
@@ -972,6 +997,7 @@ property p_correct_andSingleton    = correct_andSingleton`{4}
 property p_correct_andPrecise      = correct_andPrecise`{4}
 property p_correct_orPrecise       = correct_orPrecise`{4}
 property p_andPreciseDominatesAndFast = andPreciseDominatesAndFast`{4}
+property p_xorFastDominatesIdentity   = xorFastDominatesIdentity`{4}
 
 // ------------------------------------------------------------------
 // * Concatenation, extension, selection, and truncation
