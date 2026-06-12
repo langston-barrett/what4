@@ -121,7 +121,7 @@ data BVExpr (f :: BT.BaseType -> Type) (tp :: BT.BaseType) where
   BVMul ::
     (1 <= w) =>
     !(NatRepr w) ->
-    !(SRP.SRProd (SR.SemiRingBV SR.BVBits w) f) ->
+    !(SRP.SRProd (SR.SemiRingBV SR.BVArith w) f) ->
     BVExpr f (BT.BaseBVType w)
 
   BVAndBits ::
@@ -265,7 +265,7 @@ data BVExpr (f :: BT.BaseType -> Type) (tp :: BT.BaseType) where
   BVMulHC ::
     (1 <= w) =>
     !(NatRepr w) ->
-    !(HCPR.SRProd (SR.SemiRingBV SR.BVBits w) f) ->
+    !(HCPR.SRProd (SR.SemiRingBV SR.BVArith w) f) ->
     BVExpr f (BT.BaseBVType w)
 
 instance HasBaseType (BVExpr f) where

@@ -23,6 +23,7 @@ module Who2.Protocol.SMTLib2
   ( -- * Entry points
     mkSMTTerm
   , mkSMTTermWithDecls
+  , mkAssertions
   , mkExpr
   , mkFormula
     -- * Type conversion
@@ -166,6 +167,19 @@ mkSMTTermWithDecls (ES.SymExpr expr) = do
   varDecls <- getVariableDeclarations cache
   let allDecls = varDecls ++ fnDecls
   return (allDecls, term)
+
+-- | Serialize a list of boolean predicates as a complete set of SMT-Lib2
+-- assertions. Returns @(declarations, asserts)@ sharing one variable cache so
+-- each declared symbol appears exactly once across all assertions.
+mkAssertions ::
+  [ES.SymExpr t BT.BaseBoolType] ->
+  IO ([Text.Text], [SMT2.Term])
+mkAssertions preds = do
+  cache <- newSerializerCache
+  terms <- mapM (\(ES.SymExpr e) -> mkExprWithCache cache e) preds
+  fnDecls <- getFunctionDeclarations cache
+  varDecls <- getVariableDeclarations cache
+  return (varDecls ++ fnDecls, terms)
 
 -- | Extract variable declarations from cache as SMT-Lib2 declare-const commands
 getVariableDeclarations :: SerializerCache t -> IO [Text.Text]
@@ -314,14 +328,19 @@ mkBVExprWithCache cache = \case
     return $ SMT2.bvsub xTerm yTerm
 
   -- test-smt2: bvMul
-  EBV.BVMul _ wp -> do
+  EBV.BVMul w wp -> do
     let terms = SRP.toTerms wp
+        coeff = SRP.prodCoeff wp
     termList <- mapM (\(x, expn) -> do
                        xTerm <- mkExprWithCache cache x
                        return $ replicate (fromIntegral expn) xTerm) terms
-    case concat termList of
-      [] -> return $ SMT2.numeral 1  -- empty product = 1
-      (t:ts) -> return $ SMT2.bvmul t ts
+    let factorTerms = concat termList
+        coeffTerm = bvLitTerm w coeff
+    case factorTerms of
+      [] -> return coeffTerm  -- empty product = coefficient
+      (t:ts)
+        | coeff == BV.mkBV w 1 -> return $ SMT2.bvmul t ts
+        | otherwise -> return $ SMT2.bvmul coeffTerm (t:ts)
 
   -- test-smt2: bvNeg
   EBV.BVNeg _ x -> do
@@ -510,14 +529,19 @@ mkBVExprWithCache cache = \case
       (Just off, []) -> return off
       (Just off, t:ts) -> return $ foldl (\acc t' -> SMT2.bvadd acc [t']) off (t:ts)
 
-  EBV.BVMulHC _ wp -> do
+  EBV.BVMulHC w wp -> do
     let terms = HCPR.toTerms wp
+        coeff = HCPR.prodCoeff wp
     termList <- mapM (\(x, expn) -> do
                        xTerm <- mkExprWithCache cache x
                        return $ replicate (fromIntegral expn) xTerm) terms
-    case concat termList of
-      [] -> return $ SMT2.numeral 1
-      (t:ts) -> return $ SMT2.bvmul t ts
+    let factorTerms = concat termList
+        coeffTerm = bvLitTerm w coeff
+    case factorTerms of
+      [] -> return coeffTerm
+      (t:ts)
+        | coeff == BV.mkBV w 1 -> return $ SMT2.bvmul t ts
+        | otherwise -> return $ SMT2.bvmul coeffTerm (t:ts)
 
 -- | Convert BVExpr without cache (exported for testing)
 mkBVExpr ::

@@ -49,9 +49,14 @@ main = do
 
   hPutStrLn stderr "Building w4smt2..."
   w4smt2Path <- Runner.buildW4SMT2
-  let config' = config { Conf.cfgW4SMT2Path = w4smt2Path }
+  hPutStrLn stderr "Building w2smt2..."
+  w2smt2Path <- Runner.buildW2SMT2
+  let config' = config { Conf.cfgW4SMT2Path = w4smt2Path
+                       , Conf.cfgW2SMT2Path = w2smt2Path
+                       }
 
   hPutStrLn stderr $ "Using w4smt2 at: " ++ w4smt2Path
+  hPutStrLn stderr $ "Using w2smt2 at: " ++ w2smt2Path
   hPutStrLn stderr $ "Solvers: " ++ unwords (map show (Conf.cfgSolvers config'))
 
   -- Generate work items: files × solvers, filtering out already completed ones

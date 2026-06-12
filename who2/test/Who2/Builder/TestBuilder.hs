@@ -163,7 +163,7 @@ instance IsExprBuilder (TestBuilder t) where
     let SymExpr ex = x
         SymExpr ey = y
         w = EBV.width ex
-        sr = SR.SemiRingBVRepr SR.BVBitsRepr w
+        sr = SR.SemiRingBVRepr SR.BVArithRepr w
         -- Create product: ex^1 * ey^1
         wp = SRP.mul (SRP.var sr ex) (SRP.var sr ey)
     result <- naiveAlloc tb (BVApp (EBV.BVMul w wp))

@@ -10,6 +10,7 @@ module Benchmark.Runner
   , RunningProcess(..)
   , WorkItem(..)
   , buildW4SMT2
+  , buildW2SMT2
   , runBenchmark
   ) where
 
@@ -84,9 +85,16 @@ data RunningProcess = RunningProcess
 -- | Build w4smt2 and return the path to the executable
 
 buildW4SMT2 :: IO FilePath
-buildW4SMT2 = do
-  _ <- readCreateProcess (Proc.proc "cabal" ["build", "-O2", "exe:w4smt2"])
-  path <- readCreateProcess (Proc.proc "cabal" ["list-bin", "-O2", "exe:w4smt2"])
+buildW4SMT2 = buildExe "exe:w4smt2"
+
+-- | Build w2smt2 and return the path to the executable
+buildW2SMT2 :: IO FilePath
+buildW2SMT2 = buildExe "exe:w2smt2"
+
+buildExe :: String -> IO FilePath
+buildExe target = do
+  _ <- readCreateProcess (Proc.proc "cabal" ["build", "-O2", target])
+  path <- readCreateProcess (Proc.proc "cabal" ["list-bin", "-O2", target])
   return $ Text.unpack $ Text.strip path
   where
     readCreateProcess p = do
