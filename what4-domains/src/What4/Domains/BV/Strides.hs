@@ -407,6 +407,7 @@ module What4.Domains.BV.Strides
   , pseudoMeetPrecise
   , pseudoJoin
   , pseudoJoinPrecise
+  , generalizedJoin
   , boundingBoxJoin
   , exactJoin
   , exactMeet
@@ -582,6 +583,15 @@ module What4.Domains.BV.Strides
   , pseudoJoinIdempotent
   , pseudoJoinPreciseIdempotent
   , pseudoJoinPreciseRefinesJoin
+  , correct_generalizedJoin
+  , generalizedJoinSingleton
+  , generalizedJoinUpperBound
+  , generalizedJoinPermutationInvariant
+  , generalizedJoinTopAnnihilator
+  , generalizedJoinAgreesWithPseudoJoin
+  , generalizedJoinSasi
+  , generalizedJoinSasiAgreesWithPseudoJoin
+  , generalizedJoinDominatesSasi
   , pseudoMeetTopIdentity
   , pseudoMeetPreciseTopIdentity
   , pseudoJoinTopAnnihilator
@@ -3597,6 +3607,210 @@ pseudoJoinStrides w a b =
          Nothing  -> mk w 0 1 (mask a)
          Just dom' -> dom'
 
+-- | /O(k · w + k log k)/, where @k@ is the input list length. A single
+-- progression covering every member of every operand, chosen to minimize
+-- cardinality. Returns 'Nothing' on the empty list (there is no bottom
+-- progression) and @Just@ otherwise.
+--
+-- The result coset stride is the @gcd@ of every operand's @gcd(stride, 2^w)@
+-- and every pairwise difference of starts — all commutative, so a single
+-- pass suffices. The covering arc is the complement of the largest gap
+-- between operand arcs on the number circle: by the three-gap-style
+-- argument, that is the smallest arc containing every operand. The two are
+-- combined by 'restrictToCoset', as in 'pseudoJoinStrides'.
+--
+-- /Lattice axioms:/
+--
+-- * Soundness (over-approximation): yes ('correct_generalizedJoin') — every
+--   element of every operand is a member of the result.
+-- * Upper bound: yes when no operand wraps mod @2^w@
+--   ('generalizedJoinUpperBound'); inherits 'pseudoJoin'\'s wrap caveat.
+-- * Idempotence: @generalizedJoin [a] ≡ a@ ('generalizedJoinSingleton').
+-- * Permutation invariance: yes ('generalizedJoinPermutationInvariant').
+-- * Top annihilator: yes ('generalizedJoinTopAnnihilator').
+-- * Associativity\/monotonicity: /no/.
+--
+-- /Precision:/ at least as tight (by cardinality) as the SASI Algorithm 1
+-- fold over rotations of 'pseudoJoin' ('generalizedJoinDominatesSasi'); see
+-- 'generalizedJoinSasi'.
+--
+-- == Examples
+--
+-- Three stride-4 cosets join to the evens:
+--
+-- >>> let xs = [mk4 0 4 3, mk4 2 4 3, mk4 6 4 3]
+-- >>> fmap display (generalizedJoin w4 xs)
+-- Just "[*.*.*.*.*.*.*.*.]  = [0,2,4,6,8,10,12,14]"
+--
+-- >>> generalizedJoin w4 []
+-- Nothing
+generalizedJoin :: (1 <= w) => NatRepr w -> [Domain w] -> Maybe (Domain w)
+generalizedJoin w xs0 =
+  assert (Prelude.all proper xs0) $
+  -- Mirror 'pseudoJoin'\'s @leq@ short-circuit: drop any operand strictly
+  -- contained in another. The arc-based join below works on hulls and can
+  -- otherwise lose precision when one operand's hull spans the whole
+  -- circle while another tightly captures its content.
+  case dropDominated xs0 of
+    []     -> Nothing
+    [y]    -> Just y
+    (y:ys) ->
+      let !arcResult = arcBased (y:ys)
+          -- Self-wrapping operands' arc is 'cosetArc', which over-covers
+          -- their actual orbit; on such inputs the SASI fold can be tighter
+          -- because each pairwise 'pseudoJoin' applies its own coset
+          -- restriction. Take the min of the two.
+          !sasiResult = generalizedJoinSasi w xs0
+      in Just $ case sasiResult of
+           Just s | size s < size arcResult -> s
+           _                                -> arcResult
+  where
+    arcBased ys =
+      let !arc = smallestCoveringArc w ys
+          !g   = jointCosetStride ys
+          -- Anchor: any operand's start. All lie on the same g-coset by
+          -- construction of g (g divides every pairwise start
+          -- difference), so the choice is irrelevant.
+          !anchor = case ys of (z:_) -> start z; [] -> 0
+      in case fromArith w arc of
+           Nothing  -> top w  -- shouldn't happen on proper inputs
+           Just dom -> case restrictToCoset w dom anchor g of
+             Nothing   -> top w
+             Just dom' -> dom'
+
+-- | Keep only the maximal elements under 'leq': drop any operand contained
+-- in another, breaking ties (duplicates and 'leq'-equivalent operands) by
+-- keeping the first occurrence. This mirrors 'pseudoJoin'\'s @leq@
+-- short-circuit: without it, a self-wrapping operand would survive into the
+-- arc analysis below, where its 'cosetArc' is the full coset and so loses
+-- the orbit's actual cardinality.
+dropDominated :: [Domain w] -> [Domain w]
+dropDominated = go []
+  where
+    go acc []     = Prelude.reverse acc
+    go acc (x:xs)
+      | Prelude.any (\a -> leq x a) acc = go acc xs
+      | otherwise =
+          let !acc' = x : Prelude.filter (Prelude.not . (`leq` x)) acc
+          in go acc' xs
+
+-- | The joint coset stride: @gcd@ of every operand's @gcd(stride, 2^w)@ and
+-- every pairwise difference of @start@s. All such @gcd@s are powers of two,
+-- so the result is also a power of two. Singletons are skipped on the stride
+-- side (they lie on every coset and would otherwise collapse the result).
+jointCosetStride :: [Domain w] -> Natural
+jointCosetStride = \case
+  [] -> 1
+  (y:ys) ->
+    let !m = mask y
+        -- Strides: gcd of each non-singleton operand's coset stride.
+        !gStride =
+          Prelude.foldr Prelude.gcd 0
+            [ strideGcd c | c <- y:ys, n c /= 0 ]
+        -- Start differences: gcd of @start_i - start_0 mod 2^w@ for @i > 0@.
+        -- @gcd(d, 2^w)@ on a 'Natural' is the same as @lowestSetBit d@; we
+        -- just take 'Prelude.gcd' which gives the same result (and folds
+        -- over multiple deltas).
+        !gDelta =
+          Prelude.foldr Prelude.gcd 0
+            [ modSub m (start c) (start y) | c <- ys ]
+    in case (gStride, gDelta) of
+         -- Both zero: every operand is a singleton with the same start →
+         -- result is a singleton, any positive stride works; pin to 1.
+         (0, 0) -> 1
+         (0, d) -> lowestSetBit d
+         (s, 0) -> s
+         (s, d) -> min s (lowestSetBit d)
+{-# INLINE jointCosetStride #-}
+
+-- | The smallest arc on the number circle covering every operand's arc.
+--
+-- Each operand contributes one /circle arc/ via 'toArith' (a coset arc for
+-- self-wrapping operands, the @[start, end]@ arc otherwise). To find the
+-- smallest arc covering all of them: pick a /cut point/ on the circle that
+-- lies outside every arc, unroll into a line starting from that cut, and
+-- take the convex hull. The optimal cut is in the largest gap between
+-- consecutive arcs on the circle. We try every operand's @start@ as a
+-- candidate cut and pick the cover with smallest size — this examines @k@
+-- candidates, which is sufficient: the largest gap, if any, has its right
+-- endpoint at some operand's @start@ (the @start@ of the arc that follows
+-- the gap clockwise), so one of those @k@ rotations finds it.
+smallestCoveringArc :: NatRepr w -> [Domain w] -> A.Domain w
+smallestCoveringArc w xs =
+  let !imask = maxUnsigned w
+      !arcs = [ (toInteger arcLo, arcN) | c <- xs, let (arcLo, arcN) = arcOf c ]
+      arcOf c =
+        if isSelfWrapping c
+          then
+            -- 'cosetArc' shape: starts at @s mod g@ and is the smallest
+            -- arc containing the @g@-coset, with size @2^w - g + 1@
+            -- elements (so @arcN = 2^w - g@). When @g == 1@ this is the
+            -- whole circle: @arcN = mask@ encodes top.
+            let !g  = strideGcd c
+                !lo = start c Bits..&. (g - 1)
+            in (lo, integerToNatural imask + 1 - g)
+          else (start c, n c * stride c)
+      -- For each candidate cut point (= some operand's @start@), compute
+      -- the smallest arc starting at that cut that covers every operand's
+      -- circle arc. The optimal cut sits in the largest gap between
+      -- consecutive arcs on the circle, so its right endpoint is some
+      -- arc's @lo@ — so this finite search is exhaustive.
+      candidates =
+        -- Try candidate cuts in ascending @cutLo@ so the order-insensitive
+        -- tiebreak (size first, then lower @cutLo@) is fully determined by
+        -- the input set, not its list order.
+        [ A.interval imask cutLo sz
+        | (cutLo, _) <- List.sort arcs
+        , let sz = unrollHullSize imask cutLo arcs
+        ]
+  in case candidates of
+       []     -> A.interval imask 0 imask  -- unreachable: caller filters empty
+       (a:as) -> List.foldl' pickSmaller a as
+  where
+    pickSmaller a b = if A.size a <= A.size b then a else b
+{-# INLINE smallestCoveringArc #-}
+
+-- | Size (as @hi - lo@) of the smallest line interval containing every arc
+-- after unrolling the circle from @cutLo@ to @cutLo + 2^w@. Caps at
+-- @2^w - 1@ when an arc fully wraps past the cut.
+unrollHullSize :: Integer -> Integer -> [(Integer, Natural)] -> Integer
+unrollHullSize imask cutLo arcs =
+  let !sz = imask + 1
+      hiAfter (arcLo, arcN) =
+        let !arcLen = toInteger arcN + 1
+            !startOff = (arcLo - cutLo + sz) `Prelude.mod` sz
+        in min (sz - 1) (startOff + arcLen - 1)
+  in List.foldl' max 0 (Prelude.map hiAfter arcs)
+
+-- | /O(k^2 · w)/, where @k@ is the input list length. The /generalized
+-- pseudo-join/ of SASI Algorithm 1: a single progression covering every
+-- member of every operand, chosen to minimize cardinality among the @k@
+-- rotations of the operands sorted by lower bound. Retained as a reference
+-- implementation against which 'generalizedJoin' is checked
+-- ('generalizedJoinDominatesSasi').
+generalizedJoinSasi :: (1 <= w) => NatRepr w -> [Domain w] -> Maybe (Domain w)
+-- References:
+--
+-- * SASI Algorithm 1, Generalized Join
+generalizedJoinSasi w xs0 =
+  assert (Prelude.all proper xs0) $
+  -- Sort by 'start' with a total-order tiebreaker on @(stride, n)@: a stable
+  -- sort by 'start' alone leaves ties resolved by input order, and since
+  -- 'pseudoJoin' is non-associative, different rotations of those ties yield
+  -- different folds — breaking permutation invariance.
+  case List.sortOn (\d -> (start d, stride d, n d)) xs0 of
+    []    -> Nothing
+    [y]   -> Just y
+    ys    ->
+      -- Try each clockwise rotation of the lower-bound-sorted operands; the
+      -- @i@-th rotation reduces 'pseudoJoin' starting from @y_i@. Keep the
+      -- least-cardinality result.
+      let !candidates = [ Prelude.foldl1 (pseudoJoin w) (rotate i ys)
+                        | i <- [0 .. Prelude.length ys - 1] ]
+      in Just (List.minimumBy (\p q -> compare (size p) (size q)) candidates)
+  where
+    rotate i ys = let (pre, post) = Prelude.splitAt i ys in post ++ pre
+
 -- | /O(w)/. Bounding-box join: 'A.range' on the @min@\/@max@ of each
 -- operand's unsigned bounds. Computed without going through 'A.join's
 -- shorter-arc heuristic, so the operator is associative and monotone.
@@ -5831,6 +6045,107 @@ pseudoJoinPreciseRefinesJoin w a b =
   proper a ==> proper b ==> mask a == mask b ==>
     property (leqExact (pseudoJoinPrecise w a b) (pseudoJoin w a b))
 
+-- | 'generalizedJoin' is sound: every member of any operand is a member of
+-- the result.
+correct_generalizedJoin ::
+  (1 <= w) =>
+  NatRepr w -> [Domain w] -> Natural -> Property
+correct_generalizedJoin w xs x =
+  Prelude.all proper xs ==> sameMask w xs ==>
+    Prelude.any (`member` x) xs ==>
+      case generalizedJoin w xs of
+        Nothing -> property False  -- non-empty list always joins to Just
+        Just c  -> property (member c x)
+
+-- | 'generalizedJoin' on a singleton list is the identity.
+generalizedJoinSingleton ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Property
+generalizedJoinSingleton w a =
+  proper a ==>
+    case generalizedJoin w [a] of
+      Just c  -> property (leqExact c a && leqExact a c)
+      Nothing -> property False
+
+-- | 'generalizedJoin' is an upper bound when no operand wraps mod @2^w@:
+-- every operand is contained in the result under 'leqExact'. (Inherits the
+-- wrap caveat of 'pseudoJoin'\'s upper-bound law.)
+generalizedJoinUpperBound ::
+  (1 <= w) =>
+  NatRepr w -> [Domain w] -> Property
+generalizedJoinUpperBound w xs =
+  Prelude.all proper xs ==> sameMask w xs ==>
+    Prelude.not (Prelude.null xs) ==>
+      Prelude.all (Prelude.not . wraps) xs ==>
+        case generalizedJoin w xs of
+          Nothing -> property False
+          Just c  -> property (Prelude.all (`leqExact` c) xs)
+  where
+    wraps d = start d + n d * stride d > mask d
+
+-- | 'generalizedJoin' is invariant under permutation of its input: it sorts
+-- the operands by lower bound before folding, so input order is irrelevant.
+generalizedJoinPermutationInvariant ::
+  (1 <= w) =>
+  NatRepr w -> [Domain w] -> Property
+generalizedJoinPermutationInvariant w xs =
+  Prelude.all proper xs ==> sameMask w xs ==>
+    let fwd = generalizedJoin w xs
+        rev = generalizedJoin w (Prelude.reverse xs)
+    in property (eqMaybe fwd rev)
+
+-- | A list containing 'top' joins to 'top': 'top' is an annihilator.
+generalizedJoinTopAnnihilator ::
+  (1 <= w) =>
+  NatRepr w -> [Domain w] -> Property
+generalizedJoinTopAnnihilator w xs =
+  Prelude.all proper xs ==> sameMask w xs ==>
+    case generalizedJoin w (top w : xs) of
+      Nothing -> property False
+      Just c  -> property (leqExact c (top w) && leqExact (top w) c)
+
+-- | On a two-element list, 'generalizedJoin' is at least as tight (by
+-- cardinality) as the binary 'pseudoJoin'. They are not exactly equal: the
+-- gap-based join can be strictly smaller than 'pseudoJoin' on inputs where
+-- 'A.join'\'s midpoint heuristic picks a worse arc than the global largest
+-- gap.
+generalizedJoinAgreesWithPseudoJoin ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+generalizedJoinAgreesWithPseudoJoin w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case generalizedJoin w [a, b] of
+      Nothing -> property False
+      Just c  -> property (size c <= size (pseudoJoin w a b))
+
+-- | On a two-element list, 'generalizedJoinSasi' denotes the same set as
+-- the binary 'pseudoJoin': the two rotations @[a, b]@ and @[b, a]@ reduce
+-- to @pseudoJoin a b@ and @pseudoJoin b a@, which agree by commutativity.
+generalizedJoinSasiAgreesWithPseudoJoin ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+generalizedJoinSasiAgreesWithPseudoJoin w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case generalizedJoinSasi w [a, b] of
+      Nothing -> property False
+      Just c  ->
+        let ab = pseudoJoin w a b
+        in property (leqExact c ab && leqExact ab c)
+
+-- | 'generalizedJoin' is at least as tight (by cardinality) as
+-- 'generalizedJoinSasi': the gap-based cover is the smallest arc containing
+-- every operand, while the SASI fold is one of @k@ rotations of
+-- 'pseudoJoin', each of which sees only a local view of the operands.
+generalizedJoinDominatesSasi ::
+  (1 <= w) =>
+  NatRepr w -> [Domain w] -> Property
+generalizedJoinDominatesSasi w xs =
+  Prelude.all proper xs ==> sameMask w xs ==>
+    Prelude.not (Prelude.null xs) ==>
+      case (generalizedJoin w xs, generalizedJoinSasi w xs) of
+        (Just c, Just s) -> property (size c <= size s)
+        _                -> property False
+
 -- | @pseudoMeet a top ≡ a@: 'top' is the identity for 'pseudoMeet'.
 pseudoMeetTopIdentity ::
   (1 <= w) =>
@@ -6486,6 +6801,12 @@ eqMaybe :: Maybe (Domain w) -> Maybe (Domain w) -> Bool
 eqMaybe Nothing Nothing = True
 eqMaybe (Just x) (Just y) = leqExact x y && leqExact y x
 eqMaybe _ _ = False
+
+-- | Every progression in the list has the @w@-bit mask. Used by the
+-- list-valued 'generalizedJoin' properties to discharge the shared-width
+-- precondition that the binary operators state as @mask a == mask b@.
+sameMask :: NatRepr w -> [Domain w] -> Bool
+sameMask w = Prelude.all (\c -> mask c == integerToNatural (maxUnsigned w))
 
 -- ------------------------------------------------------------------
 -- ** Helpers

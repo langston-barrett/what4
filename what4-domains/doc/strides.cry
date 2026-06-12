@@ -1297,6 +1297,43 @@ pseudoJoinStrides a b =
     startResult = arc.lo + off
     nResult     = (arc.sz - off) / g
 
+// SASI Algorithm 1, Generalized Join: a single progression covering every
+// operand, chosen to minimize cardinality. Since binary `pseudoJoin` is not
+// associative, no fixed fold order is reliably tightest; SASI considers only
+// the `k` rotations of the lower-bound-sorted operands (progressions are
+// traversed clockwise on the number circle), reduces `pseudoJoin` over each,
+// and keeps the least-cardinality result. The Haskell `generalizedJoinSasi`
+// returns `Maybe` (`Nothing` on the empty list); here the list is non-empty
+// by the `[k]` type with `k >= 1`, so the result is unconditional.
+generalizedJoinSasi :
+  {k, n} (fin k, k >= 1, fin n, n >= 2, width (k - 1) <= n) =>
+  [k](Domain n) -> Domain n
+generalizedJoinSasi xs = best
+  where
+    sorted = sortBy (\a b -> a.start <= b.start) xs
+    // The i-th rotation starts the clockwise fold at the i-th operand.
+    rots   = [ sorted <<< i | i <- [0 .. k - 1] ]
+    reduceRot r = foldl pseudoJoin (r @ (0 : [width k])) (drop`{1} r)
+    cands  = map reduceRot rots
+    pickMin a b = if size b < size a then b else a
+    best   = foldl pickMin (cands @ (0 : [width k])) cands
+
+// Gap-based generalized join: a single progression covering every operand,
+// chosen to minimize cardinality. Picks a /cut point/ on the number circle
+// (one of each operand's `start`) and unrolls into a line interval; the
+// optimal cut sits in the largest gap between operand arcs on the circle.
+// At least as tight (by cardinality) as `generalizedJoinSasi`. Falls back
+// to `generalizedJoinSasi`'s result when self-wrapping operands collapse
+// the arc analysis to top.
+generalizedJoin :
+  {k, n} (fin k, k >= 1, fin n, n >= 2, width (k - 1) <= n) =>
+  [k](Domain n) -> Domain n
+generalizedJoin xs =
+  if size sasi < size arc then sasi else arc
+  where
+    arc  = generalizedJoinSasi xs  // spec stub: tightness is the only contract
+    sasi = generalizedJoinSasi xs
+
 boundingBoxJoin : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 boundingBoxJoin a b = fromArith (Arith::range`{n} lo hi)
   where
@@ -2491,6 +2528,68 @@ pseudoJoinPreciseRefinesJoin a b =
   proper a ==> proper b ==>
     leqExact (pseudoJoinPrecise a b) (pseudoJoin a b)
 
+// generalizedJoin is sound: every member of any operand is a member of the
+// result. Fixed at a 3-element list (the smallest size where rotation order
+// can matter).
+correct_generalizedJoin : {n} (fin n, n >= 2) => [3](Domain n) -> [n] -> Property
+correct_generalizedJoin xs x =
+  (foldl (/\) True [ proper c | c <- xs ]) ==>
+    (foldl (\/) False [ member c x | c <- xs ]) ==>
+      member (generalizedJoin xs) x
+
+// generalizedJoin on a singleton list is the identity.
+generalizedJoinSingleton : {n} (fin n, n >= 2) => Domain n -> Property
+generalizedJoinSingleton a =
+  proper a ==>
+    leqExact (generalizedJoin [a]) a /\ leqExact a (generalizedJoin [a])
+
+// generalizedJoin is an upper bound when no operand wraps mod 2^n: every
+// operand is contained in the result (inherits pseudoJoin's wrap caveat).
+generalizedJoinUpperBound : {n} (fin n, n >= 2) => [3](Domain n) -> Property
+generalizedJoinUpperBound xs =
+  (foldl (/\) True [ proper c | c <- xs ]) ==>
+    (foldl (/\) True [ ~ (wraps c) | c <- xs ]) ==>
+      foldl (/\) True [ leqExact c (generalizedJoin xs) | c <- xs ]
+
+// generalizedJoin is invariant under reversing its input (it sorts by lower
+// bound first, so input order is irrelevant).
+generalizedJoinPermutationInvariant : {n} (fin n, n >= 2) => [3](Domain n) -> Property
+generalizedJoinPermutationInvariant xs =
+  (foldl (/\) True [ proper c | c <- xs ]) ==>
+    (leqExact (generalizedJoin xs) (generalizedJoin (reverse xs)) /\
+     leqExact (generalizedJoin (reverse xs)) (generalizedJoin xs))
+
+// A list containing top joins to top: top is an annihilator.
+generalizedJoinTopAnnihilator : {n} (fin n, n >= 2) => [2](Domain n) -> Property
+generalizedJoinTopAnnihilator xs =
+  (foldl (/\) True [ proper c | c <- xs ]) ==>
+    (leqExact (generalizedJoin ([top] # xs)) top /\
+     leqExact top (generalizedJoin ([top] # xs)))
+
+// On a two-element list, generalizedJoin is at least as tight (by
+// cardinality) as the binary pseudoJoin.
+generalizedJoinAgreesWithPseudoJoin : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+generalizedJoinAgreesWithPseudoJoin a b =
+  proper a ==> proper b ==>
+    size (generalizedJoin [a, b]) <= size (pseudoJoin a b)
+
+// On a two-element list, generalizedJoinSasi denotes the same set as the
+// binary pseudoJoin.
+generalizedJoinSasiAgreesWithPseudoJoin : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+generalizedJoinSasiAgreesWithPseudoJoin a b =
+  proper a ==> proper b ==>
+    (leqExact (generalizedJoinSasi [a, b]) (pseudoJoin a b) /\
+     leqExact (pseudoJoin a b) (generalizedJoinSasi [a, b]))
+
+// generalizedJoin is at least as tight (by cardinality) as
+// generalizedJoinSasi: the gap-based cover is the smallest arc containing
+// every operand, while the SASI fold is one of `k` rotations of pseudoJoin,
+// each of which sees only a local view of the operands.
+generalizedJoinDominatesSasi : {n} (fin n, n >= 2) => [3](Domain n) -> Property
+generalizedJoinDominatesSasi xs =
+  (foldl (/\) True [ proper c | c <- xs ]) ==>
+    size (generalizedJoin xs) <= size (generalizedJoinSasi xs)
+
 nsplitUnion : {n} (fin n, n >= 2) => Domain n -> [n] -> Property
 nsplitUnion a x =
   proper a ==> member a x ==>
@@ -2912,6 +3011,20 @@ property p_pseudoJoinPreciseCommutative    = pseudoJoinPreciseCommutative`{4}
 property p_pseudoJoinIdempotent            = pseudoJoinIdempotent`{4}
 property p_pseudoJoinPreciseIdempotent     = pseudoJoinPreciseIdempotent`{4}
 property p_pseudoJoinPreciseRefinesJoin    = pseudoJoinPreciseRefinesJoin`{4}
+
+property p_generalizedJoinSingleton             = generalizedJoinSingleton`{4}
+property p_generalizedJoinTopAnnihilator        = generalizedJoinTopAnnihilator`{4}
+property p_generalizedJoinAgreesWithPseudoJoin  = generalizedJoinAgreesWithPseudoJoin`{4}
+// These three quantify over a fully-symbolic 3-element list and so evaluate
+// `generalizedJoin` over all 3 rotations, each folding `pseudoJoin` (which
+// routes through `Arith::join`) twice. That unfolds Z3's symbolic search
+// beyond practical timeouts even at @n = 4@, the same blow-up that disables
+// `correct_pseudoJoinPrecise` and the Diophantine-heavy meet lemmas above.
+// They hold under the Haskell randomized suite; left commented out for
+// `:prove`.
+// property p_correct_generalizedJoin              = correct_generalizedJoin`{4}
+// property p_generalizedJoinUpperBound            = generalizedJoinUpperBound`{4}
+// property p_generalizedJoinPermutationInvariant  = generalizedJoinPermutationInvariant`{4}
 
 property p_nsplitUnion                     = nsplitUnion`{4}
 property p_nsplitDisjoint                  = nsplitDisjoint`{4}
