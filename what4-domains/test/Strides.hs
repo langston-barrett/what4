@@ -582,6 +582,24 @@ tests = TT.testGroup "Strides"
   , genTest "pseudoJoinPreciseRefinesJoin" $
       do SW n <- genWidth
          S.pseudoJoinPreciseRefinesJoin n <$> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoJoinMinimalUpperBound" $
+      do SW n <- genWidth
+         S.pseudoJoinMinimalUpperBound n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoJoinPreciseMinimalUpperBound" $
+      do SW n <- genWidth
+         S.pseudoJoinPreciseMinimalUpperBound n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "boundingBoxJoinMinimalUpperBound" $
+      do SW n <- genWidth
+         S.boundingBoxJoinMinimalUpperBound n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoMeetMaximalLowerBound" $
+      do SW n <- genWidth
+         S.pseudoMeetMaximalLowerBound n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "pseudoMeetPreciseMaximalLowerBound" $
+      do SW n <- genWidth
+         S.pseudoMeetPreciseMaximalLowerBound n <$> S.genDomain n <*> S.genDomain n <*> S.genDomain n
+  , genTest "lowerBoundMaximalAmongCandidates" $
+      do SW n <- genWidth
+         S.lowerBoundMaximalAmongCandidates n <$> S.genDomain n <*> S.genDomain n
   , genTest "pseudoMeetTopIdentity" $
       do SW n <- genWidth
          S.pseudoMeetTopIdentity n <$> S.genDomain n

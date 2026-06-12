@@ -631,6 +631,12 @@ module What4.Domains.BV.Strides
   , pseudoJoinIdempotent
   , pseudoJoinPreciseIdempotent
   , pseudoJoinPreciseRefinesJoin
+  , pseudoJoinMinimalUpperBound
+  , pseudoJoinPreciseMinimalUpperBound
+  , boundingBoxJoinMinimalUpperBound
+  , pseudoMeetMaximalLowerBound
+  , pseudoMeetPreciseMaximalLowerBound
+  , lowerBoundMaximalAmongCandidates
   , pseudoJoinTopAnnihilator
   , pseudoJoinPreciseTopAnnihilator
   , correct_boundingBoxJoin
@@ -1899,6 +1905,17 @@ isSelfWrapping Domain{stride, n, mask} = n * stride > mask
 -- 'toList' ground truth, so the two algorithms cross-check each other.
 eqExact :: Domain w -> Domain w -> Bool
 eqExact a b = size a == size b && leqExact a b
+
+-- | Strict containment under 'leqExact': @a@ is a proper subset of @b@.
+strictlyLess :: Domain w -> Domain w -> Bool
+strictlyLess a b = leqExact a b && Prelude.not (leqExact b a)
+
+-- | @a@ and @b@ lie in the same coset of the same subgroup of @Z\/2^w@:
+-- their stride gcds agree and their starts are congruent modulo that gcd.
+sameOrbit :: Domain w -> Domain w -> Bool
+sameOrbit a b =
+  strideGcd a == strideGcd b &&
+  modSub (mask a) (start a) (start b) .&. (strideGcd a - 1) == 0
 
 -- ------------------------------------------------------------------
 -- Lifted operations (internal scaffolding; not exported)
@@ -7298,6 +7315,125 @@ pseudoJoinPreciseRefinesJoin ::
 pseudoJoinPreciseRefinesJoin w a b =
   proper a ==> proper b ==> mask a == mask b ==>
     property (leqExact (pseudoJoinPrecise w a b) (pseudoJoin w a b))
+
+-- | On non-wrapping, stride-1 operands, 'pseudoJoin' is minimal among
+-- stride-1 upper bounds: no other stride-1 upper bound is strictly
+-- contained in @pseudoJoin a b@.
+--
+-- The stride-1 restriction is essential because 'pseudoJoin' is built on
+-- 'toArith', which over-approximates wider-stride progressions to their
+-- arc hulls — so 'A.join' may return an arc wider than needed to cover
+-- @a@ and @b@'s actual elements when @stride > 1@. (E.g. at @w=2@,
+-- @a = {0,3}@ has @toArith a = top@, and @pseudoJoin a {0} = top@,
+-- dominated by the stride-1 progression @{3,0}@.) For coarser-stride
+-- covers in particular, 'pseudoJoin' is /not/ minimal — finding the
+-- minimum-cardinality covering progression across all strides requires a
+-- number-theoretic search 'pseudoJoin' doesn't perform.
+--
+-- Wrapping operands are excluded because 'toArith' over-approximates a
+-- self-wrapping orbit to its full coset arc.
+pseudoJoinMinimalUpperBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+pseudoJoinMinimalUpperBound w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      stride a == 1 ==> stride b == 1 ==> stride c == 1 ==>
+        Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+          let r = pseudoJoin w a b in
+          leqExact a c ==> leqExact b c ==>
+            property (Prelude.not (strictlyLess c r))
+  where
+    wraps d = start d + n d * stride d > mask d
+
+-- | 'pseudoJoinPrecise' is minimal among stride-1 upper bounds on
+-- non-wrapping stride-1 operands. See 'pseudoJoinMinimalUpperBound' for
+-- why each restriction is needed.
+pseudoJoinPreciseMinimalUpperBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+pseudoJoinPreciseMinimalUpperBound w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      stride a == 1 ==> stride b == 1 ==> stride c == 1 ==>
+        Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+          let r = pseudoJoinPrecise w a b in
+          leqExact a c ==> leqExact b c ==>
+            property (Prelude.not (strictlyLess c r))
+  where
+    wraps d = start d + n d * stride d > mask d
+
+-- | 'boundingBoxJoin' returns a minimal upper bound /among non-wrapping
+-- stride-1 progressions/. (It always returns a stride-1 arithmetic interval,
+-- so it is /not/ minimal across the full strided lattice — e.g.
+-- @boundingBoxJoin {0} {4} = {0,1,2,3,4}@ is dominated by @(0, 4, 1) =
+-- {0, 4}@. The bounding-box result is, however, the smallest non-wrapping
+-- stride-1 cover.) Restricted to non-wrapping operands so the operator
+-- doesn't saturate to 'top', and to stride-1 candidates @c@ (the only
+-- shape 'boundingBoxJoin' could produce).
+boundingBoxJoinMinimalUpperBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+boundingBoxJoinMinimalUpperBound w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+        stride c == 1 ==> Prelude.not (wraps c) ==>
+          leqExact a c ==> leqExact b c ==>
+            property (Prelude.not (strictlyLess c (boundingBoxJoin w a b)))
+  where
+    wraps d = start d + n d * stride d > mask d
+
+-- | 'pseudoMeet' returns a maximal lower bound: no proper lower bound
+-- strictly contains @pseudoMeet a b@. Restricted to non-wrapping operands,
+-- where 'pseudoMeet' is itself a lower bound (cf. 'pseudoMeetLowerBound').
+pseudoMeetMaximalLowerBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+pseudoMeetMaximalLowerBound w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+        leqExact c a ==> leqExact c b ==>
+          case pseudoMeet w a b of
+            Nothing -> property True
+            Just r  -> property (Prelude.not (strictlyLess r c))
+  where
+    wraps d = start d + n d * stride d > mask d
+
+-- | 'pseudoMeetPrecise' returns a maximal lower bound (non-wrapping operands).
+pseudoMeetPreciseMaximalLowerBound ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Domain w -> Property
+pseudoMeetPreciseMaximalLowerBound w a b c =
+  proper a ==> proper b ==> proper c ==>
+    mask a == mask b ==> mask a == mask c ==>
+      Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+        leqExact c a ==> leqExact c b ==>
+          case pseudoMeetPrecise w a b of
+            Nothing -> property True
+            Just r  -> property (Prelude.not (strictlyLess r c))
+  where
+    wraps d = start d + n d * stride d > mask d
+
+-- | 'lowerBound' is a maximal lower bound /among the elements of
+-- 'lowerBounds'/: no element of @lowerBounds w a b@ strictly contains
+-- @lowerBound w a b@. (Stronger than 'lowerBoundIsLargestLowerBound',
+-- which only compares 'size'; this checks 'leqExact' dominance.)
+-- Whether 'lowerBound' is maximal across /all/ lower bounds is open and
+-- not asserted here.
+lowerBoundMaximalAmongCandidates ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+lowerBoundMaximalAmongCandidates w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case lowerBound w a b of
+      Nothing -> property True
+      Just r  ->
+        property (Prelude.and
+          [ Prelude.not (strictlyLess r c)
+          | c <- lowerBounds w a b
+          ])
 
 -- | @pseudoJoin a top ≡ top@: 'top' is an annihilator for 'pseudoJoin'.
 pseudoJoinTopAnnihilator ::
