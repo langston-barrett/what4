@@ -1,5 +1,9 @@
 packages:
+  what4/
   what4-domains/
+  w4smt2/
+  who2/
+  w2smt2/
 
 -- See Note [Asserts] in what4-domains
 package what4-domains
