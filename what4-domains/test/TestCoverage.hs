@@ -51,16 +51,29 @@ data HsModule = HsModule
   , hsModTestFile :: FilePath
   }
 
-arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridedMod :: HsModule
-arithMod   = HsModule "src/What4/Domains/BV/Arith.hs"           "A" "test/BVDomTests.hs"
-bitwiseMod = HsModule "src/What4/Domains/BV/Bitwise.hs"         "B" "test/BVDomTests.hs"
-xorMod     = HsModule "src/What4/Domains/BV/XOR.hs"             "X" "test/BVDomTests.hs"
-overallMod = HsModule "src/What4/Domains/BV.hs"                 "O" "test/BVDomTests.hs"
-stridesMod = HsModule "src/What4/Domains/BV/Strides.hs"         "S" "test/Strides.hs"
-stridedMod = HsModule "src/What4/Domains/BV/StridedInterval.hs" "S" "test/StridedInterval.hs"
+arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod :: HsModule
+arithMod          = HsModule "src/What4/Domains/BV/Arith.hs"           "A"  "test/BVDomTests.hs"
+bitwiseMod        = HsModule "src/What4/Domains/BV/Bitwise.hs"         "B"  "test/BVDomTests.hs"
+xorMod            = HsModule "src/What4/Domains/BV/XOR.hs"             "X"  "test/BVDomTests.hs"
+overallMod        = HsModule "src/What4/Domains/BV.hs"                 "O"  "test/BVDomTests.hs"
+stridesMod        = HsModule "src/What4/Domains/BV/Strides.hs"         "S"  "test/Strides.hs"
+stridesBitwiseMod = HsModule "src/What4/Domains/BV/StridesBitwise.hs"  "SB" "test/StridesBitwise.hs"
+stridedMod        = HsModule "src/What4/Domains/BV/StridedInterval.hs" "S"  "test/StridedInterval.hs"
 
+-- | All Haskell-side modules whose properties are exercised by the
+-- property-test driver. The invocation check runs against every module
+-- in this list.
 allHsModules :: [HsModule]
 allHsModules =
+  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod]
+
+-- | Modules backed by a Cryptol model (in @doc/*.cry@). The
+-- Cryptol-correspondence checks run only against these.
+-- 'stridesBitwiseMod' is excluded because it's a reduced product
+-- assembled from primitives that already have Cryptol models — its own
+-- Haskell-only properties have no Cryptol counterpart.
+cryptolBackedModules :: [HsModule]
+cryptolBackedModules =
   [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridedMod]
 
 -- | Additional source files that define Haskell @Property@ predicates but
@@ -242,7 +255,7 @@ cryptolCorrespondenceTests = TT.testGroup "Cryptol <-> Haskell"
   [ TT.testGroup "Cryptol predicates have Haskell counterparts"
       [ testCase f (checkCryptolFile f) | f <- cryptolFiles ]
   , TT.testGroup "Haskell predicates have Cryptol counterparts"
-      [ testCase (hsModFile m) (checkHaskellFile m) | m <- allHsModules ]
+      [ testCase (hsModFile m) (checkHaskellFile m) | m <- cryptolBackedModules ]
   ]
 
 checkCryptolFile :: FilePath -> Assertion
@@ -292,15 +305,106 @@ checkHaskellFile m = do
 
 exportOrderTests :: TT.TestTree
 exportOrderTests = TT.testGroup "Export order matches definition order"
-  [ testCase "src/What4/Domains/BV/Strides.hs" checkStridesExportOrder ]
+  [ testCase "src/What4/Domains/BV/Strides.hs" $
+      checkExportOrderFor "src/What4/Domains/BV/Strides.hs"
+  , testCase "src/What4/Domains/BV/StridesBitwise.hs" $
+      checkExportOrderFor "src/What4/Domains/BV/StridesBitwise.hs"
+  , testCase "StridesBitwise mirrors Strides section order" $
+      checkSectionsMirrorStrides
+  , testCase "StridesBitwise mirrors Strides operation order within sections" $
+      checkOpOrderMirrorsStrides
+  ]
 
-checkStridesExportOrder :: Assertion
-checkStridesExportOrder = do
-  src <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
-  checkExportOrder         "src/What4/Domains/BV/Strides.hs" src
-  checkExportSections      "src/What4/Domains/BV/Strides.hs" src
-  checkSectionNesting      "src/What4/Domains/BV/Strides.hs" src
-  checkPropertiesMatchOps  "src/What4/Domains/BV/Strides.hs" src
+-- | Run all the per-file export-order checks on a single file.
+checkExportOrderFor :: FilePath -> Assertion
+checkExportOrderFor f = do
+  src <- TIO.readFile f
+  checkExportOrder         f src
+  checkExportSections      f src
+  checkSectionNesting      f src
+  checkPropertiesMatchOps  f src
+
+-- | Section header sequence in StridesBitwise's export list must be a
+-- subsequence of Strides' (the wrapper omits some sections like
+-- "Reduced product with bitwise" or "Internal helpers" but never
+-- reorders).
+checkSectionsMirrorStrides :: Assertion
+checkSectionsMirrorStrides = do
+  stridesSrc  <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
+  wrapperSrc  <- TIO.readFile "src/What4/Domains/BV/StridesBitwise.hs"
+  let stridesSecs = extractExportSections stridesSrc
+      wrapperSecs = extractExportSections wrapperSrc
+  case firstNotInSubsequence wrapperSecs stridesSecs of
+    Nothing -> pure ()
+    Just bad -> assertFailure $ T.unpack $
+      "Section header in StridesBitwise.hs not a subsequence of Strides.hs at: '"
+      <> bad <> "'"
+
+-- | For each section header that appears in both Strides and
+-- StridesBitwise export lists, the exported names in StridesBitwise
+-- under that section must be a subsequence of Strides' names under the
+-- same section, in order.
+checkOpOrderMirrorsStrides :: Assertion
+checkOpOrderMirrorsStrides = do
+  stridesSrc <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
+  wrapperSrc <- TIO.readFile "src/What4/Domains/BV/StridesBitwise.hs"
+  let stridesSecs = exportListSectioned stridesSrc
+      wrapperSecs = exportListSectioned wrapperSrc
+      shared = [ (sec, sNames, wNames)
+               | (sec, sNames) <- stridesSecs
+               , Just wNames <- [lookup sec wrapperSecs]
+               , not (T.null sec)  -- skip pre-section items (Domain accessors, etc.)
+               ]
+      -- Names that StridesBitwise exports legitimately even though
+      -- Strides doesn't: variants present in Bitwise that wrap-induce
+      -- in the reduced product.
+      newWrapperNames = Set.fromList
+        [ "mulPrecise", "udivPrecise", "uremPrecise"
+        , "correct_mulPrecise", "correct_udivPrecise", "correct_uremPrecise"
+        ]
+      mismatches = [ (sec, bad)
+                   | (sec, sNames, wNames) <- shared
+                   , let wNames' = filter (`Set.notMember` newWrapperNames) wNames
+                   , Just bad <- [firstNotInSubsequence wNames' sNames]
+                   ]
+  case mismatches of
+    [] -> pure ()
+    _  -> assertFailure $ T.unpack $ T.unlines $
+            "Operations in StridesBitwise.hs not a subsequence of Strides.hs in some section:" :
+            [ "  section " <> sec <> ": '" <> nm <> "'" | (sec, nm) <- mismatches ]
+
+-- | Find the first element of @xs@ that does not appear in @ys@ (in
+-- order). Returns 'Nothing' if @xs@ is a subsequence of @ys@.
+firstNotInSubsequence :: [Text] -> [Text] -> Maybe Text
+firstNotInSubsequence []     _  = Nothing
+firstNotInSubsequence (x:xs) ys =
+  case dropWhile (/= x) ys of
+    []     -> Just x
+    (_:rest) -> firstNotInSubsequence xs rest
+
+-- | Split an export list into @[(sectionHeader, [exportName])]@,
+-- preserving order. The first section's header is the empty string
+-- (for items declared before any @-- *@ header).
+exportListSectioned :: Text -> [(Text, [Text])]
+exportListSectioned src =
+  reverse (go "" [] [] (exportListLines src))
+  where
+    go cur acc result [] = (cur, reverse acc) : result
+    go cur acc result (l:ls)
+      | "-- *" `T.isPrefixOf` T.stripStart l =
+          go (T.stripStart l) [] ((cur, reverse acc) : result) ls
+      | Just nm <- exportNameOf l =
+          go cur (nm : acc) result ls
+      | otherwise = go cur acc result ls
+
+    exportNameOf l = case T.stripStart l of
+      t | Just t' <- T.stripPrefix ", " t ->
+            let nm = T.takeWhile isIdentChar t'
+            in if T.null nm then Nothing else Just nm
+        | Just t' <- T.stripPrefix "( " t ->
+            let nm = T.takeWhile isIdentChar t'
+            in if T.null nm then Nothing else Just nm
+      _ -> Nothing
 
 -- | Assert that exported names appear in the same order as their definitions.
 checkExportOrder :: FilePath -> Text -> Assertion

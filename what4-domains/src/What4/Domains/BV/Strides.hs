@@ -430,8 +430,10 @@ module What4.Domains.BV.Strides
   -- $reduced
   , refineByBits
   , refineByBitsPrecise
+  , refineBitsByStrides
   , reduceStep
   , reduce
+  , reduceFixpoint
   -- * Generators
   , genDomain
   , genElement
@@ -675,6 +677,9 @@ module What4.Domains.BV.Strides
   , correct_refineByBitsPrecise
   , refineByBitsPreciseShrinks
   , refineByBitsPreciseDominatesRoundTripNonSelfWrap
+  , correct_refineBitsByStrides
+  , refineBitsByStridesShrinks
+  , refineBitsByStridesDominatesMeetToBitwise
   , correct_reduceStep
   , correct_reduce
   , reduceStepShrinks
@@ -3773,6 +3778,7 @@ ssplit w c@Domain{start = s, stride = t, n = nn, mask = m} =
               !n2 = nn - i1 - 1
           in [mk w s t i1, mk w s2 t n2]
 
+
 -- | /O(w)/. \"North-pole split\": split at the signed boundary (between
 -- @smax = 2^(w-1) - 1@ and @smin = 2^(w-1)@). Returns pieces whose
 -- concretizations partition @c@\'s concretization, where no piece crosses
@@ -4838,6 +4844,90 @@ arcClipBitwise compactifyOp w l (blo, bhi)
            -- cover would over-approximate beyond @l@. Fall back to @l@.
            _   -> Just l
 
+-- | /O(w log w)/. Refine a bitwise domain @b@ using a strides domain @s@.
+--
+-- Always at least as precise as @B.meet b (toBitwise s)@
+-- ('refineBitsByStridesDominatesMeetToBitwise'), and strictly tighter on
+-- some wrap-mod-@2^w@ inputs whose pieces are partly carved away by
+-- @b@\'s arc.
+--
+-- == Why a piecewise extraction beats @toBitwise s@ directly
+--
+-- 'toBitwise' calls 'forcedBits', whose span-pinning clause requires
+-- @2^k > n · stride@ to fix bit @k@. When @s@ wraps mod @2^w@, the
+-- integer span is @>= 2^w@ and span pinning fixes /no/ high bits, even
+-- though each non-wrap piece individually has a small span and
+-- typically pins many high bits.
+--
+-- 'ssplit' decomposes @s@ at the unsigned pole into one or two non-wrap
+-- pieces. On non-wrap pieces 'forcedBits' is bit-complete (every bit
+-- constant across the piece is detected). Joining @toBitwise@ of the
+-- pieces yields a bitwise domain dominated by @toBitwise s@ and
+-- typically strictly tighter.
+--
+-- == Why pre-clipping each piece to @b@\'s arc helps further
+--
+-- Pieces disjoint from @b@\'s numeric bounds @[blo, bhi]@ contribute
+-- nothing to the joint: dropping them removes per-bit disagreements
+-- that 'B.join' would otherwise smear into \"free\". Pieces that
+-- partially overlap shrink to the surviving sub-arc, so 'forcedBits'
+-- pins more high bits on the smaller span.
+--
+-- == Self-wrap fallback
+--
+-- If @s@ is self-wrapping, 'ssplit' collapses it to the full coset; the
+-- piecewise extraction matches @toBitwise s@ exactly, so we just take
+-- the single-shot meet.
+--
+-- == Soundness
+--
+-- @gamma(s) = union of gamma(piece_i)@ ('ssplitUnion'); for each piece,
+-- @gamma(piece) `subseteq` gamma(toBitwise piece)@ ('toBitwiseCorrect');
+-- 'arcMeetClosed' on a non-wrap piece preserves every element in
+-- @[blo, bhi]@; @B.join@\/@B.meet@ are sound. Hence
+-- @gamma(s) `cap` gamma(b) `subseteq` gamma(result)@
+-- ('correct_refineBitsByStrides').
+--
+-- == Example
+--
+-- @s@ wraps the unsigned pole; @b@ forces the top bit to 0:
+--
+-- >>> import qualified What4.Domains.BV.Bitwise as B
+-- >>> let w8 = knownNat @8
+-- >>> let s = mk w8 0xF0 1 0x1F  -- {0xF0..0xFF, 0x00..0x0F}
+-- >>> let b = B.range w8 0 0x7F  -- top bit forced 0
+-- >>> -- @toBitwise s@ is top (span = 0x1F crosses every high bit), so
+-- >>> -- @B.meet b (toBitwise s)@ is just @b@. Per-piece extraction
+-- >>> -- drops the high arc and tightens to @[0x00, 0x0F]@:
+-- >>> fmap B.bitbounds (refineBitsByStrides w8 b s)
+-- Just (0,15)
+refineBitsByStrides ::
+  (1 <= w) =>
+  NatRepr w ->
+  B.Domain w ->
+  Domain w ->
+  Maybe (B.Domain w)
+refineBitsByStrides w b s
+  | isSelfWrapping s =
+      let b' = B.meet b (toBitwise s)
+      in if B.isBottom b' then Nothing else Just b'
+  | otherwise =
+      let (bloI, bhiI) = B.bitbounds b
+          blo  = integerToNatural bloI
+          bhi  = integerToNatural bhiI
+          arc  = mk w blo 1 (bhi - blo)
+          -- 'ssplit' yields non-wrap pieces; 'arcMeetClosed' is
+          -- well-defined on each.
+          clipped =
+            [ p' | p <- ssplit w s, Just p' <- [arcMeetClosed w p arc] ]
+      in case clipped of
+           []     -> Nothing
+           c : cs ->
+             let stridesB =
+                   foldr (B.join . toBitwise) (toBitwise c) cs
+                 b' = B.meet b stridesB
+             in if B.isBottom b' then Nothing else Just b'
+
 -- | /O(w log w)/. One round of mutual refinement of a strides\/bitwise
 -- pair.
 --
@@ -4845,8 +4935,9 @@ arcClipBitwise compactifyOp w l (blo, bhi)
 -- 'refineByBits' — a direct stride-lift plus arc clip that doesn\'t
 -- detour through 'fromBitwise' or 'pseudoMeet'. Then refines the bitwise
 -- component using the already-refined strides component via
--- 'toBitwise' + 'B.meet'. Returns 'Nothing' iff the joint represents an
--- empty set.
+-- 'refineBitsByStrides', which is at least as precise as
+-- @B.meet b (toBitwise s')@ and strictly tighter on some wrap-mod-@2^w@
+-- inputs. Returns 'Nothing' iff the joint represents an empty set.
 --
 -- Each component of the result is a subset of the corresponding input
 -- component ('reduceStepShrinks'). When @x@ lies in both inputs, @x@ lies
@@ -4871,21 +4962,51 @@ reduceStep ::
   Domain w ->
   B.Domain w ->
   Maybe (Domain w, B.Domain w)
-reduceStep w s b = do
-  s' <- refineByBits w s b
-  let b' = B.meet b (toBitwise s')
-  if B.isBottom b' then Nothing else Just (s', b')
+reduceStep w s b
+  -- Bitwise bottom: @b@ is empty, so the joint is empty. Short-circuit
+  -- before 'refineByBits' would compute @bhi - blo@ on the canonical
+  -- bottom @(mask, 0)@ and underflow on 'Natural'.
+  | B.isBottom b = Nothing
+  | otherwise = do
+      s' <- refineByBits w s b
+      b' <- refineBitsByStrides w b s'
+      Just (s', b')
 
--- | /O(w^2 log w)/. Iterate 'reduceStep' to a fixed point. Each non-trivial
--- step strictly reduces 'size' of one component, so the loop runs at most
--- @O(w)@ times before stabilizing.
+-- | /O(w log w)/. Apply 'reduceStep' at most a small constant number of
+-- times. Each step strictly reduces one component on a non-fixpoint
+-- iteration, so a true fixpoint is reached in at most @O(w)@ steps;
+-- capping to a constant turns this into a /widening/: the result is
+-- sound but not necessarily fully-reduced. This keeps every reduced-
+-- product operation at the same asymptotic cost as its underlying
+-- components, which matters more in practice than fully closing the
+-- lattice. Use 'reduceFixpoint' when you actually need the closed form.
 reduce ::
   (1 <= w) =>
   NatRepr w ->
   Domain w ->
   B.Domain w ->
   Maybe (Domain w, B.Domain w)
-reduce w = go
+reduce w = go (3 :: Int)
+  where
+    go 0 s b = Just (s, b)
+    go n s b = do
+      (s', b') <- reduceStep w s b
+      if s' == s && b' == b
+        then Just (s, b)
+        else go (n - 1) s' b'
+
+-- | /O(w^2 log w)/. Iterate 'reduceStep' to a true fixed point. Each
+-- non-trivial step strictly reduces 'size' of one component, so the loop
+-- runs at most @O(w)@ times before stabilizing. Prefer 'reduce' in
+-- per-operation hot paths; this is for tests and callers that actually
+-- need the closed form.
+reduceFixpoint ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  B.Domain w ->
+  Maybe (Domain w, B.Domain w)
+reduceFixpoint w = go
   where
     go s b = do
       (s', b') <- reduceStep w s b
@@ -7311,6 +7432,49 @@ refineByBitsPreciseDominatesRoundTripNonSelfWrap w s b =
           | leqExact rt s   -> property (size s' <= size rt)
           | otherwise       -> property True
 
+-- | 'refineBitsByStrides' is sound: any @x@ in both inputs is in the
+-- result (and 'Nothing' only when no such @x@ exists).
+correct_refineBitsByStrides ::
+  (1 <= w) =>
+  NatRepr w -> B.Domain w -> Domain w -> Natural -> Property
+correct_refineBitsByStrides w b s x =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    member s x ==> B.member b (toInteger x) ==>
+      case refineBitsByStrides w b s of
+        Nothing -> property False
+        Just b' -> property (B.member b' (toInteger x))
+
+-- | 'refineBitsByStrides' shrinks: the result is contained in the input
+-- bitwise component.
+refineBitsByStridesShrinks ::
+  (1 <= w) =>
+  NatRepr w -> B.Domain w -> Domain w -> Property
+refineBitsByStridesShrinks w b s =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    case refineBitsByStrides w b s of
+      Nothing -> property True
+      Just b' -> property (B.leq b' b)
+
+-- | 'refineBitsByStrides' is at least as precise as the single-shot
+-- @B.meet b (toBitwise s)@.
+--
+-- /Why this holds./ The piecewise stride bitwise
+-- @stridesB = B.join (toBitwise piece_i)@ over @ssplit s@ is dominated
+-- by @toBitwise s@: every bit forced by the whole orbit is forced by
+-- each piece (pieces only contain orbit elements), so the join forces
+-- it too. Pre-clipping pieces to @b@\'s arc only tightens further.
+-- Therefore @B.meet b stridesB \`B.leq\` B.meet b (toBitwise s)@ — and
+-- when the latter is bottom, so is the former (returned as 'Nothing').
+refineBitsByStridesDominatesMeetToBitwise ::
+  (1 <= w) =>
+  NatRepr w -> B.Domain w -> Domain w -> Property
+refineBitsByStridesDominatesMeetToBitwise w b s =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    let baseline = B.meet b (toBitwise s)
+    in case refineBitsByStrides w b s of
+         Nothing -> property True  -- already bottom, dominates anything
+         Just b' -> property (B.leq b' baseline)
+
 -- | 'reduceStep' is sound: any value @x@ in /both/ input components is in
 -- both output components when the step succeeds; if the step returns
 -- 'Nothing', no such @x@ exists.
@@ -7358,27 +7522,28 @@ reduceShrinks w s b =
       Nothing       -> property True
       Just (s', b') -> property (leqExact s' s && B.leq b' b)
 
--- | 'reduce' reaches a fixed point: re-running 'reduce' on its own output
--- changes nothing.
+-- | 'reduceFixpoint' reaches a fixed point: re-running it on its own
+-- output changes nothing. ('reduce' is a widening, not a fixpoint, so
+-- this property is stated against 'reduceFixpoint'.)
 reduceIdempotent ::
   (1 <= w) =>
   NatRepr w -> Domain w -> B.Domain w -> Property
 reduceIdempotent w s b =
   proper s ==> toInteger (mask s) == B.bvdMask b ==>
-    case reduce w s b of
+    case reduceFixpoint w s b of
       Nothing       -> property True
       Just (s', b') ->
-        property (reduce w s' b' == Just (s', b'))
+        property (reduceFixpoint w s' b' == Just (s', b'))
 
--- | When 'reduce' returns 'Nothing', the joint really is empty: no @x@
--- can be a member of both components. Contrapositive of soundness, but a
--- useful direct check that we don\'t spuriously reject.
+-- | When 'reduceFixpoint' returns 'Nothing', the joint really is empty:
+-- no @x@ can be a member of both components. Contrapositive of soundness,
+-- but a useful direct check that we don\'t spuriously reject.
 reduceConflictMeansEmpty ::
   (1 <= w) =>
   NatRepr w -> Domain w -> B.Domain w -> Natural -> Property
 reduceConflictMeansEmpty w s b x =
   proper s ==> toInteger (mask s) == B.bvdMask b ==>
-    case reduce w s b of
+    case reduceFixpoint w s b of
       Just _  -> property True
       Nothing -> property (Prelude.not (member s x && B.member b (toInteger x)))
 
