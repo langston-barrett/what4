@@ -252,3 +252,13 @@ test-suite precision_regression
                , tasty-hunit >= 0.9
                , text
                , what4-domains
+
+executable strides-precision
+  import: bldflags
+  hs-source-dirs: tools/strides-precision
+  main-is: Main.hs
+  ghc-options: -O2
+  build-depends: base >= 4.10 && < 5
+               , containers
+               , parameterized-utils
+               , what4-domains
