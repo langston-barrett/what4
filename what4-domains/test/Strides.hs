@@ -779,9 +779,15 @@ tests = TT.testGroup "Strides"
   , genTest "refineByBitsShrinks" $
       do SW n <- genWidth
          S.refineByBitsShrinks n <$> S.genDomain n <*> B.genDomain n
-  , genTest "refineByBitsDominatesRoundTripNonSelfWrap" $
+  , genTest "correct_refineByBitsPrecise" $
       do SW n <- genWidth
-         S.refineByBitsDominatesRoundTripNonSelfWrap n <$> S.genDomain n <*> B.genDomain n
+         S.correct_refineByBitsPrecise n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "refineByBitsPreciseShrinks" $
+      do SW n <- genWidth
+         S.refineByBitsPreciseShrinks n <$> S.genDomain n <*> B.genDomain n
+  , genTest "refineByBitsPreciseDominatesRoundTripNonSelfWrap" $
+      do SW n <- genWidth
+         S.refineByBitsPreciseDominatesRoundTripNonSelfWrap n <$> S.genDomain n <*> B.genDomain n
   , genTest "correct_reduceStep" $
       do SW n <- genWidth
          S.correct_reduceStep n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
