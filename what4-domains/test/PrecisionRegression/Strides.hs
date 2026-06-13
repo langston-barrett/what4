@@ -52,7 +52,9 @@ results =
   , binaryResult stridesEnum "lshr" (S.lshr w4) cLshr
   , binaryResult stridesEnum "ashr" (S.ashr w4) cAshr
   , binaryResult stridesEnum "rol"  (S.rol  w4) cRol
+  , binaryResult stridesEnum "rolPrecise" (S.rolPrecise w4) cRol
   , binaryResult stridesEnum "ror"  (S.ror  w4) cRor
+  , binaryResult stridesEnum "rorPrecise" (S.rorPrecise w4) cRor
   , latticeMaybeResult stridesEnum "pseudoMeet" (S.pseudoMeet w4) cMeet
   , latticeMaybeResult stridesEnum "pseudoMeetPrecise" (S.pseudoMeetPrecise w4) cMeet
   , latticeUnderApproxMaybeResult stridesEnum "lowerBound" (S.lowerBound w4) cMeet

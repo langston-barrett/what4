@@ -1230,11 +1230,30 @@ rol = psplitOp2 rolRaw
 rolRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 rolRaw = liftBitwise2 Bits::rolAbstract
 
+// See @rolPrecise@ in What4.Domains.BV.Strides. The Cryptol spec for
+// @rolRaw@ already unions @rol a y@ over every @y@ consistent with
+// @forcedBits b@ (via @rolAbstract@), so the precise variant degenerates
+// to the same value here; the Haskell distinction reflects an
+// implementation choice (the Haskell @rolRaw@ is a faster but looser
+// approximation that @rolPreciseRaw@ refines).
+rolPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+rolPrecise = psplitOp2 rolPreciseRaw
+
+rolPreciseRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+rolPreciseRaw = rolRaw
+
 ror : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 ror = psplitOp2 rorRaw
 
 rorRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
 rorRaw = liftBitwise2 Bits::rorAbstract
+
+// See @rorPrecise@ in What4.Domains.BV.Strides. Mirrors @rolPrecise@.
+rorPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+rorPrecise = psplitOp2 rorPreciseRaw
+
+rorPreciseRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
+rorPreciseRaw = rorRaw
 
 // ------------------------------------------------------------------
 // * Hull
@@ -3007,10 +3026,32 @@ correct_rol a b x y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     member (rol a b) (x <<< y)
 
+// Soundness of @rolPrecise@.
+correct_rolPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_rolPrecise a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    member (rolPrecise a b) (x <<< y)
+
+// See @rolPreciseRawDominatesRolRaw@ in What4.Domains.BV.Strides.
+rolPreciseRawDominatesRolRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+rolPreciseRawDominatesRolRaw a b =
+  proper a ==> proper b ==> size (rolPreciseRaw a b) <= size (rolRaw a b)
+
 correct_ror : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
 correct_ror a b x y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     member (ror a b) (x >>> y)
+
+// Soundness of @rorPrecise@.
+correct_rorPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> [n] -> [n] -> Property
+correct_rorPrecise a b x y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    member (rorPrecise a b) (x >>> y)
+
+// See @rorPreciseRawDominatesRorRaw@ in What4.Domains.BV.Strides.
+rorPreciseRawDominatesRorRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+rorPreciseRawDominatesRorRaw a b =
+  proper a ==> proper b ==> size (rorPreciseRaw a b) <= size (rorRaw a b)
 
 // @p_correct_shl@ is not declared as a SAW property because @shl@ is
 // defined via @mul@, whose 'Integer' arithmetic and iterated
@@ -3021,7 +3062,11 @@ correct_ror a b x y =
 property p_correct_lshr = correct_lshr`{4}
 property p_correct_ashr = correct_ashr`{4}
 property p_correct_rol  = correct_rol`{4}
+property p_correct_rolPrecise = correct_rolPrecise`{4}
+property p_rolPreciseRawDominatesRolRaw = rolPreciseRawDominatesRolRaw`{4}
 property p_correct_ror  = correct_ror`{4}
+property p_correct_rorPrecise = correct_rorPrecise`{4}
+property p_rorPreciseRawDominatesRorRaw = rorPreciseRawDominatesRorRaw`{4}
 
 // ------------------------------------------------------------------
 // ** Lattice operations
