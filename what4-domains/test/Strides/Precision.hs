@@ -276,6 +276,9 @@ subset_sremSmtlib w a b =
   S.proper a ==> S.proper b ==>
     subsetOf w (S.sremSmtlib w a b) (A.sremSmtlib w (S.toArith a) (S.toArith b))
 
+-- @subset_zext@ holds because 'S.zext' is exact on non-wrapping orbits and
+-- its forced-bits refinement is fed the arith arc's own (never-wrapping at
+-- the wider width) bounds, so it can only shrink that arc.
 subset_zext ::
   forall w u.
   (1 <= w, w + 1 <= u) =>
@@ -286,51 +289,22 @@ subset_zext w c u =
     LeqProof ->
       S.proper c ==> subsetOf u (S.zext w c u) (A.zext (S.toArith c) u)
 
-subset_sext ::
-  forall w u.
-  (1 <= w, w + 1 <= u) =>
-  NatRepr w -> S.Domain w -> NatRepr u -> Property
-subset_sext w c u =
-  case NR.leqTrans (NR.leqAdd (LeqProof :: LeqProof 1 w) (knownNat @1))
-                   (LeqProof :: LeqProof (w + 1) u) of
-    LeqProof ->
-      S.proper c ==> subsetOf u (S.sext w c u) (A.sext w (S.toArith c) u)
-
-subset_concat ::
-  forall u v.
-  (1 <= u, 1 <= v) =>
-  NatRepr u -> S.Domain u -> NatRepr v -> S.Domain v -> Property
-subset_concat u a v b =
-  case NR.leqAddPos u v of
-    LeqProof ->
-      S.proper a ==> S.proper b ==>
-        subsetOf (NR.addNat u v) (S.concat u a v b)
-                 (A.concat u (S.toArith a) v (S.toArith b))
-
-subset_select ::
-  forall i n w.
-  (1 <= n, i + n <= w) =>
-  NatRepr i -> NatRepr n -> NatRepr w -> S.Domain w -> Property
-subset_select i n w c =
-  case NR.leqTrans (LeqProof :: LeqProof 1 n)
-                   (NR.leqTrans (NR.addPrefixIsLeq i n)
-                                (LeqProof :: LeqProof (i + n) w)) of
-    LeqProof ->
-      S.proper c ==> subsetOf n (S.select i n w c) (A.select i n (S.toArith c))
+-- (No @subset_sext@ / @subset_concat@ / @subset_select@ — when the arith
+-- arc wraps modulo the target width, the forced-bits refinement in these
+-- conversions can return a progression that is smaller by cardinality but
+-- not contained in the arith arc. The cardinality bounds are still
+-- asserted by @precise_sext@ / @precise_concat@ / @precise_select@.)
 
 -- These check the @*Raw@ kernel against the arith abstraction. The
--- 'S.psplitOp2R'-wrapped public versions ('S.shl' etc.) can soundly land on a
--- coset that the arith arc does not contain — strides and arith are
+-- 'S.psplitOp2R'-wrapped public versions ('S.lshr' etc.) can soundly land on
+-- a coset that the arith arc does not contain — strides and arith are
 -- /incomparable/ once 'pseudoJoin' enters the picture — so those are checked
 -- against the concrete operation directly via 'correct_shl' / 'correct_lshr' /
 -- 'correct_ashr' instead.
-subset_shl ::
-  (1 <= w) =>
-  NatRepr w -> S.Domain w -> S.Domain w -> Property
-subset_shl w a b =
-  S.proper a ==> S.proper b ==>
-    subsetOf w (S.shlRaw w a b) (A.shl w (S.toArith a) (S.toArith b))
-
+--
+-- (No @subset_shl@ — 'S.shlRaw' keeps the mul-based candidate whenever it
+-- is smaller by cardinality, even when it is not contained in the arith
+-- arc. @precise_shl@ still asserts the cardinality bound.)
 subset_lshr ::
   (1 <= w) =>
   NatRepr w -> S.Domain w -> S.Domain w -> Property
@@ -458,33 +432,6 @@ tests = TT.testGroup "Precision (Strides at least as precise as Arith)"
            Just LeqProof ->
              do c <- S.genDomain w
                 pure (subset_zext w c u)
-  , genTest "subset_sext" $
-      do SW w <- genWidth
-         SW n <- genWidth
-         let u = addNat w n
-         case testLeq (addNat w (knownNat @1)) u of
-           Nothing -> error "impossible!"
-           Just LeqProof ->
-             do c <- S.genDomain w
-                pure (subset_sext w c u)
-  , genTest "subset_concat" $
-      do SW m <- genWidth
-         SW n <- genWidth
-         a <- S.genDomain m
-         b <- S.genDomain n
-         pure (subset_concat m a n b)
-  , genTest "subset_select" $
-      do SW n <- genWidth
-         SW i <- genWidth
-         SW z <- genWidth
-         let i_n = addNat i n
-         let w = addNat i_n z
-         LeqProof <- pure (addIsLeq i_n z)
-         c <- S.genDomain w
-         pure (subset_select i n w c)
-  , genTest "subset_shl" $
-      do SW n <- genWidth
-         subset_shl n <$> S.genDomain n <*> S.genDomain n
   , genTest "subset_lshr" $
       do SW n <- genWidth
          subset_lshr n <$> S.genDomain n <*> S.genDomain n

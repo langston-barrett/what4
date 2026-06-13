@@ -251,6 +251,16 @@ tests = TT.testGroup "Strides"
   , genTest "forcedBitsMember" $
       do SW n <- genWidth
          S.forcedBitsMember <$> S.genDomain n <*> genNatBV n
+  , genTest "fromForcedBitsCorrect" $
+      do SW n <- genWidth
+         S.fromForcedBitsCorrect n
+           <$> genNatBV n <*> genNatBV n <*> genNatBV n
+           <*> genNatBV n <*> genNatBV n
+  , genTest "fromForcedBitsSignedCorrect" $
+      do SW n <- genWidth
+         S.fromForcedBitsSignedCorrect n
+           <$> genNatBV n <*> genNatBV n <*> genNatBV n
+           <*> genNatBV n <*> genNatBV n
   , genTest "fromBitwiseCorrect" $
       do SW n <- genWidth
          S.fromBitwiseCorrect n <$> B.genDomain n <*> chooseInteger (0, maxUnsigned n)
@@ -422,9 +432,6 @@ tests = TT.testGroup "Strides"
   , genTest "andPreciseDominatesAndFast" $
       do SW n <- genWidth
          S.andPreciseDominatesAndFast n <$> S.genDomain n <*> S.genDomain n
-  , genTest "xorFastDominatesIdentity" $
-      do SW n <- genWidth
-         S.xorFastDominatesIdentity n <$> S.genDomain n <*> S.genDomain n
 
   -- Concatenation, extension, selection, and truncation
   , genTest "correct_zero_ext" $
@@ -802,12 +809,13 @@ tests = TT.testGroup "Strides"
           mk s st nn = S.mk w4 s st nn
           liftBand a b =
             fromJust (S.fromBitwise w4 (B.and (S.toBitwise a) (S.toBitwise b)))
-          -- Witness: @S.andPrecise a1 b1@ contains an element the lift does not.
-          -- a1 = {0..4}, b1 = {2,10}; concrete AND = {0,2}, but
-          -- @andPrecise@ widens to @{0,2,4}@, while the lift recovers
-          -- @{0,2}@ exactly through forced-bit refinement.
-          a1 = mk 0 1 4
-          b1 = mk 2 8 1
+          -- Witness: @S.andPrecise a1 b1@ contains an element the lift does
+          -- not. a1 = {5,6}, b1 = {2,8}: the lift's per-bit AND forces bits
+          -- 0 and 3 to zero, recovering {0,2,4,6} exactly, while
+          -- @andPrecise@ returns the stride-1 arc {0,1,2}, whose element 1
+          -- has the forced low bit set.
+          a1 = mk 5 1 1
+          b1 = mk 2 6 1
           -- Witness: lift contains an element @S.andPrecise a2 b2@ does not.
           -- a2 = b2 = {0,1,2}; concrete AND = {0,1,2}, @andPrecise@
           -- recovers it exactly, while the lift drops the orbit-shortness

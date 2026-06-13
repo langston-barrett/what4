@@ -343,6 +343,8 @@ module What4.Domains.BV.Strides
   , fromArith
   , toBitwise
   , forcedBits
+  , fromForcedBits
+  , fromForcedBitsSigned
   , fromBitwise
   -- * Queries
   , member
@@ -475,6 +477,8 @@ module What4.Domains.BV.Strides
   , strideBitwiseCorrect
   , forcedBitsDisjoint
   , forcedBitsMember
+  , fromForcedBitsCorrect
+  , fromForcedBitsSignedCorrect
   , fromBitwiseCorrect
   -- ** Queries
   -- , correct_asSingleton
@@ -562,7 +566,6 @@ module What4.Domains.BV.Strides
   , warrenAndHiCorrect
   , operandRangeCorrect
   , andPreciseDominatesAndFast
-  , xorFastDominatesIdentity
   -- ** Concatenation, extension, selection, and truncation
   , correct_zero_ext
   , correct_sign_ext
@@ -1280,16 +1283,136 @@ forcedBits c@Domain{start = s, mask = m} =
       highZeros    = highForced Bits..&. notN s
   in (lowZeros Bits..|. highZeros, lowOnes Bits..|. highOnes)
 
--- | /O(w)/. Convert a bitwise domain to a progression.
+-- | /O(w)/. The progression covering every @w@-bit value that agrees with
+-- the forced-bit pair @(zeros, ones)@ — a @0@ at every bit set in @zeros@,
+-- a @1@ at every bit set in @ones@ — and lies in the unsigned interval
+-- @[lo, hi]@. See 'fromForcedBitsCorrect'.
+--
+-- Preconditions: @zeros@ and @ones@ are bit-disjoint and fit in @w@ bits,
+-- @lo <= hi <= 2^w - 1@, and at least one value satisfies all the
+-- constraints (the result is still a proper 'Domain', but unspecified,
+-- otherwise).
+--
+-- Note that this constructs a /cover/ of the constraint set from scratch;
+-- it is not a refinement operator. The subset-preserving analogue, which
+-- refines an existing progression in place by forced bits, is
+-- 'liftForcedBits'.
+fromForcedBits ::
+  (1 <= w) =>
+  NatRepr w ->
+  -- | @(zeros, ones)@
+  (Natural, Natural) ->
+  -- | @(lo, hi)@
+  (Natural, Natural) ->
+  Domain w
+-- This is the shared kernel behind the bitwise operations ('andFast',
+-- 'andPrecise', 'andSingleton', 'xorFast'), the bitwise conversion
+-- ('fromBitwise'), the constant-shift fallback in 'lshrRaw', and the
+-- bit-aware refinements of the width-changing conversions ('zext', 'sext',
+-- 'concat', 'select'). 'fromForcedBitsSigned' is the variant for intervals
+-- on the signed number line ('ashrRaw'). The reasoning, in coset terms
+-- (writing
+-- @m = 2^w - 1@ for the width mask, so @m XOR zeros@ is the value with a
+-- @1@ exactly at the positions /not/ forced to @0@):
+--
+--   * /Stride./ All bits below the lowest free (unforced) bit @v@ are
+--     determined, so every admissible value is congruent to @ones@ mod
+--     @2^v@: the constraint set lies in a single coset of the subgroup
+--     @2^v·Z/2^wZ@, giving stride @d = 2^v@.
+--   * /Lower bound./ Every admissible value sets all bits of @ones@, and
+--     bitwise dominance implies unsigned dominance: @x .&. ones == ones@
+--     forces @x >= ones@. Since @ones@ is itself on the coset, it is a
+--     valid anchor — scattered forced ones /above/ the lowest free bit
+--     raise the start without leaving the coset.
+--   * /Upper bound./ Dually, every admissible value clears all bits of
+--     @zeros@, so @x <= m XOR zeros@.
+--   * /Interval./ The extra constraint @[lo, hi]@ (Warren bounds, operand
+--     ranges, arith conversion bounds, ...) intersects all of the above:
+--     the start is @max lo ones@ aligned up to the coset, and the step
+--     count is floored at @min hi (m XOR zeros)@.
+--
+-- When every bit is forced, the result is the singleton @{ones}@ (the
+-- interval cannot exclude it when the nonemptiness precondition holds).
+fromForcedBits w (zeros, ones) (lo, hi) =
+  assert (zeros Bits..&. ones == 0) $
+  assert (zeros <= integerToNatural (maxUnsigned w)) $
+  assert (ones <= integerToNatural (maxUnsigned w)) $
+  assert (lo <= hi) $
+  assert (hi <= integerToNatural (maxUnsigned w)) $
+  let !m = integerToNatural (maxUnsigned w)
+      !free = m `Bits.xor` (zeros Bits..|. ones)
+  in if free == 0
+       then mk w ones 1 0
+       else
+         let !d = lowestSetBit free
+             !lo0 = max lo ones
+             !lo1 = lo0 + (modSub m (ones Bits..&. (d - 1)) lo0 Bits..&. (d - 1))
+             !hi' = min hi (m `Bits.xor` zeros)
+             !nSteps = if hi' < lo1 then 0 else (hi' - lo1) `divByPow2` d
+         in mk w (lo1 Bits..&. m) d nSteps
+
+-- | /O(w)/. Signed-interval variant of 'fromForcedBits': the progression
+-- covering every @w@-bit value that agrees with the forced-bit pair
+-- @(zeros, ones)@ and whose /signed/ value lies in @[lo, hi]@. See
+-- 'fromForcedBitsSignedCorrect'.
+--
+-- Preconditions: as for 'fromForcedBits', with
+-- @-2^(w-1) <= lo <= hi <= 2^(w-1) - 1@.
+fromForcedBitsSigned ::
+  (1 <= w) =>
+  NatRepr w ->
+  -- | @(zeros, ones)@
+  (Natural, Natural) ->
+  -- | @(lo, hi)@, as signed values
+  (Integer, Integer) ->
+  Domain w
+-- The coset/dominance reasoning of 'fromForcedBits' transfers to the
+-- signed number line wholesale:
+--
+--   * The stride @d@ divides @2^w@, so a value's residue mod @d@ is the
+--     same whether read from its unsigned or signed representative, and
+--     coset alignment can run in plain integer arithmetic.
+--   * The bit-derived bounds become the signed values of the extremal
+--     admissible /patterns/: when the sign bit is forced, the patterns
+--     @ones@ and @m XOR zeros@ themselves (read as signed); when it is
+--     free, the most-negative pattern @ones .|. 2^(w-1)@ and the
+--     most-positive pattern @(m XOR zeros) .&. ~(2^(w-1))@.
+fromForcedBitsSigned w (zeros, ones) (lo, hi) =
+  assert (zeros Bits..&. ones == 0) $
+  assert (zeros <= integerToNatural (maxUnsigned w)) $
+  assert (ones <= integerToNatural (maxUnsigned w)) $
+  assert (lo <= hi) $
+  assert (NR.minSigned w <= lo && hi <= NR.maxSigned w) $
+  let !m = integerToNatural (maxUnsigned w)
+      !free = m `Bits.xor` (zeros Bits..|. ones)
+      !half = (m + 1) `Bits.shiftR` 1  -- 2^(w-1), the sign bit
+      !signFree = free Bits..&. half /= 0
+      !loPat = if signFree then ones Bits..|. half else ones
+      !hiPat = if signFree
+                 then (m `Bits.xor` zeros) Bits..&. (m `Bits.xor` half)
+                 else m `Bits.xor` zeros
+  in if free == 0
+       then mk w ones 1 0
+       else
+         let !d = lowestSetBit free
+             !dI = toInteger d
+             !r = toInteger (ones Bits..&. (d - 1))
+             !lo0 = max lo (toSigned w (toInteger loPat))
+             !hi' = min hi (toSigned w (toInteger hiPat))
+             !lo1 = lo0 + ((r - lo0) `Prelude.mod` dI)
+             !nSteps = if hi' < lo1 then 0 else (hi' - lo1) `Prelude.div` dI
+         in mk w (asN w lo1) d (integerToNatural nSteps)
+
+-- | /O(w)/. Convert a bitwise domain to a progression: 'fromForcedBits' at
+-- the bitwise domain's forced bits and numeric bounds.
 fromBitwise :: NatRepr w -> B.Domain w -> Maybe (Domain w)
 fromBitwise w b =
-  let !(lo, hi) = B.bitbounds b
-      !u        = lo `Bits.xor` hi
-      !v        = countTrailingZerosOr0 u
-      !st       = 1 `shiftL` v
-      !lo'      = integerToNatural lo
-      !nSteps   = integerToNatural ((hi - lo) `Bits.shiftR` v)
-  in Just (mk w lo' st nSteps)
+  case NR.isZeroOrGT1 w of
+    Left _ -> Nothing  -- unreachable: 'B.Domain' widths are positive
+    Right LeqProof ->
+      let !(lo, hi) = B.bitbounds b
+      in Just (fromForcedBits w (knownZerosOnesNat b)
+                 (integerToNatural lo, integerToNatural hi))
 
 -- ------------------------------------------------------------------
 -- * Queries
@@ -2620,13 +2743,16 @@ _arithMeetCoset w arith d start' =
 --     pre-wrap arc capped at @start + k * stride@ and a post-wrap arc whose
 --     least member is @start + (k + 1) * stride - (mask + 1)@. Both endpoints
 --     are actual orbit members, so this is the tightest single-interval cover.
+--     (A span of exactly @mask@ wraps at most once, so it lands here, not in
+--     the self-wrap case — self-wrap requires @span > mask@, matching
+--     'isSelfWrapping'.)
 --   * Self-wrap: the coset arc @[start mod g, mask - g + 1 + start mod g]@.
 operandRange :: Domain w -> (Natural, Natural)
 operandRange c@Domain{start = s, stride = t, n = nn, mask = m} =
   assert (proper c) $
   let !span_ = nn * t
       !lo = s `Prelude.mod` strideGcd c
-  in if span_ >= m then (lo, m - (strideGcd c - 1) + lo)  -- self-wrap
+  in if span_ > m then (lo, m - (strideGcd c - 1) + lo)   -- self-wrap
      else if s + span_ > m then                           -- wrap (not self)
        let !k = (m - s) `Prelude.div` t
            !preMax = s + k * t
@@ -2714,38 +2840,6 @@ not w c@Domain{stride, n = nn, mask} =
   assert (proper c) $
   mk w (mask - end c) stride nn
 
--- | /O(w)/. The result stride for bitwise AND of two progressions, given
--- the @(zeros, ones)@ forced-bits picture (see 'forcedBits') of each
--- operand and the common @mask@.
---
--- Per-bit AND rule: bit @k@ of @x .&. y@ is
---
---   * forced to @0@ if bit @k@ is forced to @0@ in /either/ operand;
---   * forced to @1@ if bit @k@ is forced to @1@ in /both/ operands;
---   * otherwise free.
---
--- The result stride is @2^k@ for the lowest free bit @k@. Returns
--- @mask + 1@ when every bit is forced (the result is a singleton); the
--- caller detects this and returns the singleton directly.
---
--- Both stride pinning and span pinning contribute through 'forcedBits',
--- so this rule is strictly tighter than the old version that consumed
--- only @(start, strideGcd)@ pairs.
---
--- 'orFast' inherits this rule via De Morgan: @x | y = ~(~x & ~y)@, and
--- complementing an operand swaps its zeros/ones forced-bits halves.
-andResultStride ::
-  Natural {- ^ @mask@ -} ->
-  (Natural, Natural) {- ^ @forcedBits a@ -} ->
-  (Natural, Natural) {- ^ @forcedBits b@ -} ->
-  Natural
-andResultStride !m (!za, !oa) (!zb, !ob) =
-  let !forced0 = za Bits..|. zb
-      !forced1 = oa Bits..&. ob
-      !forced  = forced0 Bits..|. forced1
-      !free    = m `Bits.xor` forced  -- forced ⊆ m, so xor = set difference
-  in if free == 0 then m + 1 else lowestSetBit free
-
 -- | /O(w)/. The cheap bitwise-AND kernel: a single arithmetic pass, no parity
 -- splitting or Warren bounds. See 'and' for the default ('psplitOp2'-wrapped)
 -- variant and 'andPrecise' for the tightest one.
@@ -2771,10 +2865,14 @@ andFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 --
 -- * CLP 3.3.4 Bit Operations, CLP-CLP @&@ case.
 --
--- Stride @d = min(strideGcd a, strideGcd b) = 2^min(α1, α2)@. Safe upper
--- bound is @min(hi a, hi b)@ from 'operandRange' since @x & y ≤ min(x, y)@.
--- Lower bound is the @d@-coset rep of @start a & start b@ (so this isn't a
--- tight bound — see 'andPrecise' for that).
+-- Per-bit AND rule: bit @k@ of @x .&. y@ is forced to @0@ if bit @k@ is
+-- forced to @0@ in /either/ operand; forced to @1@ if bit @k@ is forced to
+-- @1@ in /both/; otherwise free. 'fromForcedBits' turns that picture into a
+-- progression, intersected with the interval bound @min(hi a, hi b)@ from
+-- 'operandRange' (sound since @x & y ≤ min(x, y)@). 'orFast' inherits this
+-- rule via De Morgan: @x | y = ~(~x & ~y)@, and complementing an operand
+-- swaps its zeros\/ones forced-bits halves. (See 'andPrecise' for the
+-- Warren-bounds variant.)
 --
 -- When either operand is a singleton @{k}@, 'andSingleton' is much tighter —
 -- masking by the constant @k@ both fixes the result bits where @k@ is @0@ and
@@ -2786,20 +2884,11 @@ andFast w a b =
     (0, _) -> andSingleton w (start a) b
     (_, 0) -> andSingleton w (start b) a
     _ ->
-      let !m = mask a
-          !fa@(_, oa) = forcedBits a
-          !fb@(_, ob) = forcedBits b
-          !d = andResultStride m fa fb
-      -- Every result bit is forced — return the unique value @oa .&. ob@.
-      in if d > m then mk w (oa Bits..&. ob) 1 0
-         else
-           let !(_, aHi) = operandRange a
-               !(_, bHi) = operandRange b
-               !sub_ = min aHi bHi
-               !sStart = (start a Bits..&. start b) Bits..&. m
-               !cosetLo = sStart Bits..&. (d - 1)
-               !nSteps = if sub_ < cosetLo then 0 else (sub_ - cosetLo) `divByPow2` d
-           in mk w cosetLo d nSteps
+      let !(za, oa) = forcedBits a
+          !(zb, ob) = forcedBits b
+          !(_, aHi) = operandRange a
+          !(_, bHi) = operandRange b
+      in fromForcedBits w (za Bits..|. zb, oa Bits..&. ob) (0, min aHi bHi)
 
 -- | /O(w)/. Bitwise AND. Wraps 'andFast' through 'psplitOp2': each 'psplit'
 -- piece of an operand has one more fixed low bit than the operand itself, so
@@ -2818,43 +2907,20 @@ and w = psplitOp2 w (andFast w)
 -- For example at width 4, @{14} & {0,1,2,5,6,7,11,12,13}@ is @{0,2,4,6,10,12}@,
 -- which this returns as the cover @{0,2,4,6,8,10,12}@ (the spurious @8@ comes
 -- from forcing the result into one arithmetic progression).
---
--- ANDing every element of @c@ with the constant @k@ clears the result bits
--- wherever @k@ is @0@, fixes them where @c@'s bit is forced, and lets them
--- vary only where @k@'s bit is set /and/ @c@'s bit is free. So:
---
---   * The fixed low bits of every result are @k & start c & forced bits of c@,
---     captured by @base = k & start c & m@ (since @start c@ agrees with
---     every forced bit of @c@).
---   * The result stride is @d = lowestSetBit (k & freeBits c)@, where
---     @freeBits c = m XOR (zeros ∪ ones)@ from 'forcedBits'. Both
---     stride pinning (low @v@ bits) and span pinning (high bits when
---     @c@\'s span is short) contribute, so @d@ can be larger than the
---     old @lowestSetBit (k & ~(g-1))@.
---   * If @k@ has no set bits at any free position, every result collapses
---     to @base@.
---
--- The upper bound @min(k, hi c)@ holds since @k & y ≤ k@ and @k & y ≤ y@; the
--- coset rep is @base & (d - 1)@.
 andSingleton :: (1 <= w) => NatRepr w -> Natural -> Domain w -> Domain w
+-- The result's forced-bit picture is @(~k | zeros, k & ones)@ — a bit is
+-- cleared wherever @k@ is @0@ or @c@ forces a @0@, set wherever @k@ is @1@
+-- and @c@ forces a @1@, and free only where @k@ is @1@ and @c@\'s bit is
+-- free. 'fromForcedBits' turns that into a progression, intersected with
+-- the interval bound @hi c@ from 'operandRange' (sound since @k & y ≤ y@).
 andSingleton w k c =
   assert (proper c) $
   let !m              = mask c
       !(zeros, ones)  = forcedBits c
-      !free           = m `Bits.xor` (zeros Bits..|. ones)
-      !kFree          = k Bits..&. free
-      !base           = (k Bits..&. start c) Bits..&. m
-  -- A singleton @c@ (or one whose free bits are all cleared by @k@) has
-  -- @{k} & c = {base}@ exactly.
-  in if n c == 0 || kFree == 0
-       then mk w base 1 0
-       else
-         let !d  = lowestSetBit kFree
-             !(_, cHi) = operandRange c
-             !hi = min (k Bits..&. m) cHi
-             !cosetLo = base Bits..&. (d - 1)
-             !nSteps  = if hi < cosetLo then 0 else (hi - cosetLo) `divByPow2` d
-         in mk w cosetLo d nSteps
+      !zeros'         = (m `Bits.xor` k) Bits..|. zeros
+      !ones'          = k Bits..&. ones
+      !(_, cHi)       = operandRange c
+  in fromForcedBits w (zeros', ones') (0, cHi)
 
 -- | /O(w^2)/. Bitwise AND. At least as precise as 'and' on all inputs.
 --
@@ -2870,6 +2936,11 @@ andPrecise w = psplitOp2 w (andPreciseRaw w)
 -- | /O(w^2)/. The single-progression-pair AND kernel; see 'andPrecise' for
 -- the 'psplitOp2' wrapper that should be preferred.
 andPreciseRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+-- The Warren interval bounds and the forced-bits bounds inside
+-- 'fromForcedBits' are incomparable (Warren is tight for the interval
+-- covers from 'operandRange' but blind to coset structure; forced bits see
+-- the coset but not the arc), so feeding the Warren bounds through
+-- 'fromForcedBits' takes the tighter of each.
 andPreciseRaw w a b =
   assert (proper a) $
   assert (proper b) $
@@ -2879,20 +2950,13 @@ andPreciseRaw w a b =
     (_, 0) -> andSingleton w (start b) a
     _ ->
       let !m = mask a
-          !fa@(_, oa) = forcedBits a
-          !fb@(_, ob) = forcedBits b
-          !d = andResultStride m fa fb
-      in if d > m then mk w (oa Bits..&. ob) 1 0
-         else
-           let !(aLo, aHi) = operandRange a
-               !(bLo, bHi) = operandRange b
-               !wLo = warrenAndLo m aLo aHi bLo bHi
-               !wHi = warrenAndHi m aLo aHi bLo bHi
-               !sStart = (start a Bits..&. start b) Bits..&. m
-               !sStartCoset = sStart Bits..&. (d - 1)
-               !cosetLo = wLo + (modSub m sStartCoset wLo Bits..&. (d - 1))
-               !nSteps = if wHi < cosetLo then 0 else (wHi - cosetLo) `divByPow2` d
-           in mk w cosetLo d nSteps
+          !(za, oa) = forcedBits a
+          !(zb, ob) = forcedBits b
+          !(aLo, aHi) = operandRange a
+          !(bLo, bHi) = operandRange b
+          !wLo = warrenAndLo m aLo aHi bLo bHi
+          !wHi = warrenAndHi m aLo aHi bLo bHi
+      in fromForcedBits w (za Bits..|. zb, oa Bits..&. ob) (wLo, wHi)
 
 -- | /O(w)/. The cheap bitwise-OR kernel (De Morgan over 'andFast'). See 'or'
 -- for the default ('psplitOp2'-wrapped) variant and 'orPrecise' for the
@@ -2910,7 +2974,7 @@ orPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 orPrecise w a b = not w (andPrecise w (not w a) (not w b))
 
 -- | /O(w)/. The cheap bitwise-XOR kernel: a single 'forcedBits'-driven pass.
--- See 'xor' for the default ('psplitOp2'-wrapped) variant.
+-- See 'xor' for the default variant.
 --
 -- == Examples
 --
@@ -2932,11 +2996,11 @@ xorFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- operands. The result stride is @2^k@ for the lowest free bit @k@; if every
 -- bit is forced, the result is the singleton @forcedOnes@.
 --
--- The bit-pinning bounds give a sound upper bound @hi = m XOR forcedZeros@
--- (every result bit not forced to @0@ may be @1@) and a lower bound
--- @lo = forcedOnes@. These match what @liftBitwise2 B.xor@ would derive, but
--- writing the kernel directly lets 'xor' wrap it through 'psplitOp2' for the
--- same precision boost @and@\/@or@ get.
+-- The result's forced-bit picture feeds 'fromForcedBits' (with the trivial
+-- interval @[0, m]@ — XOR has no useful monotone interval bound). This
+-- matches what @liftBitwise2 B.xor@ would derive, but writing the kernel
+-- directly lets 'xor' wrap it through 'psplitOp2' for the same precision
+-- boost @and@\/@or@ get.
 xorFast w a b =
   assert (proper a) $
   assert (proper b) $
@@ -2945,64 +3009,167 @@ xorFast w a b =
       !(zb, ob)       = forcedBits b
       !forcedZeros    = (za Bits..&. zb) Bits..|. (oa Bits..&. ob)
       !forcedOnes     = (za Bits..&. ob) Bits..|. (oa Bits..&. zb)
-      !forced         = forcedZeros Bits..|. forcedOnes
-      !free           = m `Bits.xor` forced
-  in if free == 0 then mk w forcedOnes 1 0
-     else
-       let !d       = lowestSetBit free
-           !hi      = m `Bits.xor` forcedZeros
-           !cosetLo = forcedOnes Bits..&. (d - 1)
-           !nSteps  = (hi - cosetLo) `divByPow2` d
-       in mk w cosetLo d nSteps
+  in fromForcedBits w (forcedZeros, forcedOnes) (0, m)
 
--- | /O(w)/. Bitwise XOR. Wraps 'xorFast' through 'psplitOp2': each 'psplit'
--- piece pins one more low bit than its operand, so XOR-ing the pieces and
--- pseudo-joining can be tighter than the single 'xorFast' call. The
--- min-by-size guard inside 'psplitOp2' keeps the raw call's result whenever
--- it is at least as tight, so 'xor' is never larger than 'xorFast' by
--- cardinality.
+-- | /O(w)/. Bitwise XOR. At least as tight (by cardinality) as both the
+-- 'psplitOp2'-wrapped 'xorFast' kernel and the De Morgan identity
+-- composition @(a | b) & ~(a & b)@.
 xor :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-xor w = psplitOp2 w (xorFast w)
+-- Takes the cardinality-min of two sound candidates:
+--
+--   * 'xorFast' wrapped through 'psplitOp2' (each 'psplit' piece pins one
+--     more low bit than its operand, so XOR-ing the pieces and
+--     pseudo-joining can be tighter than the single 'xorFast' call), and
+--   * the identity composition over 'andFast'\/'orFast', whose intermediate
+--     progressions pick up 'operandRange' interval bounds that the direct
+--     forced-bits kernel cannot see (XOR has no monotone interval bound of
+--     its own).
+--
+-- The two candidates are incomparable (each wins on some inputs).
+xor w a b =
+  let !direct = psplitOp2 w (xorFast w) a b
+      !comp = andFast w (orFast w a b) (not w (andFast w a b))
+  in if size direct <= size comp then direct else comp
 
 -- ------------------------------------------------------------------
 -- * Concatenation, extension, selection, and truncation
 
+-- | Choose between the arith-arc progression and its 'fromForcedBits'
+-- refinement for a width-changing conversion.
+--
+-- The bits candidate is built from the arith result's own 'A.ubounds', so
+-- when the arith arc does not wrap modulo the target width those bounds
+-- are exactly its endpoints and 'fromForcedBits' can only shrink the arc
+-- (the stride is at least 1 and both ends are clamped inward) — the
+-- refinement is returned outright. When the arc wraps, 'A.ubounds' hulls
+-- to the full range, leaving the two candidates incomparable, and only
+-- then is the cardinality comparison needed.
+refineConversion ::
+  -- | arith-arc progression (via 'fromArith', always stride 1)
+  Domain w ->
+  -- | 'fromForcedBits' refinement at the arith arc's 'A.ubounds'
+  Domain w ->
+  Domain w
+refineConversion arith bits
+  | wrapsU arith = if size bits <= size arith then bits else arith
+  | otherwise = bits
+
+-- | /O(w)/. Zero extension.
 zext ::
   forall w u.
   (1 <= w, w + 1 <= u) =>
   NatRepr w -> Domain w -> NatRepr u -> Domain u
+-- A non-wrapping orbit is /exact/: its values are plain integers below
+-- @2^w@, so the same @(start, stride, n)@ denotes the same set at width
+-- @u@. Otherwise, the 'toArith' detour alone would drop all coset
+-- structure (zext of the evens would forget evenness), so take the
+-- cardinality-min with 'fromForcedBits' at @c@\'s forced bits (the new
+-- high bits forced to @0@) and the arith result's 'A.ubounds'.
 zext _w c u =
   case NR.leqTrans (NR.leqAdd (LeqProof :: LeqProof 1 w) (NR.knownNat @1))
                    (LeqProof :: LeqProof (w + 1) u) of
-    LeqProof ->
-      fromJustUnsafe "zext" (fromArith u (A.zext (toArith c) u))
+    LeqProof
+      | start c + n c * stride c <= mask c ->
+          mk u (start c) (stride c) (n c)
+      | otherwise ->
+          let !arithD = A.zext (toArith c) u
+              !arith = fromJustUnsafe "zext" (fromArith u arithD)
+              !mU = integerToNatural (maxUnsigned u)
+              !topBits = mU `Bits.xor` mask c
+              !(zeros, ones) = forcedBits c
+              !(loI, hiI) = A.ubounds arithD
+              !bits = fromForcedBits u (zeros Bits..|. topBits, ones)
+                        (integerToNatural loI, integerToNatural hiI)
+          in refineConversion arith bits
 
+-- | /O(w)/. Sign extension.
 sext ::
   forall w u.
   (1 <= w, w + 1 <= u) =>
   NatRepr w -> Domain w -> NatRepr u -> Domain u
+-- A non-wrapping orbit confined to one sign half is /exact/: non-negative
+-- values are unchanged by sign extension, and all-negative values shift
+-- uniformly by the sign-extension offset @2^u - 2^w@ (cf. 'ashrRaw'\'s
+-- all-negative case). Otherwise, refine the arith result with
+-- 'fromForcedBits': the new high bits copy bit @w - 1@, so they are
+-- forced (to the corresponding half of the pair) exactly when the sign
+-- bit is forced in @c@.
 sext w c u =
   case NR.leqTrans (NR.leqAdd (LeqProof :: LeqProof 1 w) (NR.knownNat @1))
                    (LeqProof :: LeqProof (w + 1) u) of
-    LeqProof ->
-      fromJustUnsafe "sext" (fromArith u (A.sext w (toArith c) u))
+    LeqProof
+      | arcNoWrap, endC < halfW ->
+          mk u (start c) (stride c) (n c)
+      | arcNoWrap, start c >= halfW ->
+          mk u (start c + (mU - mW)) (stride c) (n c)
+      | otherwise ->
+          let !arithD = A.sext w (toArith c) u
+              !arith = fromJustUnsafe "sext" (fromArith u arithD)
+              !topBits = mU `Bits.xor` mW
+              !(zeros, ones) = forcedBits c
+              !zerosU = zeros Bits..|.
+                          (if zeros Bits..&. halfW /= 0 then topBits else 0)
+              !onesU = ones Bits..|.
+                         (if ones Bits..&. halfW /= 0 then topBits else 0)
+              !(loI, hiI) = A.ubounds arithD
+              !bits = fromForcedBits u (zerosU, onesU)
+                        (integerToNatural loI, integerToNatural hiI)
+          in refineConversion arith bits
+  where
+    mW = mask c
+    mU = integerToNatural (maxUnsigned u)
+    halfW = (mW + 1) `Bits.shiftR` 1  -- 2^(w-1), the sign bit
+    endC = start c + n c * stride c
+    arcNoWrap = endC <= mW
 
+-- | /O(u + v)/. Concatenation: @a@ supplies the high @u@ bits, @b@ the low
+-- @v@ bits.
 concat ::
   forall u v.
   (1 <= u, 1 <= v) =>
   NatRepr u -> Domain u -> NatRepr v -> Domain v -> Domain (u + v)
+-- Both operands' forced-bit pictures compose bit-parallel: the result has
+-- forced pair @(zeros_a << v .|. zeros_b, ones_a << v .|. ones_b)@. Take
+-- the cardinality-min of 'fromForcedBits' on that pair (at the arith
+-- result's 'A.ubounds') with the arith-only result.
 concat u a v b =
   case NR.leqAddPos u v of
     LeqProof ->
-      fromJustUnsafe "concat"
-        (fromArith (NR.addNat u v) (A.concat u (toArith a) v (toArith b)))
+      let !uv = NR.addNat u v
+          !arithD = A.concat u (toArith a) v (toArith b)
+          !arith = fromJustUnsafe "concat" (fromArith uv arithD)
+          !vI = NR.widthVal v
+          !(za, oa) = forcedBits a
+          !(zb, ob) = forcedBits b
+          !(loI, hiI) = A.ubounds arithD
+          !bits = fromForcedBits uv
+                    ((za `Bits.shiftL` vI) Bits..|. zb,
+                     (oa `Bits.shiftL` vI) Bits..|. ob)
+                    (integerToNatural loI, integerToNatural hiI)
+      in refineConversion arith bits
 
+-- | /O(w)/. Bit slice: the @n@ bits of the operand starting at bit @i@
+-- (counting from the least significant bit).
 select ::
   forall i n w.
   (1 <= n, 1 <= w, i + n <= w) =>
   NatRepr i -> NatRepr n -> NatRepr w -> Domain w -> Domain n
+-- Bit @p@ of the result is bit @p + i@ of the operand, so the result's
+-- forced pair is the slice @(zeros >> i, ones >> i)@ masked to @n@ bits.
+-- Refining the arith result with 'fromForcedBits' recovers e.g.
+-- @select 0 2@ of the evens as @{0, 2}@ instead of all of @[0, 3]@.
 select i n _w c =
-  fromJustUnsafe "select" (fromArith n (A.select i n (toArith c)))
+  let !arithD = A.select i n (toArith c)
+      !arith = fromJustUnsafe "select" (fromArith n arithD)
+      !mN = integerToNatural (maxUnsigned n)
+      !iI = NR.widthVal i
+      !(zeros, ones) = forcedBits c
+      !(loI, hiI) = A.ubounds arithD
+      !bits = fromForcedBits n
+                ((zeros `Bits.shiftR` iI) Bits..&. mN,
+                 (ones `Bits.shiftR` iI) Bits..&. mN)
+                (integerToNatural loI, integerToNatural hiI)
+  in refineConversion arith bits
 
 -- ------------------------------------------------------------------
 -- * Shifts and rotations
@@ -3053,12 +3220,13 @@ shlRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 --
 -- 'mul' is sound w.r.t. the concrete shl semantics, but its closed-form
 -- @n'@ for non-singleton @b@ can land in a coset that extends past
--- @A.shl@'s arc, leaving 'mul' incomparable with @A.shl@. We accept the
--- 'mul' result only when 'leqExact' confirms it is contained in the
--- arith arc; otherwise we fall back to the arith result.
+-- @A.shl@'s arc, leaving 'mul' incomparable with @A.shl@. Both candidates
+-- are sound, so we keep whichever is tighter by cardinality (which agrees
+-- with the old 'leqExact' gate whenever 'mul' was contained in the arith
+-- arc, and additionally keeps 'mul' when it is smaller but incomparable).
 shlRaw w a b
   | l_b' == wInt = mk w 0 1 0
-  | leqExact mulResult arithResult = mulResult
+  | size mulResult <= size arithResult = mulResult
   | otherwise = arithResult
   where
     wInt = NR.intValue w
@@ -3113,6 +3281,13 @@ lshrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- @start a@; the bottom @v@ bits of start are preserved into the result, so
 -- we don't need @ctz(start a) ≥ k@.)
 --
+-- For other singleton shifts @{k}@ (with @k > ctz(stride a)@ or a wrapping
+-- arc), the result still inherits @a@\'s 'forcedBits' shifted right by @k@
+-- (bit @p@ of @x >> k@ is bit @p + k@ of @x@, and the top @k@ bits are @0@):
+-- the lowest free bit of the shifted picture gives a result stride, the
+-- forced ones a congruent lower bound, and the forced-zeros complement an
+-- upper bound, all intersected with the Table 3.2 arc @[lo, hi]@.
+--
 -- For non-singleton @b@, different @k ∈ b@ give different shifted strides
 -- @stride a >> k@, and the union of those progressions is generally not a
 -- single CLP, so we fall back to Table 3.2's stride-1 bounds.
@@ -3122,6 +3297,13 @@ lshrRaw w a b
   , kI == 0 || arcNoWrap
   = mk w (start a `Bits.shiftR` kI)
          (stride a `Bits.shiftR` kI) (n a)
+  | n b == 0 =
+      let !m = mask a
+          !(zeros, ones) = forcedBits a
+          !zeros' = (zeros `Bits.shiftR` kI)
+                      Bits..|. (m `Bits.xor` (m `Bits.shiftR` kI))
+          !ones' = ones `Bits.shiftR` kI
+      in fromForcedBits w (zeros', ones') (lo, hi)
   | otherwise = mk w lo 1 (hi - lo)
   where
     wInt = NR.intValue w
@@ -3155,6 +3337,11 @@ ashrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- Same singleton-shift stride preservation as 'lshr', plus a sign-half check:
 -- positive orbits behave like 'lshr'; negative orbits get the sign-extension
 -- offset @2^w - 2^(w-k)@ added (top @k@ bits of every result are 1).
+--
+-- For other singleton shifts @{k}@, the result inherits @a@\'s 'forcedBits'
+-- shifted right by @k@ with the top @k@ result bits copying @a@\'s sign bit
+-- when that bit is itself forced; 'fromForcedBitsSigned' intersects that
+-- picture with the Table 3.2 arc @[lo, hi]@ on the signed number line.
 ashrRaw w a b
   | n b == 0 && kI == 0 = a
   | n b == 0
@@ -3170,6 +3357,15 @@ ashrRaw w a b
   = let off    = (mask a + 1) - (1 `shiftL` (wIntI - kI))  -- 2^w - 2^(w-k)
         start' = (start a `Bits.shiftR` kI) + off
     in mk w start' (stride a `Bits.shiftR` kI) (n a)
+  | n b == 0 =
+      let !m = mask a
+          !(zeros, ones) = forcedBits a
+          !topK = m `Bits.xor` (m `Bits.shiftR` kI)
+          !zeros' = (zeros `Bits.shiftR` kI)
+                      Bits..|. (if zeros Bits..&. halfRange /= 0 then topK else 0)
+          !ones' = (ones `Bits.shiftR` kI)
+                      Bits..|. (if ones Bits..&. halfRange /= 0 then topK else 0)
+      in fromForcedBitsSigned w (zeros', ones') (lo, hi)
   | otherwise = mk w (asN w lo) 1 (asN w (hi - lo))
   where
     wInt = NR.intValue w
@@ -4284,13 +4480,20 @@ pieceSign w c
 -- | /O(w^2)/. Refine @a@ by intersecting with the unsigned range @[lo, hi]@,
 -- where @0 <= lo <= hi <= 2^w - 1@. Returns 'Nothing' if the intersection is
 -- provably empty.
+--
+-- The refined set @{x ∈ γ(a) | lo <= x <= hi}@ is a subset of @γ(a)@, so @a@
+-- itself is always a sound result. 'pseudoMeet' is sound but not a lower
+-- bound on wrapping operands, so when its result is larger than @a@ by
+-- cardinality we keep @a@ instead.
 assumeUnsignedRange ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Integer -> Integer -> Maybe (Domain w)
 assumeUnsignedRange w a lo hi =
   case fromArith w (A.range w lo hi) of
     Nothing -> Nothing
-    Just r  -> pseudoMeet w a r
+    Just r  -> case pseudoMeet w a r of
+      Nothing -> Nothing
+      Just c  -> Just (if size c <= size a then c else a)
 
 -- | Shared driver for 'assumeSlt', 'assumeSle', 'assumeSgt', 'assumeSge'.
 -- Splits both operands at the sign boundary with 'signPieces', dispatches
@@ -5031,6 +5234,50 @@ forcedBitsMember c x =
               && (ones .&. (mask c `Bits.xor` x')) == 0)
   where
     x' = modMask c x
+
+-- | 'fromForcedBits' covers: every value that agrees with the forced bits
+-- and lies in the interval is a member of the result.
+--
+-- The raw draws are normalized inside the property — @zeros@ is made
+-- disjoint from @ones@, @x@ is rewritten to agree with both, and the
+-- interval endpoints are ordered — so that only @x@'s interval membership
+-- remains as a real precondition.
+fromForcedBitsCorrect ::
+  (1 <= w) =>
+  NatRepr w ->
+  Natural -> Natural -> Natural -> Natural -> Natural -> Property
+fromForcedBitsCorrect w zRaw oRaw loRaw hiRaw xRaw =
+  lo <= x ==> x <= hi ==>
+    property (member (fromForcedBits w (zeros, ones) (lo, hi)) x)
+  where
+    m     = integerToNatural (maxUnsigned w)
+    ones  = oRaw .&. m
+    zeros = zRaw .&. m .&. (m `Bits.xor` ones)
+    x     = ((xRaw .&. m) .&. (m `Bits.xor` zeros)) Bits..|. ones
+    lo    = min (loRaw .&. m) (hiRaw .&. m)
+    hi    = max (loRaw .&. m) (hiRaw .&. m)
+
+-- | 'fromForcedBitsSigned' covers: every value that agrees with the forced
+-- bits and whose /signed/ value lies in the interval is a member of the
+-- result. Raw draws are normalized as in 'fromForcedBitsCorrect', with the
+-- interval endpoints read as signed values.
+fromForcedBitsSignedCorrect ::
+  (1 <= w) =>
+  NatRepr w ->
+  Natural -> Natural -> Natural -> Natural -> Natural -> Property
+fromForcedBitsSignedCorrect w zRaw oRaw loRaw hiRaw xRaw =
+  lo <= xS ==> xS <= hi ==>
+    property (member (fromForcedBitsSigned w (zeros, ones) (lo, hi)) x)
+  where
+    m     = integerToNatural (maxUnsigned w)
+    ones  = oRaw .&. m
+    zeros = zRaw .&. m .&. (m `Bits.xor` ones)
+    x     = ((xRaw .&. m) .&. (m `Bits.xor` zeros)) Bits..|. ones
+    xS    = toSigned w (toInteger x)
+    loS   = toSigned w (toInteger (loRaw .&. m))
+    hiS   = toSigned w (toInteger (hiRaw .&. m))
+    lo    = min loS hiS
+    hi    = max loS hiS
 
 -- | Every element in a bitwise domain is also in its 'fromBitwise' conversion
 -- (when that conversion produces a progression).
@@ -5817,23 +6064,6 @@ andPreciseDominatesAndFast ::
 andPreciseDominatesAndFast w a b =
   proper a ==> proper b ==>
     property (size (andPrecise w a b) <= size (andFast w a b))
-
--- | The 'forcedBits'-based 'xorFast' is contained in (in particular, no
--- larger than) the identity-based @(a | b) & ~(a & b)@ built from
--- 'andFast'\/'orFast'\/'not'.
---
--- Direct check: the forced-bits picture for XOR is exactly what the identity
--- yields after composing the per-bit AND/OR/NOT rules, but composing through
--- intermediate progressions can lose the cross-bit coset structure. The
--- direct kernel preserves every forced bit and the lowest-free-bit stride
--- without going through 'mk'\\/'fromBitwise' twice.
-xorFastDominatesIdentity ::
-  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
-xorFastDominatesIdentity w a b =
-  proper a ==> proper b ==>
-    property (leqExact (xorFast w a b) idXor)
-  where
-    idXor = andFast w (orFast w a b) (not w (andFast w a b))
 
 -- ------------------------------------------------------------------
 -- ** Concatenation, extension, selection, and truncation
