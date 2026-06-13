@@ -406,6 +406,10 @@ module What4.Domains.BV.Strides
   , rolRaw
   , ror
   , rorRaw
+  , rolPrecise
+  , rolPreciseRaw
+  , rorPrecise
+  , rorPreciseRaw
   -- * Lattice operations
   -- $lattice
   -- ** Meets
@@ -588,7 +592,11 @@ module What4.Domains.BV.Strides
   , correct_lshr
   , correct_ashr
   , correct_rol
+  , correct_rolPrecise
   , correct_ror
+  , correct_rorPrecise
+  , rolPreciseRawDominatesRolRaw
+  , rorPreciseRawDominatesRorRaw
   -- ** Lattice operations
   -- *** Splitting helpers
   , nsplitUnion
@@ -3608,27 +3616,237 @@ ashrRaw w a b
     lo = l_a `Bits.shiftR` (if l_a < 0 then l_b' else u_b')
     hi = u_a `Bits.shiftR` (if u_a < 0 then u_b' else l_b')
 
--- | /O(w^2)/. Rotate left.
+-- | /O(w)/. Bitwise rotate-left. Wraps 'rolRaw' through 'psplitOp2'. See
+-- 'rolPrecise' for the tighter (and more expensive) variant that intersects
+-- forced bits across every reachable residue.
 rol :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rol w = psplitOp2 w (rolRaw w)
 
--- | /O(w^2)/. The single-pair rotate-left kernel; see 'rol' for the
--- 'psplitOp2'-wrapped variant. Lifts through 'B.rolAbstract', which unions
--- the rotate over up to @w@ reachable residues mod @w@ (each an @O(w)@
--- bounds rotate), so the kernel is @O(w^2)@ — the @O(w)@ bitwise
--- conversions of 'liftBitwise2' are dominated.
+-- | /O(w)/. The single-pair fast rotate-left kernel; see 'rol' for the
+-- 'psplitOp2'-wrapped variant. Tight when @b@\'s residues mod @w@ collapse
+-- to a single value (a constant rotation amount, including the singleton
+-- and stride-multiple-of-@w@ cases); otherwise falls back to the
+-- 'fullCoverage' approximation determined by @a@\'s global structure
+-- alone.
 rolRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-rolRaw w = liftBitwise2 w (B.rolAbstract w)
+rolRaw w a b = rotFastRaw w a b (\x r -> rotateLeftNat w x r)
 
--- | /O(w^2)/. Rotate right.
+-- | /O(w)/. Bitwise rotate-right. Mirrors 'rol'.
 ror :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 ror w = psplitOp2 w (rorRaw w)
 
--- | /O(w^2)/. The single-pair rotate-right kernel; see 'ror' for the
--- 'psplitOp2'-wrapped variant. Mirrors 'rolRaw' (via 'B.rorAbstract'), so
--- it is @O(w^2)@ for the same reason.
+-- | /O(w)/. The single-pair fast rotate-right kernel; see 'ror' for the
+-- 'psplitOp2'-wrapped variant. Mirrors 'rolRaw'.
 rorRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-rorRaw w = liftBitwise2 w (B.rorAbstract w)
+rorRaw w a b = rotFastRaw w a b (\x r -> rotateRightNat w x r)
+
+-- | /O(w^2)/. Forced-bits-direct bitwise rotate-left. At least as precise
+-- as 'rol' on all inputs. Wraps 'rolPreciseRaw' through 'psplitOp2'.
+rolPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+rolPrecise w = psplitOp2 w (rolPreciseRaw w)
+
+-- | /O(w^2)/. The single-pair precise rotate-left kernel; see 'rolPrecise'
+-- for the 'psplitOp2'-wrapped variant.
+rolPreciseRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+rolPreciseRaw w a b = rotPreciseRaw w a b (\x r -> rotateLeftNat w x r)
+
+-- | /O(w^2)/. Forced-bits-direct bitwise rotate-right. Mirrors 'rolPrecise'.
+rorPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+rorPrecise w = psplitOp2 w (rorPreciseRaw w)
+
+-- | /O(w^2)/. The single-pair precise rotate-right kernel; see 'rorPrecise'
+-- for the 'psplitOp2'-wrapped variant.
+rorPreciseRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+rorPreciseRaw w a b = rotPreciseRaw w a b (\x r -> rotateRightNat w x r)
+
+-- | /O(w)/. Rotate a 'Natural' value of width @w@ left by @r@ bits.
+-- Pre: @0 <= r < w@ and @x .&. mask == x@ where @mask = 2^w - 1@.
+rotateLeftNat :: NatRepr w -> Natural -> Int -> Natural
+rotateLeftNat w x r =
+  let !wI = fromInteger (NR.intValue w) :: Int
+      !m  = integerToNatural (maxUnsigned w)
+  in if r == 0 then x
+     else ((x `shiftL` r) Bits..|. (x `shiftR` (wI - r))) Bits..&. m
+{-# INLINE rotateLeftNat #-}
+
+-- | /O(w)/. Rotate a 'Natural' value of width @w@ right by @r@ bits.
+-- Pre: @0 <= r < w@ and @x .&. mask == x@ where @mask = 2^w - 1@.
+rotateRightNat :: NatRepr w -> Natural -> Int -> Natural
+rotateRightNat w x r =
+  let !wI = fromInteger (NR.intValue w) :: Int
+      !m  = integerToNatural (maxUnsigned w)
+  in if r == 0 then x
+     else ((x `shiftR` r) Bits..|. (x `shiftL` (wI - r))) Bits..&. m
+{-# INLINE rotateRightNat #-}
+
+-- | /O(w)/. Cheap rotate kernel shared by 'rolRaw' and 'rorRaw'. Two cases:
+--
+--   * @b@\'s residues mod @w@ collapse to a single value @r@ (e.g. a
+--     singleton, or a stride that is a multiple of @w@): rotate @a@\'s
+--     forced bits by @r@ exactly — this matches what 'rotPreciseRaw' would
+--     compute, at constant cost.
+--   * Otherwise, return the 'B.fullCoverage'-shaped result determined by
+--     @a@\'s global structure alone (all-zeros if @a = {0}@, all-ones if
+--     @a = {mask}@, otherwise top). Sound but loose; 'rotPreciseRaw'
+--     refines this by intersecting forced bits across every reachable
+--     residue.
+rotFastRaw ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  Domain w ->
+  (Natural -> Int -> Natural) {- ^ per-residue rotation on forced bits -} ->
+  Domain w
+rotFastRaw w a b rotBy =
+  assert (proper a) $
+  assert (proper b) $
+  let !m        = mask a
+      !(za, oa) = forcedBits a
+      !residues = reachableResiduesModW w b
+      single = case residues of
+        Just [r] -> Just r
+        _        -> Nothing
+  in case single of
+       Just r ->
+         fromForcedBits w (rotBy za r, rotBy oa r) (0, m)
+       Nothing ->
+         -- Either every residue reachable, or more than one but we don't
+         -- pay to enumerate them: fall back to a global-structure-only
+         -- approximation.
+         let !allZeros = za == m  -- a = {0}: every input bit forced to 0
+             !allOnes  = oa == m  -- a = {mask}: every input bit forced to 1
+             !forcedZeros = if allZeros then m else 0
+             !forcedOnes  = if allOnes  then m else 0
+         in fromForcedBits w (forcedZeros, forcedOnes) (0, m)
+
+-- | /O(w^2)/. Forced-bits-direct rotate kernel shared by 'rolPreciseRaw'
+-- and 'rorPreciseRaw'. For each residue @r ∈ [0, w-1]@ reachable from
+-- @b@, rotate @forcedBits a@ by @r@ in the requested direction and
+-- intersect: a bit is forced to @0@ in the result iff it is forced to
+-- @0@ in /every/ per-residue rotation of @a@\'s forced-zeros (and
+-- likewise for @1@). The result's forced-bit picture feeds
+-- 'fromForcedBits' (with the trivial interval @[0, m]@ — for rotation,
+-- the bitbounds of the unioned bitwise result are exactly
+-- @(forcedOnes, m XOR forcedZeros)@, so they add nothing on top of the
+-- forced-bit pair).
+--
+-- Reachable residues are enumerated from @b@'s progression structure:
+-- the orbit @{(start b + i·stride b) mod 2^w | 0 ≤ i ≤ n b}@ reduced mod
+-- @w@. This is the only place the new kernel can be more precise than
+-- 'liftBitwise2' on top of 'B.rolAbstract': the bitwise path enumerates
+-- residues consistent with @forcedBits b@, which can over-cover the
+-- orbit (e.g. a singleton @{0}@ has one residue but two forced-bits-
+-- consistent residues at width 1). When the orbit covers all of
+-- @[0, w-1]@ mod @w@, every input bit can land at every output position,
+-- so the result reduces to the 'B.fullCoverage' picture.
+rotPreciseRaw ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  Domain w ->
+  (Natural -> Int -> Natural) {- ^ per-residue rotation on forced bits -} ->
+  Domain w
+rotPreciseRaw w a b rotBy =
+  assert (proper a) $
+  assert (proper b) $
+  let !m              = mask a
+      !(za, oa)       = forcedBits a
+      !residues       = reachableResiduesModW w b
+  in case residues of
+       Nothing ->
+         -- Every residue reachable: each output bit could come from any
+         -- input bit. The only forced output bits are when /every/ input
+         -- bit agrees: @a = {0}@ → all-zeros, @a = {mask}@ → all-ones.
+         -- Otherwise the result is fully unknown.
+         let !allZeros = za == m  -- a = {0}: every input bit forced to 0
+             !allOnes  = oa == m  -- a = {mask}: every input bit forced to 1
+             !forcedZeros = if allZeros then m else 0
+             !forcedOnes  = if allOnes  then m else 0
+         in fromForcedBits w (forcedZeros, forcedOnes) (0, m)
+       Just rs ->
+         -- Strict left fold; bail out once both accumulators are 0
+         -- (further intersections can't shrink them).
+         let go !accZ !accO _
+               | accZ == 0 Prelude.&& accO == 0 = (0, 0)
+             go accZ accO []        = (accZ, accO)
+             go accZ accO (r:rest)  =
+               go (accZ Bits..&. rotBy za r) (accO Bits..&. rotBy oa r) rest
+             !(forcedZeros, forcedOnes) = go m m rs
+         in fromForcedBits w (forcedZeros, forcedOnes) (0, m)
+
+-- | /O(w)/. The set of residues mod @w@ that some member of @b@ can
+-- produce, as a list of values in @[0, w-1]@ (no ordering guarantee —
+-- 'rotPreciseRaw' folds an associative-commutative intersection over
+-- them, and 'rotFastRaw' only looks for a singleton). 'Nothing' means
+-- every residue is reachable.
+--
+-- Two cases:
+--
+--   * /Power-of-two w./ Walk @b@'s orbit @{start b + i · stride b mod 2^w}@
+--     reduced mod @w@. For pow-2 @w@, @(x mod 2^w) mod w@ equals
+--     @x mod w@, and the residues form a stride-orbit in @Z\/w@ with
+--     step @stride b mod w@ — period at most @w@, so at most @w@
+--     distinct residues. This enumerates @b@'s actual residues, not just
+--     those consistent with @forcedBits b@: e.g., a singleton @{0}@ in
+--     a width-1 rotate amount has only one residue, while the
+--     forced-bits view would admit both.
+--   * /Non-power-of-two w./ Reduce @b@'s unsigned bounds @[bl, bh]@ mod
+--     @w@. When the integer span @bh - bl + 1 >= w@, every residue is
+--     hit; otherwise the result is one or two contiguous ranges in
+--     @[0, w-1]@ (two when the residue range wraps around @0@).
+--     Looser than the pow-2 branch — ignores stride.
+reachableResiduesModW :: NatRepr w -> Domain w -> Maybe [Int]
+reachableResiduesModW w b
+  | nB == 0 =
+      -- Singleton: exactly one residue.
+      Just [fromInteger (toInteger (start b) `Prelude.mod` wI)]
+  | Arith.isPow2Integer wI =
+      let !wN          = integerToNatural wI
+          !residueMask = wN - 1
+          !startLow    = start b Bits..&. residueMask
+          !strideLow   = stride b Bits..&. residueMask
+      in if strideLow == 0
+           -- Stride is a multiple of @w@: every step lands at the same
+           -- residue.
+           then Just [fromIntegral @Natural @Int startLow]
+           else
+             let !g       = lowestSetBit strideLow  -- gcd(strideLow, wN)
+                 !period  = wN `divByPow2` g        -- orbit period in Z/wN
+                 -- Distinct residues = min(n+1, period). After period
+                 -- steps, the Z/wN orbit cycles; before that, all steps
+                 -- land at distinct residues.
+                 !count   = Prelude.min (nB + 1) period
+             in if count >= wN
+                  -- Hit every residue.
+                  then Nothing
+                  else Just (walkResidues startLow strideLow residueMask count)
+  | otherwise =
+      let !bl = toInteger (start b)
+          !bh = bl + toInteger (n b) * toInteger (stride b)
+          !span_ = bh - bl + 1
+      in if span_ >= wI then Nothing
+         else
+           let (ql, rl) = bl `Prelude.divMod` wI
+               (qh, rh) = bh `Prelude.divMod` wI
+               !rlI = fromInteger rl
+               !rhI = fromInteger rh
+           in if qh == ql
+                then Just [rlI .. rhI]
+                else Just ([0 .. rhI] Prelude.++ [rlI .. fromInteger wI - 1])
+  where
+    !nB = n b
+    !wI = NR.intValue w
+
+-- | /O(k)/. Walk the first @k@ elements of the stride-orbit
+-- @start, (start+d) mod m+1, (start + 2·d) mod m+1, …@ as 'Int'
+-- residues. Pre: @m+1@ is a power of two and @d@ is taken mod @m+1@ —
+-- intended for use with @residueMask = w - 1@ when @w@ is a power of two.
+walkResidues :: Natural -> Natural -> Natural -> Natural -> [Int]
+walkResidues = go
+  where
+    go !x !d !m !k
+      | k == 0    = []
+      | otherwise = fromIntegral @Natural @Int x : go ((x + d) Bits..&. m) d m (k - 1)
 
 -- ------------------------------------------------------------------
 -- * Lattice operations
@@ -6854,12 +7072,51 @@ correct_rol w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (rol w a b) (fromInteger (Arith.rotateLeft w (toInteger x) (toInteger y))))
 
+correct_rolPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_rolPrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (rolPrecise w a b) (fromInteger (Arith.rotateLeft w (toInteger x) (toInteger y))))
+
 correct_ror ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
 correct_ror w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (ror w a b) (fromInteger (Arith.rotateRight w (toInteger x) (toInteger y))))
+
+correct_rorPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_rorPrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (rorPrecise w a b) (fromInteger (Arith.rotateRight w (toInteger x) (toInteger y))))
+
+-- | 'rolPreciseRaw' is at least as tight as 'rolRaw' on every input.
+-- 'rotPreciseRaw' intersects forced bits across every reachable residue,
+-- while 'rotFastRaw' returns either the singleton-residue exact rotation
+-- (which 'rotPreciseRaw' also computes) or the 'B.fullCoverage' shape
+-- (which 'rotPreciseRaw' refines).
+--
+-- The 'psplitOp2'-wrapped relation does /not/ hold (cf.
+-- 'andPreciseDominatesAndFast'\'s caveat about 'and'\/'andFast'):
+-- 'pseudoJoin' is non-monotone, so the pseudo-joined result of the
+-- tighter 'rolPreciseRaw' pieces can land on a coset that is /larger/
+-- than the pseudo-joined result of the looser 'rolRaw' pieces.
+rolPreciseRawDominatesRolRaw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+rolPreciseRawDominatesRolRaw w a b =
+  proper a ==> proper b ==>
+    property (size (rolPreciseRaw w a b) <= size (rolRaw w a b))
+
+-- | 'rorPreciseRaw' is at least as tight as 'rorRaw' on every input.
+-- Mirrors 'rolPreciseRawDominatesRolRaw'.
+rorPreciseRawDominatesRorRaw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+rorPreciseRawDominatesRorRaw w a b =
+  proper a ==> proper b ==>
+    property (size (rorPreciseRaw w a b) <= size (rorRaw w a b))
 
 -- ------------------------------------------------------------------
 -- ** Lattice operations

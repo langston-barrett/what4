@@ -514,9 +514,21 @@ tests = TT.testGroup "Strides"
   , genTest "correct_rol" $
       do SW n <- genWidth
          S.correct_rol n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_rolPrecise" $
+      do SW n <- genWidth
+         S.correct_rolPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "rolPreciseRawDominatesRolRaw" $
+      do SW n <- genWidth
+         S.rolPreciseRawDominatesRolRaw n <$> S.genDomain n <*> S.genDomain n
   , genTest "correct_ror" $
       do SW n <- genWidth
          S.correct_ror n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_rorPrecise" $
+      do SW n <- genWidth
+         S.correct_rorPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "rorPreciseRawDominatesRorRaw" $
+      do SW n <- genWidth
+         S.rorPreciseRawDominatesRorRaw n <$> S.genDomain n <*> S.genDomain n
 
   -- Lattice operations
   , genTest "correct_pseudoMeet" $
