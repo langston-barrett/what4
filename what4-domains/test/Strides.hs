@@ -251,6 +251,28 @@ tests = TT.testGroup "Strides"
   , genTest "forcedBitsMember" $
       do SW n <- genWidth
          S.forcedBitsMember <$> S.genDomain n <*> genNatBV n
+  , genTest "nextAgreeingCorrect" $
+      do SW n <- genWidth
+         S.nextAgreeingCorrect n
+           <$> genNatBV n <*> genNatBV n <*> genNatBV n <*> genNatBV n
+  , genTest "prevAgreeingCorrect" $
+      do SW n <- genWidth
+         S.prevAgreeingCorrect n
+           <$> genNatBV n <*> genNatBV n <*> genNatBV n <*> genNatBV n
+  , genTest "arcExtremesCorrect" $
+      do SW n <- genWidth
+         S.arcExtremesCorrect n
+           <$> genNatBV n <*> genNatBV n <*> genNatBV n
+           <*> genNatBV n <*> genNatBV n
+  , genTest "fromForcedBitsArcCorrect" $
+      do SW n <- genWidth
+         S.fromForcedBitsArcCorrect n
+           <$> genNatBV n <*> genNatBV n <*> genNatBV n
+           <*> genNatBV n <*> genNatBV n
+  , genTest "fromForcedCorrect" $
+      do SW n <- genWidth
+         S.fromForcedCorrect n
+           <$> genNatBV n <*> genNatBV n <*> genNatBV n
   , genTest "fromForcedBitsCorrect" $
       do SW n <- genWidth
          S.fromForcedBitsCorrect n

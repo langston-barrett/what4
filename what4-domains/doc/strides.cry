@@ -251,51 +251,120 @@ forcedBits c = (lowZeros || highZeros, lowOnes || highOnes)
     highOnes  = highForced && c.start
     highZeros = highForced && (~ c.start)
 
-// See @fromForcedBits@ in What4.Domains.BV.Strides: the progression
-// covering every value that has a 0 at every bit set in @zeros@, a 1 at
-// every bit set in @ones@, and lies in the unsigned interval @[lo, hi]@.
-// All bits below the lowest free bit are determined, so the constraint set
-// lies in one coset of @2^v Z / 2^n Z@; @ones@ is a coset-compatible lower
-// bound (bitwise dominance implies unsigned dominance) and @~ zeros@ an
-// upper bound, both intersected with @[lo, hi]@.
-fromForcedBits : {n} (fin n, n >= 2) => ([n], [n]) -> ([n], [n]) -> Domain n
-fromForcedBits (zeros, ones) (lo, hi) =
+// See @highestSetBit@ in What4.Domains.BV.Strides: the highest set bit
+// of @x@ as a single-bit mask; 0 when @x@ is 0.
+highestSetBit : {n} (fin n, n >= 1) => [n] -> [n]
+highestSetBit x = foldl pick 0 bits
+  where
+    bits = [ (1 : [n]) << i | i <- [0 .. n - 1] ]
+    pick acc b = if (x && b) != 0 then b else acc
+
+// See @nextAgreeing@ in What4.Domains.BV.Strides: the least value at or
+// above @a@ that agrees with the forced-bit pair @(zeros, ones)@, if any.
+nextAgreeing : {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> Maybe [n]
+nextAgreeing zeros ones a =
+  if v == 0 then Just a
+  else if (ones && hb) != 0
+    then Just ((a && keepAbove hb) || hb || (ones && (hb - 1)))
+  else if cands == 0 then Nothing
+  else Just ((a && keepAbove p) || p || (ones && (p - 1)))
+  where
+    v = (a && zeros) || (ones && ~ a)
+    hb = highestSetBit v
+    keepAbove b = ~ (2 * b - 1)
+    cands = (~ a) && (~ zeros) && keepAbove hb
+    p = lowestSetBit cands
+
+// See @prevAgreeing@ in What4.Domains.BV.Strides: the greatest value at
+// or below @a@ that agrees with the forced-bit pair @(zeros, ones)@.
+prevAgreeing : {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> Maybe [n]
+prevAgreeing zeros ones a =
+  if v == 0 then Just a
+  else if (zeros && hb) != 0
+    then Just ((a && keepAbove hb) || ((hb - 1) && ~ zeros))
+  else if cands == 0 then Nothing
+  else Just ((a && keepAbove p) || ((p - 1) && ~ zeros))
+  where
+    v = (a && zeros) || (ones && ~ a)
+    hb = highestSetBit v
+    keepAbove b = ~ (2 * b - 1)
+    cands = a && (~ ones) && keepAbove hb
+    p = lowestSetBit cands
+
+// See @fromForcedBitsArc@ in What4.Domains.BV.Strides: the signedness-
+// agnostic core. The progression covering every value that agrees with
+// @(zeros, ones)@ and lies on the circular arc of @len + 1@ values from
+// @anchor@. The stride (lowest free bit) is a coset fact about the number
+// circle; the endpoints are the extremal agreeing patterns on the arc,
+// found by @nextAgreeing@/@prevAgreeing@ from the arc's ends.
+fromForcedBitsArc :
+  {n} (fin n, n >= 2) => ([n], [n]) -> ([n], [n]) -> Domain n
+fromForcedBitsArc (zeros, ones) (anchor, len) =
   if free == 0 then mk ones 1 0
-  else mk lo1 d nSteps
+  else case arcExtremes (zeros, ones) (anchor, len) of
+    Nothing -> mk ones 1 0
+    Just (tLo, tHi) -> mk (anchor + tLo) d (zext ((tHi - tLo) / d))
   where
     free = ~ (zeros || ones)
     d = lowestSetBit free
-    lo0 = if lo >= ones then lo else ones
-    lo1 = lo0 + (((ones && (d - 1)) - lo0) && (d - 1))
-    hiZ = ~ zeros
-    hi' = if hi <= hiZ then hi else hiZ
-    nSteps : [n + 1]
-    nSteps = if hi' < lo1 then 0 else zext ((hi' - lo1) / d)
 
-// See @fromForcedBitsSigned@ in What4.Domains.BV.Strides: variant of
-// @fromForcedBits@ for an interval @[lo, hi]@ on the signed number line.
-// The stride divides @2^n@, so residues mod the stride do not depend on
-// which representative is read; the bit-derived bounds become the signed
-// values of the extremal admissible patterns (split on whether the sign
-// bit is free).
+// See @arcExtremes@ in What4.Domains.BV.Strides: the arc-relative extremal
+// offsets @(tLo, tHi)@ from @anchor@ over the values agreeing with
+// @(zeros, ones)@ on the arc, or @Nothing@ if none. The least is searched
+// upward from @anchor@ (@nextAgreeing@), the greatest downward from the
+// arc's far end (@prevAgreeing@), each falling through to a global extreme
+// on a wrapping arc.
+arcExtremes :
+  {n} (fin n, n >= 2) => ([n], [n]) -> ([n], [n]) -> Maybe ([n], [n])
+arcExtremes (zeros, ones) (anchor, len) =
+  case mbTLo of
+    Nothing -> Nothing
+    Just tLo -> case mbTHi of
+      Nothing -> Nothing
+      Just tHi -> Just (tLo, tHi)
+  where
+    wraps = (zext anchor + zext len : [n + 1]) > zext (~ zero : [n])
+    wrapEnd = anchor + len
+    mbTLo = case nextAgreeing zeros ones anchor of
+      Just y -> if wraps \/ y - anchor <= len
+                  then Just (y - anchor)
+                  else Nothing
+      Nothing -> if wraps /\ ones <= wrapEnd
+                   then Just (ones - anchor)
+                   else Nothing
+    mbTHi =
+      if wraps then
+        case prevAgreeing zeros ones wrapEnd of
+          Just y -> Just (y - anchor)
+          Nothing -> if hiAll >= anchor then Just (hiAll - anchor) else Nothing
+      else
+        case prevAgreeing zeros ones wrapEnd of
+          Just y -> if y >= anchor then Just (y - anchor) else Nothing
+          Nothing -> Nothing
+    hiAll = ~ zeros
+
+// See @fromForced@ in What4.Domains.BV.Strides: the cover of every value
+// agreeing with @(zeros, ones)@, with no interval constraint — the
+// full-circle specialization of @fromForcedBitsArc@.
+fromForced : {n} (fin n, n >= 2) => ([n], [n]) -> Domain n
+fromForced (zeros, ones) =
+  if free == 0 then mk ones 1 0
+  else mk ones d (zext (free / d))
+  where
+    free = ~ (zeros || ones)
+    d = lowestSetBit free
+
+// See @fromForcedBits@ in What4.Domains.BV.Strides: an unsigned interval
+// @[lo, hi]@ is the circle arc anchored at @lo@.
+fromForcedBits : {n} (fin n, n >= 2) => ([n], [n]) -> ([n], [n]) -> Domain n
+fromForcedBits bits (lo, hi) = fromForcedBitsArc bits (lo, hi - lo)
+
+// See @fromForcedBitsSigned@ in What4.Domains.BV.Strides: a signed
+// interval is the circle arc anchored at the bit pattern of @lo@ — the
+// arc formulation needs no sign-based case analysis at all.
 fromForcedBitsSigned :
   {n} (fin n, n >= 2) => ([n], [n]) -> ([n], [n]) -> Domain n
-fromForcedBitsSigned (zeros, ones) (lo, hi) =
-  if free == 0 then mk ones 1 0
-  else mk lo1 d nSteps
-  where
-    free = ~ (zeros || ones)
-    d = lowestSetBit free
-    half : [n]
-    half = ~ ((~ zero) >> 1)
-    signFree = (free && half) != 0
-    loPat = if signFree then ones || half else ones
-    hiPat = if signFree then (~ zeros) && (~ half) else ~ zeros
-    lo0 = if lo >=$ loPat then lo else loPat
-    hi' = if hi <=$ hiPat then hi else hiPat
-    lo1 = lo0 + (((ones && (d - 1)) - lo0) && (d - 1))
-    nSteps : [n + 1]
-    nSteps = if hi' <$ lo1 then 0 else zext ((hi' - lo1) / d)
+fromForcedBitsSigned bits (lo, hi) = fromForcedBitsArc bits (lo, hi - lo)
 
 fromBitwise : {n} (fin n, n >= 2) => Bits::Dom n -> Domain n
 fromBitwise b = fromForcedBits (knownZerosOnesNat b) (b.lomask, b.himask)
@@ -912,7 +981,7 @@ borPrecise a b = bnot (bandPrecise (bnot a) (bnot b))
 
 // See @xorFast@ in What4.Domains.BV.Strides.
 bxorFast : {n} (fin n, n >= 2) => Domain n -> Domain n -> Domain n
-bxorFast a b = fromForcedBits (forcedZeros, forcedOnes) (0, ~ 0)
+bxorFast a b = fromForced (forcedZeros, forcedOnes)
   where
     (za, oa) = forcedBits a
     (zb, ob) = forcedBits b
@@ -2073,6 +2142,75 @@ strideBitwiseCorrect c v = proper c ==> member c v ==> Bits::mem (strideBitwise 
 fromBitwiseCorrect : {n} (fin n, n >= 2) => Bits::Dom n -> [n] -> Property
 fromBitwiseCorrect b v = Bits::mem b v ==> member (fromBitwise b) v
 
+// See @nextAgreeingCorrect@ in What4.Domains.BV.Strides: for any agreeing
+// witness @x >= a@, the result exists, agrees, and lies in @[a, x]@.
+nextAgreeingCorrect :
+  {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> Property
+nextAgreeingCorrect zRaw oRaw a xRaw =
+  (x >= a) ==>
+    (case nextAgreeing zeros ones a of
+       Nothing -> False
+       Just y -> (y && zeros) == 0 /\ (y && ones) == ones
+                 /\ a <= y /\ y <= x)
+  where
+    ones  = oRaw
+    zeros = zRaw && ~ ones
+    x     = (xRaw && ~ zeros) || ones
+
+// See @prevAgreeingCorrect@ in What4.Domains.BV.Strides.
+prevAgreeingCorrect :
+  {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> Property
+prevAgreeingCorrect zRaw oRaw a xRaw =
+  (x <= a) ==>
+    (case prevAgreeing zeros ones a of
+       Nothing -> False
+       Just y -> (y && zeros) == 0 /\ (y && ones) == ones
+                 /\ x <= y /\ y <= a)
+  where
+    ones  = oRaw
+    zeros = zRaw && ~ ones
+    x     = (xRaw && ~ zeros) || ones
+
+// See @arcExtremesCorrect@ in What4.Domains.BV.Strides: for every value
+// agreeing with the (normalized) forced bits and lying on the arc, the
+// result is @Just (tLo, tHi)@ bracketing its offset @x - anchor@.
+arcExtremesCorrect :
+  {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> [n] -> Property
+arcExtremesCorrect zRaw oRaw anchor len xRaw =
+  (off <= len) ==>
+    (case arcExtremes (zeros, ones) (anchor, len) of
+       Nothing -> False
+       Just (tLo, tHi) -> tLo <= off /\ off <= tHi)
+  where
+    ones  = oRaw
+    zeros = zRaw && ~ ones
+    x     = (xRaw && ~ zeros) || ones
+    off   = x - anchor
+
+// See @fromForcedBitsArcCorrect@ in What4.Domains.BV.Strides: every value
+// that agrees with the (normalized) forced bits and lies on the arc is a
+// member of the result.
+fromForcedBitsArcCorrect :
+  {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> [n] -> [n] -> Property
+fromForcedBitsArcCorrect zRaw oRaw anchor len xRaw =
+  (x - anchor <= len) ==>
+    member (fromForcedBitsArc (zeros, ones) (anchor, len)) x
+  where
+    ones  = oRaw
+    zeros = zRaw && ~ ones
+    x     = (xRaw && ~ zeros) || ones
+
+// See @fromForcedCorrect@ in What4.Domains.BV.Strides: every value that
+// agrees with the (normalized) forced bits is a member of the result.
+fromForcedCorrect :
+  {n} (fin n, n >= 2) => [n] -> [n] -> [n] -> Property
+fromForcedCorrect zRaw oRaw xRaw =
+  member (fromForced (zeros, ones)) x
+  where
+    ones  = oRaw
+    zeros = zRaw && ~ ones
+    x     = (xRaw && ~ zeros) || ones
+
 // See @fromForcedBitsCorrect@ in What4.Domains.BV.Strides: every value
 // that agrees with the (normalized) forced bits and lies in the interval
 // is a member of the result.
@@ -2110,6 +2248,11 @@ property p_roundtripArith = roundtripArith`{8}
 property p_toBitwiseCorrect = toBitwiseCorrect`{8}
 property p_strideBitwiseCorrect = strideBitwiseCorrect`{8}
 property p_fromBitwiseCorrect = fromBitwiseCorrect`{8}
+property p_nextAgreeingCorrect = nextAgreeingCorrect`{4}
+property p_prevAgreeingCorrect = prevAgreeingCorrect`{4}
+property p_arcExtremesCorrect = arcExtremesCorrect`{4}
+property p_fromForcedBitsArcCorrect = fromForcedBitsArcCorrect`{4}
+property p_fromForcedCorrect = fromForcedCorrect`{4}
 property p_fromForcedBitsCorrect = fromForcedBitsCorrect`{4}
 property p_fromForcedBitsSignedCorrect = fromForcedBitsSignedCorrect`{4}
 

@@ -343,6 +343,8 @@ module What4.Domains.BV.Strides
   , fromArith
   , toBitwise
   , forcedBits
+  , fromForcedBitsArc
+  , fromForced
   , fromForcedBits
   , fromForcedBitsSigned
   , fromBitwise
@@ -478,6 +480,11 @@ module What4.Domains.BV.Strides
   , strideBitwiseCorrect
   , forcedBitsDisjoint
   , forcedBitsMember
+  , nextAgreeingCorrect
+  , prevAgreeingCorrect
+  , arcExtremesCorrect
+  , fromForcedBitsArcCorrect
+  , fromForcedCorrect
   , fromForcedBitsCorrect
   , fromForcedBitsSignedCorrect
   , fromBitwiseCorrect
@@ -835,6 +842,14 @@ wrapOffset c@Domain{start, mask} v =
 lowestSetBit :: Natural -> Natural
 lowestSetBit x = 1 `shiftL` countTrailingZerosOr0 (toInteger x)
 {-# INLINE lowestSetBit #-}
+
+-- | /O(w)/. The highest set bit of @x@ as a single-bit mask; @0@ when
+-- @x == 0@.
+highestSetBit :: Natural -> Natural
+highestSetBit x =
+  let !b = integerToNatural (Arith.bitsBelow (toInteger x))
+  in b `Bits.xor` (b `Bits.shiftR` 1)
+{-# INLINE highestSetBit #-}
 
 -- | /O(w)/. @gcd(stride, 2^w)@. Since @2^w@ is a power of two, this equals the
 -- lowest set bit of @stride@.
@@ -1286,6 +1301,257 @@ forcedBits c@Domain{start = s, mask = m} =
       highZeros    = highForced Bits..&. notN s
   in (lowZeros Bits..|. highZeros, lowOnes Bits..|. highOnes)
 
+-- | /O(w)/. The smallest value @y@ with @a <= y <= 2^w - 1@ that agrees
+-- with the forced-bit pair @(zeros, ones)@ — a @0@ at every bit set in
+-- @zeros@, a @1@ at every bit set in @ones@ — or 'Nothing' if no such
+-- value exists. See 'nextAgreeingCorrect'.
+--
+-- A constant number of word-wide bit operations, /not/ a per-bit loop
+-- (cf. the /O(w^2)/ 'warrenAndLo').
+nextAgreeing ::
+  Natural {- ^ @mask@ -} ->
+  Natural {- ^ @zeros@ -} ->
+  Natural {- ^ @ones@ -} ->
+  Natural {- ^ @a@ -} ->
+  Maybe Natural
+-- Let @h@ be the highest position where @a@ violates the forced bits.
+--
+--   * Violated forced one (bit @h@ of @a@ is @0@): setting bit @h@ rises
+--     above @a@ regardless of the lower bits, so keep the bits above @h@
+--     (they already agree), set @h@, and take the minimal agreeing
+--     suffix (@ones@) below.
+--   * Violated forced zero (bit @h@ of @a@ is @1@): clearing bit @h@
+--     drops below @a@, so some bit above @h@ must rise from @0@ to @1@.
+--     The lowest such position @p@ not forced to @0@ is necessarily free
+--     (a forced one above @h@ that is @0@ in @a@ would contradict @h@
+--     being the highest violation); keep the bits above @p@, set @p@,
+--     minimal agreeing suffix below. No such @p@ means no agreeing value
+--     at or above @a@ exists.
+nextAgreeing m zeros ones a
+  | v == 0 = Just a
+  | ones Bits..&. hb /= 0 =
+      Just ((a .&. keepAbove hb) Bits..|. hb Bits..|. (ones .&. (hb - 1)))
+  | otherwise =
+      let !cands = (m `Bits.xor` a) .&. (m `Bits.xor` zeros) .&. keepAbove hb
+      in if cands == 0
+           then Nothing
+           else
+             let !p = lowestSetBit cands
+             in Just ((a .&. keepAbove p) Bits..|. p Bits..|. (ones .&. (p - 1)))
+  where
+    !v = (a .&. zeros) Bits..|. (ones .&. (m `Bits.xor` a))
+    !hb = highestSetBit v
+    keepAbove b = m `Bits.xor` (2 * b - 1)
+
+-- | /O(w)/. The largest value @y@ with @0 <= y <= a@ that agrees with the
+-- forced-bit pair @(zeros, ones)@, or 'Nothing' if no such value exists.
+-- Dual of 'nextAgreeing'; see 'prevAgreeingCorrect'.
+prevAgreeing ::
+  Natural {- ^ @mask@ -} ->
+  Natural {- ^ @zeros@ -} ->
+  Natural {- ^ @ones@ -} ->
+  Natural {- ^ @a@ -} ->
+  Maybe Natural
+prevAgreeing m zeros ones a
+  | v == 0 = Just a
+  | zeros Bits..&. hb /= 0 =
+      Just ((a .&. keepAbove hb) Bits..|. ((hb - 1) .&. (m `Bits.xor` zeros)))
+  | otherwise =
+      let !cands = a .&. (m `Bits.xor` ones) .&. keepAbove hb
+      in if cands == 0
+           then Nothing
+           else
+             let !p = lowestSetBit cands
+             in Just ((a .&. keepAbove p) Bits..|. ((p - 1) .&. (m `Bits.xor` zeros)))
+  where
+    !v = (a .&. zeros) Bits..|. (ones .&. (m `Bits.xor` a))
+    !hb = highestSetBit v
+    keepAbove b = m `Bits.xor` (2 * b - 1)
+
+-- | /O(w)/. The signedness-agnostic core behind 'fromForcedBits' and
+-- 'fromForcedBitsSigned': the progression covering every @w@-bit value
+-- that agrees with the forced-bit pair @(zeros, ones)@ — a @0@ at every
+-- bit set in @zeros@, a @1@ at every bit set in @ones@ — and lies on the
+-- circular arc of @len + 1@ values starting at @anchor@, i.e.
+-- @(x - anchor) mod 2^w <= len@. See 'fromForcedBitsArcCorrect'.
+--
+-- Preconditions: @zeros@ and @ones@ are bit-disjoint and all four inputs
+-- fit in @w@ bits, and at least one value satisfies all the constraints
+-- (the result is still a proper 'Domain', but unspecified, otherwise).
+--
+-- Note that this constructs a /cover/ of the constraint set from scratch;
+-- it is not a refinement operator. The subset-preserving analogue, which
+-- refines an existing progression in place by forced bits, is
+-- 'liftForcedBits'.
+fromForcedBitsArc ::
+  (1 <= w) =>
+  NatRepr w ->
+  -- | @(zeros, ones)@
+  (Natural, Natural) ->
+  -- | @(anchor, len)@
+  (Natural, Natural) ->
+  Domain w
+-- This is the shared kernel behind the bitwise operations ('andFast',
+-- 'andPrecise', 'andSingleton', 'xorFast'), the bitwise conversion
+-- ('fromBitwise'), the shift fallbacks ('lshrRaw', 'ashrRaw'), and the
+-- bit-aware refinements of the width-changing conversions ('zext',
+-- 'sext', 'concat', 'select'). The reasoning, in coset terms (writing
+-- @m = 2^w - 1@ for the width mask):
+--
+--   * /Stride./ All bits below the lowest free (unforced) bit @v@ are
+--     determined, so every admissible value is congruent to @ones@ mod
+--     @2^v@: the constraint set lies in a single coset of the subgroup
+--     @2^v·Z/2^wZ@, giving stride @d = 2^v@. Because @d@ divides @2^w@,
+--     this is a fact about the number /circle/ — it does not depend on
+--     reading values as signed or unsigned.
+--   * /Arc./ Following the wrapped-intervals insight, the interval
+--     constraint is an arbitrary arc @[anchor, anchor + len]@ of the
+--     circle (an unsigned interval is an arc anchored at @0@; a signed
+--     one, an arc anchored at @2^(w-1)@ or later). The cover\'s endpoints
+--     are the /extremal admissible patterns on the arc/, found by
+--     'nextAgreeing'\/'prevAgreeing' from the arc\'s ends — tighter than
+--     clamping with the global extremes @ones@ and @m XOR zeros@, which
+--     ignore the arc.
+--   * When the arc wraps past @2^w - 1@, each endpoint is searched on the
+--     far segment first ('prevAgreeing' from the wrapped end) and falls
+--     back to the global extreme on the near segment; offsets from
+--     @anchor@ order the candidates on the arc.
+--
+-- When every bit is forced, the result is the singleton @{ones}@ (the arc
+-- cannot exclude it when the nonemptiness precondition holds).
+fromForcedBitsArc w (zeros, ones) (anchor, len) =
+  assert (zeros Bits..&. ones == 0) $
+  assert (zeros <= integerToNatural (maxUnsigned w)) $
+  assert (ones <= integerToNatural (maxUnsigned w)) $
+  assert (anchor <= integerToNatural (maxUnsigned w)) $
+  assert (len <= integerToNatural (maxUnsigned w)) $
+  let !m = integerToNatural (maxUnsigned w)
+      !free = m `Bits.xor` (zeros Bits..|. ones)
+  in if free == 0
+       then mk w ones 1 0
+       else
+         let !d = lowestSetBit free
+         in case arcExtremes m zeros ones anchor len of
+              Just (tLo, tHi) ->
+                mk w ((anchor + tLo) .&. m) d ((tHi - tLo) `divByPow2` d)
+              -- Constraint set empty: the nonemptiness precondition was
+              -- violated; return a proper (but unspecified) singleton.
+              Nothing -> mk w ones 1 0
+
+-- | /O(w)/. Find the first and last positions, along a circular arc, of the
+-- values matching a forced-bit pattern — the search at the heart of
+-- 'fromForcedBitsArc'.
+--
+-- The setting is the circle of @2^w@ bitvector values @0 .. m@ (where
+-- @m = 2^w - 1@), with @m@ adjacent to @0@. Two constraints together pick
+-- out a set of values on it:
+--
+--   * /Forced bits./ @zeros@ and @ones@ are bit-disjoint masks. A value
+--     /agrees/ with them when it has a @0@ at every bit set in @zeros@ and a
+--     @1@ at every bit set in @ones@; the bits set in neither mask are
+--     /free/ (unconstrained).
+--   * /Arc./ The @len + 1@ consecutive values @anchor, anchor + 1, ...,
+--     anchor + len@ taken mod @2^w@ — so the arc may run off the top past
+--     @m@ and wrap back through @0@. A value @x@ lies on it exactly when its
+--     offset from the start, @(x - anchor) mod 2^w@, is at most @len@.
+--
+-- The result is @Just (tLo, tHi)@, where @tLo@ and @tHi@ are the smallest
+-- and largest such offsets @(x - anchor) mod 2^w@ over every @x@ that both
+-- agrees with the forced bits and lies on the arc; @Nothing@ when no value
+-- meets both constraints. Ordering candidates by their offset from @anchor@
+-- (rather than by raw value) is what lets a single comparison rank them
+-- across the wrap point. See 'arcExtremesCorrect'.
+--
+-- Preconditions: @zeros@ and @ones@ are bit-disjoint, and each of @zeros@,
+-- @ones@, @anchor@, @len@ fits in @w@ bits (is @<= m@).
+arcExtremes ::
+  -- | width mask @m = 2^w - 1@
+  Natural ->
+  -- | @zeros@
+  Natural ->
+  -- | @ones@
+  Natural ->
+  -- | @anchor@
+  Natural ->
+  -- | @len@
+  Natural ->
+  Maybe (Natural, Natural)
+-- The first matching value is searched from @anchor@ upward ('nextAgreeing');
+-- the last from the arc\'s far end @anchor + len@ downward ('prevAgreeing').
+-- When the arc wraps, a search that comes up empty on its near segment falls
+-- through to the global extreme on the far segment: across the whole circle
+-- the least value agreeing with the forced bits is @ones@ (every free bit
+-- @0@) and the greatest is @m XOR zeros@ (every free bit @1@).
+-- 'fromForcedBitsArc' shows how these two endpoints determine the covering
+-- progression.
+arcExtremes m zeros ones anchor len =
+  case (mbTLo, mbTHi) of
+    (Just tLo, Just tHi) -> Just (tLo, tHi)
+    _ -> Nothing
+  where
+    !wraps = anchor + len > m
+    !wrapEnd = (anchor + len) .&. m
+    !mbTLo =
+      case nextAgreeing m zeros ones anchor of
+        Just y
+          -- On a wrapping arc the whole segment @[anchor, m]@ is on the
+          -- arc, so any @y@ found is admissible.
+          | wraps || y - anchor <= len -> Just (y - anchor)
+        _ | wraps, ones <= wrapEnd ->
+              -- Nothing at or above @anchor@: the least agreeing value
+              -- overall is @ones@; it is on the arc iff it is at most the
+              -- wrapped end.
+              Just (ones + (m + 1) - anchor)
+          | otherwise -> Nothing
+    !mbTHi =
+      if wraps
+        then case prevAgreeing m zeros ones wrapEnd of
+               Just y -> Just (y + (m + 1) - anchor)
+               Nothing ->
+                 -- Nothing on the wrapped segment: the greatest agreeing
+                 -- value overall is @m XOR zeros@; it is on the arc iff it
+                 -- is at least @anchor@.
+                 let !hiAll = m `Bits.xor` zeros
+                 in if hiAll >= anchor
+                      then Just (hiAll - anchor)
+                      else Nothing
+        else case prevAgreeing m zeros ones (anchor + len) of
+               Just y | y >= anchor -> Just (y - anchor)
+               _ -> Nothing
+
+-- | /O(w)/. The progression covering every @w@-bit value that agrees with
+-- the forced-bit pair @(zeros, ones)@ — a @0@ at every bit set in @zeros@,
+-- a @1@ at every bit set in @ones@ — with no interval constraint. See
+-- 'fromForcedCorrect'.
+--
+-- Preconditions: @zeros@ and @ones@ are bit-disjoint and fit in @w@ bits.
+-- Unlike 'fromForcedBits' there is no nonemptiness precondition — the set
+-- always contains at least @ones@.
+fromForced ::
+  (1 <= w) =>
+  NatRepr w ->
+  -- | @(zeros, ones)@
+  (Natural, Natural) ->
+  Domain w
+-- The full-circle specialization of 'fromForcedBitsArc': with no arc to
+-- exclude anything, the least agreeing value sets every free bit to @0@
+-- (giving @ones@) and the greatest sets them all to @1@ (giving
+-- @m XOR zeros = ones .|. free@), so the cover is the stride-@2^k@
+-- progression between them for the lowest free bit @k@. This skips the
+-- 'nextAgreeing'\/'prevAgreeing' arc searches entirely; it is the kernel
+-- behind 'xorFast', whose XOR rule yields a forced-bit picture but no useful
+-- monotone interval bound.
+fromForced w (zeros, ones) =
+  assert (zeros Bits..&. ones == 0) $
+  assert (zeros <= integerToNatural (maxUnsigned w)) $
+  assert (ones <= integerToNatural (maxUnsigned w)) $
+  let !m = integerToNatural (maxUnsigned w)
+      !free = m `Bits.xor` (zeros Bits..|. ones)
+  in if free == 0
+       then mk w ones 1 0
+       else let !d = lowestSetBit free
+            in mk w ones d (free `divByPow2` d)
+
 -- | /O(w)/. The progression covering every @w@-bit value that agrees with
 -- the forced-bit pair @(zeros, ones)@ — a @0@ at every bit set in @zeros@,
 -- a @1@ at every bit set in @ones@ — and lies in the unsigned interval
@@ -1295,11 +1561,6 @@ forcedBits c@Domain{start = s, mask = m} =
 -- @lo <= hi <= 2^w - 1@, and at least one value satisfies all the
 -- constraints (the result is still a proper 'Domain', but unspecified,
 -- otherwise).
---
--- Note that this constructs a /cover/ of the constraint set from scratch;
--- it is not a refinement operator. The subset-preserving analogue, which
--- refines an existing progression in place by forced bits, is
--- 'liftForcedBits'.
 fromForcedBits ::
   (1 <= w) =>
   NatRepr w ->
@@ -1308,51 +1569,10 @@ fromForcedBits ::
   -- | @(lo, hi)@
   (Natural, Natural) ->
   Domain w
--- This is the shared kernel behind the bitwise operations ('andFast',
--- 'andPrecise', 'andSingleton', 'xorFast'), the bitwise conversion
--- ('fromBitwise'), the constant-shift fallback in 'lshrRaw', and the
--- bit-aware refinements of the width-changing conversions ('zext', 'sext',
--- 'concat', 'select'). 'fromForcedBitsSigned' is the variant for intervals
--- on the signed number line ('ashrRaw'). The reasoning, in coset terms
--- (writing
--- @m = 2^w - 1@ for the width mask, so @m XOR zeros@ is the value with a
--- @1@ exactly at the positions /not/ forced to @0@):
---
---   * /Stride./ All bits below the lowest free (unforced) bit @v@ are
---     determined, so every admissible value is congruent to @ones@ mod
---     @2^v@: the constraint set lies in a single coset of the subgroup
---     @2^v·Z/2^wZ@, giving stride @d = 2^v@.
---   * /Lower bound./ Every admissible value sets all bits of @ones@, and
---     bitwise dominance implies unsigned dominance: @x .&. ones == ones@
---     forces @x >= ones@. Since @ones@ is itself on the coset, it is a
---     valid anchor — scattered forced ones /above/ the lowest free bit
---     raise the start without leaving the coset.
---   * /Upper bound./ Dually, every admissible value clears all bits of
---     @zeros@, so @x <= m XOR zeros@.
---   * /Interval./ The extra constraint @[lo, hi]@ (Warren bounds, operand
---     ranges, arith conversion bounds, ...) intersects all of the above:
---     the start is @max lo ones@ aligned up to the coset, and the step
---     count is floored at @min hi (m XOR zeros)@.
---
--- When every bit is forced, the result is the singleton @{ones}@ (the
--- interval cannot exclude it when the nonemptiness precondition holds).
-fromForcedBits w (zeros, ones) (lo, hi) =
-  assert (zeros Bits..&. ones == 0) $
-  assert (zeros <= integerToNatural (maxUnsigned w)) $
-  assert (ones <= integerToNatural (maxUnsigned w)) $
+-- An unsigned interval is the circle arc anchored at @lo@.
+fromForcedBits w bits (lo, hi) =
   assert (lo <= hi) $
-  assert (hi <= integerToNatural (maxUnsigned w)) $
-  let !m = integerToNatural (maxUnsigned w)
-      !free = m `Bits.xor` (zeros Bits..|. ones)
-  in if free == 0
-       then mk w ones 1 0
-       else
-         let !d = lowestSetBit free
-             !lo0 = max lo ones
-             !lo1 = lo0 + (modSub m (ones Bits..&. (d - 1)) lo0 Bits..&. (d - 1))
-             !hi' = min hi (m `Bits.xor` zeros)
-             !nSteps = if hi' < lo1 then 0 else (hi' - lo1) `divByPow2` d
-         in mk w (lo1 Bits..&. m) d nSteps
+  fromForcedBitsArc w bits (lo, hi - lo)
 
 -- | /O(w)/. Signed-interval variant of 'fromForcedBits': the progression
 -- covering every @w@-bit value that agrees with the forced-bit pair
@@ -1369,42 +1589,13 @@ fromForcedBitsSigned ::
   -- | @(lo, hi)@, as signed values
   (Integer, Integer) ->
   Domain w
--- The coset/dominance reasoning of 'fromForcedBits' transfers to the
--- signed number line wholesale:
---
---   * The stride @d@ divides @2^w@, so a value's residue mod @d@ is the
---     same whether read from its unsigned or signed representative, and
---     coset alignment can run in plain integer arithmetic.
---   * The bit-derived bounds become the signed values of the extremal
---     admissible /patterns/: when the sign bit is forced, the patterns
---     @ones@ and @m XOR zeros@ themselves (read as signed); when it is
---     free, the most-negative pattern @ones .|. 2^(w-1)@ and the
---     most-positive pattern @(m XOR zeros) .&. ~(2^(w-1))@.
-fromForcedBitsSigned w (zeros, ones) (lo, hi) =
-  assert (zeros Bits..&. ones == 0) $
-  assert (zeros <= integerToNatural (maxUnsigned w)) $
-  assert (ones <= integerToNatural (maxUnsigned w)) $
+-- A signed interval is the circle arc anchored at the bit pattern of
+-- @lo@ — the whole point of the arc formulation is that no sign-based
+-- case analysis is needed.
+fromForcedBitsSigned w bits (lo, hi) =
   assert (lo <= hi) $
   assert (NR.minSigned w <= lo && hi <= NR.maxSigned w) $
-  let !m = integerToNatural (maxUnsigned w)
-      !free = m `Bits.xor` (zeros Bits..|. ones)
-      !half = (m + 1) `Bits.shiftR` 1  -- 2^(w-1), the sign bit
-      !signFree = free Bits..&. half /= 0
-      !loPat = if signFree then ones Bits..|. half else ones
-      !hiPat = if signFree
-                 then (m `Bits.xor` zeros) Bits..&. (m `Bits.xor` half)
-                 else m `Bits.xor` zeros
-  in if free == 0
-       then mk w ones 1 0
-       else
-         let !d = lowestSetBit free
-             !dI = toInteger d
-             !r = toInteger (ones Bits..&. (d - 1))
-             !lo0 = max lo (toSigned w (toInteger loPat))
-             !hi' = min hi (toSigned w (toInteger hiPat))
-             !lo1 = lo0 + ((r - lo0) `Prelude.mod` dI)
-             !nSteps = if hi' < lo1 then 0 else (hi' - lo1) `Prelude.div` dI
-         in mk w (asN w lo1) d (integerToNatural nSteps)
+  fromForcedBitsArc w bits (asN w lo, integerToNatural (hi - lo))
 
 -- | /O(w)/. Convert a bitwise domain to a progression: 'fromForcedBits' at
 -- the bitwise domain's forced bits and numeric bounds.
@@ -2999,20 +3190,19 @@ xorFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- operands. The result stride is @2^k@ for the lowest free bit @k@; if every
 -- bit is forced, the result is the singleton @forcedOnes@.
 --
--- The result's forced-bit picture feeds 'fromForcedBits' (with the trivial
--- interval @[0, m]@ — XOR has no useful monotone interval bound). This
--- matches what @liftBitwise2 B.xor@ would derive, but writing the kernel
--- directly lets 'xor' wrap it through 'psplitOp2' for the same precision
--- boost @and@\/@or@ get.
+-- The result's forced-bit picture feeds 'fromForced' (XOR has no useful
+-- monotone interval bound, so there is no arc to intersect). This matches
+-- what @liftBitwise2 B.xor@ would derive, but writing the kernel directly
+-- lets 'xor' wrap it through 'psplitOp2' for the same precision boost
+-- @and@\/@or@ get.
 xorFast w a b =
   assert (proper a) $
   assert (proper b) $
-  let !m              = mask a
-      !(za, oa)       = forcedBits a
+  let !(za, oa)       = forcedBits a
       !(zb, ob)       = forcedBits b
       !forcedZeros    = (za Bits..&. zb) Bits..|. (oa Bits..&. ob)
       !forcedOnes     = (za Bits..&. ob) Bits..|. (oa Bits..&. zb)
-  in fromForcedBits w (forcedZeros, forcedOnes) (0, m)
+  in fromForced w (forcedZeros, forcedOnes)
 
 -- | /O(w)/. Bitwise XOR. At least as tight (by cardinality) as both the
 -- 'psplitOp2'-wrapped 'xorFast' kernel and the De Morgan identity
@@ -5270,6 +5460,99 @@ forcedBitsMember c x =
               && (ones .&. (mask c `Bits.xor` x')) == 0)
   where
     x' = modMask c x
+
+-- | 'nextAgreeing' returns the least value at or above @a@ that agrees
+-- with the forced bits: for any agreeing witness @x >= a@ the result
+-- exists, agrees, and lies in @[a, x]@. Raw draws are normalized as in
+-- 'fromForcedBitsCorrect'.
+nextAgreeingCorrect ::
+  (1 <= w) =>
+  NatRepr w -> Natural -> Natural -> Natural -> Natural -> Property
+nextAgreeingCorrect w zRaw oRaw aRaw xRaw =
+  x >= a ==>
+    case nextAgreeing m zeros ones a of
+      Nothing -> property False
+      Just y  -> property (y .&. zeros == 0 && y .&. ones == ones
+                           && a <= y && y <= x)
+  where
+    m     = integerToNatural (maxUnsigned w)
+    ones  = oRaw .&. m
+    zeros = zRaw .&. m .&. (m `Bits.xor` ones)
+    x     = ((xRaw .&. m) .&. (m `Bits.xor` zeros)) Bits..|. ones
+    a     = aRaw .&. m
+
+-- | 'prevAgreeing' returns the greatest value at or below @a@ that agrees
+-- with the forced bits: for any agreeing witness @x <= a@ the result
+-- exists, agrees, and lies in @[x, a]@.
+prevAgreeingCorrect ::
+  (1 <= w) =>
+  NatRepr w -> Natural -> Natural -> Natural -> Natural -> Property
+prevAgreeingCorrect w zRaw oRaw aRaw xRaw =
+  x <= a ==>
+    case prevAgreeing m zeros ones a of
+      Nothing -> property False
+      Just y  -> property (y .&. zeros == 0 && y .&. ones == ones
+                           && x <= y && y <= a)
+  where
+    m     = integerToNatural (maxUnsigned w)
+    ones  = oRaw .&. m
+    zeros = zRaw .&. m .&. (m `Bits.xor` ones)
+    x     = ((xRaw .&. m) .&. (m `Bits.xor` zeros)) Bits..|. ones
+    a     = aRaw .&. m
+
+-- | 'arcExtremes' brackets the constraint set: for every value @x@ that
+-- agrees with the forced bits and lies on the arc, the result is
+-- @Just (tLo, tHi)@ with @tLo <= (x - anchor) mod 2^w <= tHi@. Raw draws are
+-- normalized as in 'fromForcedBitsArcCorrect'.
+arcExtremesCorrect ::
+  (1 <= w) =>
+  NatRepr w ->
+  Natural -> Natural -> Natural -> Natural -> Natural -> Property
+arcExtremesCorrect w zRaw oRaw aRaw lRaw xRaw =
+  off <= len ==>
+    case arcExtremes m zeros ones anchor len of
+      Nothing -> property False
+      Just (tLo, tHi) -> property (tLo <= off && off <= tHi)
+  where
+    m      = integerToNatural (maxUnsigned w)
+    ones   = oRaw .&. m
+    zeros  = zRaw .&. m .&. (m `Bits.xor` ones)
+    x      = ((xRaw .&. m) .&. (m `Bits.xor` zeros)) Bits..|. ones
+    anchor = aRaw .&. m
+    len    = lRaw .&. m
+    off    = modSub m x anchor
+
+-- | 'fromForcedBitsArc' covers: every value that agrees with the forced
+-- bits and lies on the arc is a member of the result.
+fromForcedBitsArcCorrect ::
+  (1 <= w) =>
+  NatRepr w ->
+  Natural -> Natural -> Natural -> Natural -> Natural -> Property
+fromForcedBitsArcCorrect w zRaw oRaw aRaw lRaw xRaw =
+  off <= len ==>
+    property (member (fromForcedBitsArc w (zeros, ones) (anchor, len)) x)
+  where
+    m      = integerToNatural (maxUnsigned w)
+    ones   = oRaw .&. m
+    zeros  = zRaw .&. m .&. (m `Bits.xor` ones)
+    x      = ((xRaw .&. m) .&. (m `Bits.xor` zeros)) Bits..|. ones
+    anchor = aRaw .&. m
+    len    = lRaw .&. m
+    off    = modSub m x anchor
+
+-- | 'fromForced' covers: every value that agrees with the forced bits is a
+-- member of the result. Raw draws are normalized as in
+-- 'fromForcedBitsCorrect' (there is no interval to constrain).
+fromForcedCorrect ::
+  (1 <= w) =>
+  NatRepr w -> Natural -> Natural -> Natural -> Property
+fromForcedCorrect w zRaw oRaw xRaw =
+  property (member (fromForced w (zeros, ones)) x)
+  where
+    m     = integerToNatural (maxUnsigned w)
+    ones  = oRaw .&. m
+    zeros = zRaw .&. m .&. (m `Bits.xor` ones)
+    x     = ((xRaw .&. m) .&. (m `Bits.xor` zeros)) Bits..|. ones
 
 -- | 'fromForcedBits' covers: every value that agrees with the forced bits
 -- and lies in the interval is a member of the result.
