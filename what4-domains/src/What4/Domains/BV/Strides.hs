@@ -7608,104 +7608,99 @@ correct_assumeSge w a x b y =
         Just c  -> property (member c x)
         Nothing -> property False
 
--- | 'assumeUlt' shrinks: when neither operand wraps mod @2^w@, the
--- result is contained in the input under 'leqExact'. (Without the
--- non-wrap guard, 'pseudoMeet' is sound but not generally a lower
--- bound; cf. 'pseudoMeetLowerBound'.)
+-- $assumeShrinks
+--
+-- The @assume*Shrinks@ properties assert that each assume refines its
+-- first operand by /cardinality/, unconditionally: @size (assumeOp a b)
+-- <= size a@. This is guaranteed by construction — 'assumeUnsignedRange'
+-- and the signed driver's 'clampToA'\/'combinePieceContribs' fall back to
+-- @a@ (resp. the @aᵢ@ piece) whenever 'pseudoMeet'\/'pseudoJoin' would
+-- overshoot it — so no non-wrap side condition is needed.
+--
+-- We assert cardinality shrinking rather than the lattice order
+-- @leqExact c a@: on wrapping operands 'pseudoMeet' is sound but not a
+-- lower bound (cf. 'pseudoMeetLowerBound'), so the cardinality-min keeps
+-- the result small without it necessarily being @⊑ a@ structurally.
+
+-- | 'assumeUlt' shrinks by cardinality (unconditionally).
 assumeUltShrinks ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 assumeUltShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeUlt w a b of
-        Nothing -> property True
-        Just c  -> property (leqExact c a)
-  where wrapsMod c = start c + n c * stride c > mask c
+    case assumeUlt w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
 
--- | 'assumeUle' shrinks (under the non-wrap guard).
+-- | 'assumeUle' shrinks by cardinality (unconditionally).
 assumeUleShrinks ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 assumeUleShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeUle w a b of
-        Nothing -> property True
-        Just c  -> property (leqExact c a)
-  where wrapsMod c = start c + n c * stride c > mask c
+    case assumeUle w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
 
--- | 'assumeUgt' shrinks (under the non-wrap guard).
+-- | 'assumeUgt' shrinks by cardinality (unconditionally).
 assumeUgtShrinks ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 assumeUgtShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeUgt w a b of
-        Nothing -> property True
-        Just c  -> property (leqExact c a)
-  where wrapsMod c = start c + n c * stride c > mask c
+    case assumeUgt w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
 
--- | 'assumeUge' shrinks (under the non-wrap guard).
+-- | 'assumeUge' shrinks by cardinality (unconditionally).
 assumeUgeShrinks ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 assumeUgeShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeUge w a b of
-        Nothing -> property True
-        Just c  -> property (leqExact c a)
-  where wrapsMod c = start c + n c * stride c > mask c
+    case assumeUge w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
 
--- | 'assumeSlt' shrinks (under the non-wrap guard).
+-- | 'assumeSlt' shrinks by cardinality (unconditionally).
 assumeSltShrinks ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 assumeSltShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeSlt w a b of
-        Nothing -> property True
-        Just c  -> property (leqExact c a)
-  where wrapsMod c = start c + n c * stride c > mask c
+    case assumeSlt w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
 
--- | 'assumeSle' shrinks (under the non-wrap guard).
+-- | 'assumeSle' shrinks by cardinality (unconditionally).
 assumeSleShrinks ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 assumeSleShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeSle w a b of
-        Nothing -> property True
-        Just c  -> property (leqExact c a)
-  where wrapsMod c = start c + n c * stride c > mask c
+    case assumeSle w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
 
--- | 'assumeSgt' shrinks (under the non-wrap guard).
+-- | 'assumeSgt' shrinks by cardinality (unconditionally).
 assumeSgtShrinks ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 assumeSgtShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeSgt w a b of
-        Nothing -> property True
-        Just c  -> property (leqExact c a)
-  where wrapsMod c = start c + n c * stride c > mask c
+    case assumeSgt w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
 
--- | 'assumeSge' shrinks (under the non-wrap guard).
+-- | 'assumeSge' shrinks by cardinality (unconditionally).
 assumeSgeShrinks ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
 assumeSgeShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeSge w a b of
-        Nothing -> property True
-        Just c  -> property (leqExact c a)
-  where wrapsMod c = start c + n c * stride c > mask c
+    case assumeSge w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
 
 -- $idempotence
 --

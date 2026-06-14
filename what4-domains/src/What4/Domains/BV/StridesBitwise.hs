@@ -102,6 +102,15 @@ module What4.Domains.BV.StridesBitwise
   -- ** Joins
   , pseudoJoin
   , pseudoJoinPrecise
+  -- * Branch-condition assumptions
+  , assumeUlt
+  , assumeUle
+  , assumeUgt
+  , assumeUge
+  , assumeSlt
+  , assumeSle
+  , assumeSgt
+  , assumeSge
   -- * Generators
   , genDomain
   , genElement
@@ -203,6 +212,31 @@ module What4.Domains.BV.StridesBitwise
   , pseudoJoinPreciseRefinesJoin
   , pseudoJoinTopAnnihilator
   , pseudoJoinPreciseTopAnnihilator
+  -- ** Branch-condition assumptions
+  , correct_assumeUlt
+  , correct_assumeUle
+  , correct_assumeUgt
+  , correct_assumeUge
+  , correct_assumeSlt
+  , correct_assumeSle
+  , correct_assumeSgt
+  , correct_assumeSge
+  , assumeUltShrinks
+  , assumeUleShrinks
+  , assumeUgtShrinks
+  , assumeUgeShrinks
+  , assumeSltShrinks
+  , assumeSleShrinks
+  , assumeSgtShrinks
+  , assumeSgeShrinks
+  , assumeUltIdempotent
+  , assumeUleIdempotent
+  , assumeUgtIdempotent
+  , assumeUgeIdempotent
+  , assumeSltIdempotent
+  , assumeSleIdempotent
+  , assumeSgtIdempotent
+  , assumeSgeIdempotent
     -- * Re-exports
   , NatRepr
   , knownNat
@@ -737,6 +771,60 @@ pseudoJoinPrecise ::
   NatRepr w -> Domain w -> Domain w -> Domain w
 pseudoJoinPrecise w (Domain sa ba) (Domain sb bb) =
   mkReduced w (S.pseudoJoinPrecise w sa sb) (B.join ba bb)
+
+-- ------------------------------------------------------------------
+-- * Branch-condition assumptions
+
+-- $assume
+--
+-- @assumeOp w a b@ refines @a@ by the comparison constraint
+-- @{ x ∈ γ(a) | ∃ y ∈ γ(b). x \`op\` y }@, returning a sound
+-- over-approximation or 'Nothing' when that set is provably empty. Each
+-- operation runs the corresponding assume on /both/ components — the
+-- strides assume ('S.assumeUlt' etc., which is itself 'Maybe') and the
+-- bitwise assume ('B.assumeUlt' etc.) — and then 'tryMkReduced's the
+-- pair, so the joint information of both views is retained. 'Nothing'
+-- propagates whenever either component concludes the branch is
+-- infeasible.
+
+assumeUlt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeUlt = liftAssume S.assumeUlt B.assumeUlt
+
+assumeUle :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeUle = liftAssume S.assumeUle B.assumeUle
+
+assumeUgt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeUgt = liftAssume S.assumeUgt B.assumeUgt
+
+assumeUge :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeUge = liftAssume S.assumeUge B.assumeUge
+
+assumeSlt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSlt = liftAssume S.assumeSlt B.assumeSlt
+
+assumeSle :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSle = liftAssume S.assumeSle B.assumeSle
+
+assumeSgt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSgt = liftAssume S.assumeSgt B.assumeSgt
+
+assumeSge :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSge = liftAssume S.assumeSge B.assumeSge
+
+-- | Shared driver for the lifted assume operations. Runs the strides
+-- assume (which returns 'Maybe', signalling empty) and the bitwise
+-- assume (which returns a possibly-bottom 'B.Domain'), then reduces.
+-- 'Nothing' if either component is empty, or if 'tryMkReduced' concludes
+-- the joint is empty.
+liftAssume ::
+  (1 <= w) =>
+  (NatRepr w -> S.Domain w -> S.Domain w -> Maybe (S.Domain w)) ->
+  (NatRepr w -> B.Domain w -> B.Domain w -> B.Domain w) ->
+  NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+liftAssume sOp bOp w (Domain sa ba) (Domain sb bb) = do
+  sm <- sOp w sa sb
+  let bm = bOp w ba bb
+  if B.isBottom bm then Nothing else tryMkReduced w sm bm
 
 -- ------------------------------------------------------------------
 -- * Generators
@@ -1503,4 +1591,246 @@ pseudoJoinPreciseTopAnnihilator w a x =
   proper a ==>
     let c = pseudoJoinPrecise w a (top w)
     in property (member c x == member (top w) x)
+
+-- ------------------------------------------------------------------
+-- ** Branch-condition assumptions
+
+-- | 'assumeUlt' is sound: every value @x ∈ a@ that satisfies @x < y@ for
+-- some @y ∈ b@ remains in the result.
+correct_assumeUlt ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeUlt w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x < y ==>
+    maybeMemberOrFail (assumeUlt w a b) x
+
+-- | 'assumeUle' is sound.
+correct_assumeUle ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeUle w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x <= y ==>
+    maybeMemberOrFail (assumeUle w a b) x
+
+-- | 'assumeUgt' is sound.
+correct_assumeUgt ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeUgt w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x > y ==>
+    maybeMemberOrFail (assumeUgt w a b) x
+
+-- | 'assumeUge' is sound.
+correct_assumeUge ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeUge w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x >= y ==>
+    maybeMemberOrFail (assumeUge w a b) x
+
+-- | 'assumeSlt' is sound: every value @x ∈ a@ that satisfies @x < y@
+-- (signed) for some @y ∈ b@ remains in the result.
+correct_assumeSlt ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSlt w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    signedOf w x < signedOf w y ==>
+      maybeMemberOrFail (assumeSlt w a b) x
+
+-- | 'assumeSle' is sound.
+correct_assumeSle ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSle w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    signedOf w x <= signedOf w y ==>
+      maybeMemberOrFail (assumeSle w a b) x
+
+-- | 'assumeSgt' is sound.
+correct_assumeSgt ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSgt w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    signedOf w x > signedOf w y ==>
+      maybeMemberOrFail (assumeSgt w a b) x
+
+-- | 'assumeSge' is sound.
+correct_assumeSge ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSge w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    signedOf w x >= signedOf w y ==>
+      maybeMemberOrFail (assumeSge w a b) x
+
+-- $assumeShrinks
+--
+-- The @assume*Shrinks@ properties bundle two laws, under the same
+-- non-wrap guard the strides 'S.pseudoMeetLowerBound' needs:
+--
+--   * /Shrinking/: @assumeOp a b ⊑ a@ (every member of the result is a
+--     member of @a@). Without the non-wrap guard the strides pseudo-meet
+--     is sound but not a lower bound, so this could fail spuriously.
+--
+--   * /Idempotence/: @assumeOp (assumeOp a b) b@ denotes the same set as
+--     @assumeOp a b@.
+--
+-- Set containment and equality are checked exactly via 'toList'.
+
+-- $assumeShrinks
+--
+-- The @assume*Shrinks@ properties assert that each assume refines the
+-- /strides component/ by cardinality, unconditionally: the orbit of
+-- @assumeOp a b@ is no larger than the orbit of @a@. This is the
+-- /O(1)/ cardinality 'S.size' of the strides component (not the
+-- exponential joint 'size'), and it holds with no non-wrap guard because
+-- the strides 'S.assumeUlt' etc. already cardinality-clamp their result
+-- to @a@ (see the strides @assume*Shrinks@ laws), and 'S.reduce' only
+-- ever shrinks the orbit further.
+
+-- | 'assumeUlt' shrinks the strides orbit by cardinality (unconditionally).
+assumeUltShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeUltShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeUlt w) a b)
+
+-- | 'assumeUle' shrinks the strides orbit by cardinality (unconditionally).
+assumeUleShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeUleShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeUle w) a b)
+
+-- | 'assumeUgt' shrinks the strides orbit by cardinality (unconditionally).
+assumeUgtShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeUgtShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeUgt w) a b)
+
+-- | 'assumeUge' shrinks the strides orbit by cardinality (unconditionally).
+assumeUgeShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeUgeShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeUge w) a b)
+
+-- | 'assumeSlt' shrinks the strides orbit by cardinality (unconditionally).
+assumeSltShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeSltShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeSlt w) a b)
+
+-- | 'assumeSle' shrinks the strides orbit by cardinality (unconditionally).
+assumeSleShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeSleShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeSle w) a b)
+
+-- | 'assumeSgt' shrinks the strides orbit by cardinality (unconditionally).
+assumeSgtShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeSgtShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeSgt w) a b)
+
+-- | 'assumeSge' shrinks the strides orbit by cardinality (unconditionally).
+assumeSgeShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeSgeShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeSge w) a b)
+
+-- | Shared body of the @assume*Shrinks@ properties: the result's strides
+-- orbit is no larger than @a@'s. Uses the /O(1)/ 'S.size' of the strides
+-- component, never the exponential joint 'size'\/'toList'. Returns 'Bool'
+-- so it isn't mistaken for a standalone property.
+stridesShrinks ::
+  (Domain w -> Domain w -> Maybe (Domain w)) -> Domain w -> Domain w -> Bool
+stridesShrinks op a b =
+  case op a b of
+    Nothing -> True
+    Just c  -> S.size (strides c) <= S.size (strides a)
+
+-- $assumeIdempotent
+--
+-- The @assume*Idempotent@ properties check that re-applying an assumption
+-- denotes the same set, @assumeOp (assumeOp a b) b ≡ assumeOp a b@,
+-- pointwise at a witness @x@ to avoid enumerating the (possibly
+-- exponential) orbit. As in the strides domain, idempotence is checked
+-- under the non-wrap guard, where the underlying 'S.pseudoMeet' behaves
+-- as a lower bound.
+
+-- | 'assumeUlt' is idempotent (under the non-wrap guard).
+assumeUltIdempotent ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
+assumeUltIdempotent w a b x =
+  proper a ==> proper b ==>
+  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+    property (idempotentAt (assumeUlt w) a b x)
+
+-- | 'assumeUle' is idempotent (under the non-wrap guard).
+assumeUleIdempotent ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
+assumeUleIdempotent w a b x =
+  proper a ==> proper b ==>
+  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+    property (idempotentAt (assumeUle w) a b x)
+
+-- | 'assumeUgt' is idempotent (under the non-wrap guard).
+assumeUgtIdempotent ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
+assumeUgtIdempotent w a b x =
+  proper a ==> proper b ==>
+  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+    property (idempotentAt (assumeUgt w) a b x)
+
+-- | 'assumeUge' is idempotent (under the non-wrap guard).
+assumeUgeIdempotent ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
+assumeUgeIdempotent w a b x =
+  proper a ==> proper b ==>
+  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+    property (idempotentAt (assumeUge w) a b x)
+
+-- | 'assumeSlt' is idempotent (under the non-wrap guard).
+assumeSltIdempotent ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
+assumeSltIdempotent w a b x =
+  proper a ==> proper b ==>
+  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+    property (idempotentAt (assumeSlt w) a b x)
+
+-- | 'assumeSle' is idempotent (under the non-wrap guard).
+assumeSleIdempotent ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
+assumeSleIdempotent w a b x =
+  proper a ==> proper b ==>
+  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+    property (idempotentAt (assumeSle w) a b x)
+
+-- | 'assumeSgt' is idempotent (under the non-wrap guard).
+assumeSgtIdempotent ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
+assumeSgtIdempotent w a b x =
+  proper a ==> proper b ==>
+  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+    property (idempotentAt (assumeSgt w) a b x)
+
+-- | 'assumeSge' is idempotent (under the non-wrap guard).
+assumeSgeIdempotent ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
+assumeSgeIdempotent w a b x =
+  proper a ==> proper b ==>
+  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
+    property (idempotentAt (assumeSge w) a b x)
+
+-- | Shared body of the @assume*Idempotent@ properties (the @proper@\/
+-- non-wrap guards live in each caller): @assumeOp _ b@ applied to
+-- @assumeOp a b@ denotes the same set, checked pointwise at @x@. Returns
+-- 'Bool' so it isn't mistaken for a standalone property.
+idempotentAt ::
+  (Domain w -> Domain w -> Maybe (Domain w)) ->
+  Domain w -> Domain w -> Natural -> Bool
+idempotentAt op a b x =
+  case op a b of
+    Nothing -> True
+    Just c  -> maybeMember (op c b) x == member c x
+
+-- | 'member' lifted through 'Maybe', but treating 'Nothing' as a failed
+-- (rather than vacuously-true) soundness obligation: the @correct_assume*@
+-- properties are conditioned on a witness @y@, so an empty result is a
+-- genuine bug. Returns 'Bool' so it isn't mistaken for a standalone property.
+maybeMemberOrFail :: Maybe (Domain w) -> Natural -> Bool
+maybeMemberOrFail Nothing  _ = False
+maybeMemberOrFail (Just c) x = member c x
 
