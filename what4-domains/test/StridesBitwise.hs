@@ -115,6 +115,21 @@ tests = TT.testGroup "StridesBitwise"
   , genTest "sizeViaToList" $
       do SW n <- genWidthSmall
          SB.sizeViaToList n <$> SB.genDomain n
+  , genTest "sizeAtMostComponents" $
+      do SW n <- genWidth
+         SB.sizeAtMostComponents n <$> SB.genDomain n
+  , genTest "sizeExactCorrect" $
+      do SW n <- genWidthSmall
+         SB.sizeExactCorrect n <$> SB.genDomain n
+  , genTest "windowMarginalCount" $
+      do SW n <- genWidthSmall
+         SB.windowMarginalCount n <$> SB.genDomain n
+  , genTest "uniformWindowBalanced" $
+      do SW n <- genWidthSmall
+         SB.uniformWindowBalanced n <$> SB.genDomain n
+  , genTest "pinsConflictEmpty" $
+      do SW n <- genWidthSmall
+         SB.pinsConflictEmpty n <$> SB.genDomain n <*> SB.genDomain n
   -- ** Arithmetic
   , genTest "correct_neg" $
       do SW n <- genWidth
