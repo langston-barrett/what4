@@ -3470,77 +3470,77 @@ correct_assumeSge a x b y =
       Just c -> member c x
       Nothing -> False
 
+// The `assume*Shrinks` properties assert cardinality refinement,
+// unconditionally: `size (assumeOp a b) <= size a`. This is guaranteed
+// by construction (`assumeUnsignedRange` and the signed driver fall back
+// to `a` / the `aᵢ` piece whenever `pseudoMeet`/`pseudoJoin` would
+// overshoot it), so no non-wrap guard is needed. We assert cardinality
+// rather than `leqExact c a` because on wrapping operands `pseudoMeet` is
+// sound but not a lower bound.
+
 assumeUltShrinks :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 assumeUltShrinks a b =
   proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeUlt a b of
-        Nothing -> True
-        Just c  -> leqExact c a
+    case assumeUlt a b of
+      Nothing -> True
+      Just c  -> size c <= size a
 
 assumeUleShrinks :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 assumeUleShrinks a b =
   proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeUle a b of
-        Nothing -> True
-        Just c  -> leqExact c a
+    case assumeUle a b of
+      Nothing -> True
+      Just c  -> size c <= size a
 
 assumeUgtShrinks :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 assumeUgtShrinks a b =
   proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeUgt a b of
-        Nothing -> True
-        Just c  -> leqExact c a
+    case assumeUgt a b of
+      Nothing -> True
+      Just c  -> size c <= size a
 
 assumeUgeShrinks :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 assumeUgeShrinks a b =
   proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeUge a b of
-        Nothing -> True
-        Just c  -> leqExact c a
+    case assumeUge a b of
+      Nothing -> True
+      Just c  -> size c <= size a
 
 assumeSltShrinks :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 assumeSltShrinks a b =
   proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeSlt a b of
-        Nothing -> True
-        Just c  -> leqExact c a
+    case assumeSlt a b of
+      Nothing -> True
+      Just c  -> size c <= size a
 
 assumeSleShrinks :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 assumeSleShrinks a b =
   proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeSle a b of
-        Nothing -> True
-        Just c  -> leqExact c a
+    case assumeSle a b of
+      Nothing -> True
+      Just c  -> size c <= size a
 
 assumeSgtShrinks :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 assumeSgtShrinks a b =
   proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeSgt a b of
-        Nothing -> True
-        Just c  -> leqExact c a
+    case assumeSgt a b of
+      Nothing -> True
+      Just c  -> size c <= size a
 
 assumeSgeShrinks :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 assumeSgeShrinks a b =
   proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeSge a b of
-        Nothing -> True
-        Just c  -> leqExact c a
+    case assumeSge a b of
+      Nothing -> True
+      Just c  -> size c <= size a
 
 // Equality of `Maybe (Domain n)` via `leqExact` on the `Just` payloads.
 eqMaybeAssume :

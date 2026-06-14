@@ -329,4 +329,100 @@ tests = TT.testGroup "StridesBitwise"
   , genTest "pseudoJoinPreciseTopAnnihilator" $
       do SW n <- genWidth
          SB.pseudoJoinPreciseTopAnnihilator n <$> SB.genDomain n <*> genNatBV n
+  -- ** Branch-condition assumptions
+  --
+  -- Witnesses are drawn with 'genPair' (element from the domain) rather
+  -- than independently, so @member a x@\/@member b y@ hold by construction.
+  -- The reduced product is far sparser than either component, so an
+  -- independent draw would discard almost every case (and Hedgehog gives
+  -- up after a fixed discard budget); this leaves only the comparison
+  -- @x \`op\` y@ to discard.
+  , genTest "correct_assumeUlt" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeUlt n a x b y)
+  , genTest "correct_assumeUle" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeUle n a x b y)
+  , genTest "correct_assumeUgt" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeUgt n a x b y)
+  , genTest "correct_assumeUge" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeUge n a x b y)
+  , genTest "correct_assumeSlt" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeSlt n a x b y)
+  , genTest "correct_assumeSle" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeSle n a x b y)
+  , genTest "correct_assumeSgt" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeSgt n a x b y)
+  , genTest "correct_assumeSge" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeSge n a x b y)
+  , genTest "assumeUltShrinks" $
+      do SW n <- genWidth
+         SB.assumeUltShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeUleShrinks" $
+      do SW n <- genWidth
+         SB.assumeUleShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeUgtShrinks" $
+      do SW n <- genWidth
+         SB.assumeUgtShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeUgeShrinks" $
+      do SW n <- genWidth
+         SB.assumeUgeShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeSltShrinks" $
+      do SW n <- genWidth
+         SB.assumeSltShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeSleShrinks" $
+      do SW n <- genWidth
+         SB.assumeSleShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeSgtShrinks" $
+      do SW n <- genWidth
+         SB.assumeSgtShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeSgeShrinks" $
+      do SW n <- genWidth
+         SB.assumeSgeShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeUltIdempotent" $
+      do SW n <- genWidth
+         SB.assumeUltIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeUleIdempotent" $
+      do SW n <- genWidth
+         SB.assumeUleIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeUgtIdempotent" $
+      do SW n <- genWidth
+         SB.assumeUgtIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeUgeIdempotent" $
+      do SW n <- genWidth
+         SB.assumeUgeIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeSltIdempotent" $
+      do SW n <- genWidth
+         SB.assumeSltIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeSleIdempotent" $
+      do SW n <- genWidth
+         SB.assumeSleIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeSgtIdempotent" $
+      do SW n <- genWidth
+         SB.assumeSgtIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeSgeIdempotent" $
+      do SW n <- genWidth
+         SB.assumeSgeIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
   ]

@@ -89,6 +89,15 @@ module What4.Domains.BV.Bitwise
   , or
   , xor
   , not
+  -- ** branch-condition assumptions
+  , assumeUlt
+  , assumeUle
+  , assumeUgt
+  , assumeUge
+  , assumeSlt
+  , assumeSle
+  , assumeSgt
+  , assumeSge
 
   -- * Correctness properties
   , genDomain
@@ -165,6 +174,23 @@ module What4.Domains.BV.Bitwise
   , correct_not
   , correct_xor
   , correct_testBit
+  -- ** Branch-condition assumptions
+  , correct_assumeUlt
+  , correct_assumeUle
+  , correct_assumeUgt
+  , correct_assumeUge
+  , correct_assumeSlt
+  , correct_assumeSle
+  , correct_assumeSgt
+  , correct_assumeSge
+  , assumeUltShrinks
+  , assumeUleShrinks
+  , assumeUgtShrinks
+  , assumeUgeShrinks
+  , assumeSltShrinks
+  , assumeSleShrinks
+  , assumeSgtShrinks
+  , assumeSgeShrinks
   ) where
 
 import           Data.Bits hiding (testBit, xor)
@@ -826,6 +852,167 @@ slt w a b
   (bl, bh) = sbounds w b
 
 ---------------------------------------------------------------------------------------
+-- Branch-condition assumptions
+
+-- $assume
+--
+-- The 'assumeUlt', 'assumeUle', 'assumeUgt', 'assumeUge', 'assumeSlt',
+-- 'assumeSle', 'assumeSgt', and 'assumeSge' operations refine the first
+-- operand by a comparison constraint against the second: @assumeOp w a b@
+-- returns a sound over-approximation of
+--
+-- @
+-- { x ∈ γ(a) | ∃ y ∈ γ(b). x \`op\` y }
+-- @
+--
+-- where @op@ is the corresponding (unsigned or signed) bitvector
+-- comparison. The result is the canonical 'bottom' when this set is
+-- provably empty (the branch is infeasible). Unlike the strides domain
+-- (whose pseudo-meet cannot in general represent an arbitrary empty set
+-- and so returns 'Maybe'), the bitwise domain has a canonical bottom, so
+-- these return a 'Domain' directly.
+--
+-- These are the standard transfer functions for branch conditions in
+-- abstract interpretation: @if (x < y) then ... else ...@ refines the
+-- abstract value of @x@ on the @then@ branch via 'assumeUlt', and on the
+-- @else@ branch via 'assumeUge'.
+--
+-- Implemented by 'meet'ing @a@ with the bitwise hull of an unsigned range
+-- derived from @b@'s ('ubounds' or 'sbounds') bounds. Because 'meet' is an
+-- exact lattice operation, the unsigned operations are exactly idempotent
+-- (@assumeOp (assumeOp a b) b ≡ assumeOp a b@). The signed operations
+-- split both operands at the sign boundary with 'splitSign', dispatch per
+-- sign-pair, and 'join' the surviving contributions — the same shape as
+-- 'sdiv' and 'srem'.
+
+-- | /O(w)/. Refine @a@ by the assumption @x < y@ (unsigned),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeUlt :: NatRepr w -> Domain w -> Domain w -> Domain w
+assumeUlt w a b
+  | bhi == 0  = bottom w  -- x < 0 is impossible
+  | otherwise = assumeUnsignedRange w a 0 (bhi - 1)
+  where
+  (_blo, bhi) = ubounds b
+
+-- | /O(w)/. Refine @a@ by the assumption @x <= y@ (unsigned),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeUle :: NatRepr w -> Domain w -> Domain w -> Domain w
+assumeUle w a b = assumeUnsignedRange w a 0 bhi
+  where
+  (_blo, bhi) = ubounds b
+
+-- | /O(w)/. Refine @a@ by the assumption @x > y@ (unsigned),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeUgt :: NatRepr w -> Domain w -> Domain w -> Domain w
+assumeUgt w a b
+  | blo == bvdMask a = bottom w  -- x > 2^w - 1 is impossible
+  | otherwise        = assumeUnsignedRange w a (blo + 1) (bvdMask a)
+  where
+  (blo, _bhi) = ubounds b
+
+-- | /O(w)/. Refine @a@ by the assumption @x >= y@ (unsigned),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeUge :: NatRepr w -> Domain w -> Domain w -> Domain w
+assumeUge w a b = assumeUnsignedRange w a blo (bvdMask a)
+  where
+  (blo, _bhi) = ubounds b
+
+-- | /O(w)/. Refine @a@ by the assumption @x < y@ (signed),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeSlt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+assumeSlt w = assumeSignedBy w sltCase
+  where
+    -- contribution of the @x@-piece @a'@ to @{x ∈ a' | ∃ y ∈ b'. x_s < y_s}@
+    sltCase sa a' sb b' = case (sa, sb) of
+      (SNonneg, SNonneg) -> assumeUlt w a' b'  -- both ≥ 0: signed = unsigned
+      (SNeg,    SNeg)    -> assumeUlt w a' b'  -- both < 0: order agrees w/ unsigned
+      (SNonneg, SNeg)    -> bottom w           -- x ≥ 0 > y: always false
+      (SNeg,    SNonneg) -> a'                 -- x < 0 ≤ y: always true
+
+-- | /O(w)/. Refine @a@ by the assumption @x <= y@ (signed),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeSle :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+assumeSle w = assumeSignedBy w sleCase
+  where
+    sleCase sa a' sb b' = case (sa, sb) of
+      (SNonneg, SNonneg) -> assumeUle w a' b'
+      (SNeg,    SNeg)    -> assumeUle w a' b'
+      (SNonneg, SNeg)    -> bottom w
+      (SNeg,    SNonneg) -> a'
+
+-- | /O(w)/. Refine @a@ by the assumption @x > y@ (signed),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeSgt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+assumeSgt w = assumeSignedBy w sgtCase
+  where
+    sgtCase sa a' sb b' = case (sa, sb) of
+      (SNonneg, SNonneg) -> assumeUgt w a' b'
+      (SNeg,    SNeg)    -> assumeUgt w a' b'
+      (SNonneg, SNeg)    -> a'                 -- x ≥ 0 > y: always true
+      (SNeg,    SNonneg) -> bottom w
+
+-- | /O(w)/. Refine @a@ by the assumption @x >= y@ (signed),
+-- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+assumeSge :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+assumeSge w = assumeSignedBy w sgeCase
+  where
+    sgeCase sa a' sb b' = case (sa, sb) of
+      (SNonneg, SNonneg) -> assumeUge w a' b'
+      (SNeg,    SNeg)    -> assumeUge w a' b'
+      (SNonneg, SNeg)    -> a'
+      (SNeg,    SNonneg) -> bottom w
+
+-- | /O(w)/. Refine @a@ by intersecting with the unsigned range @[lo, hi]@,
+-- where @0 <= lo <= hi <= 2^w - 1@. Returns canonical 'bottom' when the
+-- intersection is empty (which 'meet' already canonicalizes).
+assumeUnsignedRange ::
+  NatRepr w -> Domain w -> Integer -> Integer -> Domain w
+assumeUnsignedRange w a lo hi
+  | lo > hi   = bottom w
+  | otherwise = meet a (rangeHull w lo hi)
+
+-- | /O(w)/. The bitwise (known-bits) hull of the unsigned interval
+-- @[lo, hi]@, @0 <= lo <= hi@: bits above the highest position where @lo@
+-- and @hi@ differ are forced (common to every member); all lower bits are
+-- unknown. Same construction as 'What4.Domains.BV.bitwiseToArithDomain'\''s
+-- inverse.
+rangeHull :: NatRepr w -> Integer -> Integer -> Domain w
+rangeHull w lo hi = BVBitInterval mask lomask himask
+  where
+  mask   = maxUnsigned w
+  u      = Arith.bitsBelow (lo `Bits.xor` hi) .&. mask
+  himask = (lo .|. u) .&. mask
+  lomask = himask `Bits.xor` u
+
+-- | Shared driver for 'assumeSlt', 'assumeSle', 'assumeSgt', 'assumeSge'.
+-- Splits both operands at the sign boundary with 'splitSign', dispatches
+-- per sign-pair to the supplied case analysis, and 'join's the surviving
+-- contributions.
+--
+-- Each contribution is a subset of its @a@-piece, so the union of the
+-- contributions is @⊆ a@. But 'join' is the bitwise least upper bound,
+-- not the exact set union: joining the non-negative and negative
+-- contributions can produce a hull strictly wider than @a@ (e.g. when the
+-- two pieces only share their sign bit). We 'meet' the join with @a@ to
+-- pull it back: every contribution is already @⊆ a ⊆ join@, so the meet
+-- retains all of them (soundness preserved) while guaranteeing the result
+-- is @⊑ a@ (shrinking). 'meet' is exact, so no precision is lost beyond
+-- what the @join@ already cost.
+assumeSignedBy ::
+  (1 <= w) =>
+  NatRepr w ->
+  -- | per-pair case analysis: @signOf a' -> a' -> signOf b' -> b' -> contribution@
+  (Sign -> Domain w -> Sign -> Domain w -> Domain w) ->
+  Domain w -> Domain w -> Domain w
+assumeSignedBy w perPair a b =
+  meet a $
+    Prelude.foldr join (bottom w)
+      [ perPair sa a' sb b'
+      | (sa, a') <- splitSign w a
+      , (sb, b') <- splitSign w b
+      ]
+
+---------------------------------------------------------------------------------------
 -- Arithmetic
 
 -- | Convert a domain into its tristate-number form.
@@ -1479,4 +1666,114 @@ correct_sremSmtlib n (a,x) (b,y) =
   where
   x' = toSigned n x
   y' = toSigned n y
+
+------------------------------------------------------------------------
+-- Branch-condition assumptions
+
+-- | 'assumeUlt' is sound: every value @x ∈ a@ that satisfies @x < y@ for
+-- some @y ∈ b@ remains in the result.
+correct_assumeUlt :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeUlt n (a,x) (b,y) =
+  member a x ==> member b y ==> toUnsigned n x < toUnsigned n y ==>
+    property (member (assumeUlt n a b) x)
+
+-- | 'assumeUle' is sound.
+correct_assumeUle :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeUle n (a,x) (b,y) =
+  member a x ==> member b y ==> toUnsigned n x <= toUnsigned n y ==>
+    property (member (assumeUle n a b) x)
+
+-- | 'assumeUgt' is sound.
+correct_assumeUgt :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeUgt n (a,x) (b,y) =
+  member a x ==> member b y ==> toUnsigned n x > toUnsigned n y ==>
+    property (member (assumeUgt n a b) x)
+
+-- | 'assumeUge' is sound.
+correct_assumeUge :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeUge n (a,x) (b,y) =
+  member a x ==> member b y ==> toUnsigned n x >= toUnsigned n y ==>
+    property (member (assumeUge n a b) x)
+
+-- | 'assumeSlt' is sound: every value @x ∈ a@ that satisfies @x < y@
+-- (signed) for some @y ∈ b@ remains in the result.
+correct_assumeSlt :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeSlt n (a,x) (b,y) =
+  member a x ==> member b y ==> toSigned n x < toSigned n y ==>
+    property (member (assumeSlt n a b) x)
+
+-- | 'assumeSle' is sound.
+correct_assumeSle :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeSle n (a,x) (b,y) =
+  member a x ==> member b y ==> toSigned n x <= toSigned n y ==>
+    property (member (assumeSle n a b) x)
+
+-- | 'assumeSgt' is sound.
+correct_assumeSgt :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeSgt n (a,x) (b,y) =
+  member a x ==> member b y ==> toSigned n x > toSigned n y ==>
+    property (member (assumeSgt n a b) x)
+
+-- | 'assumeSge' is sound.
+correct_assumeSge :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeSge n (a,x) (b,y) =
+  member a x ==> member b y ==> toSigned n x >= toSigned n y ==>
+    property (member (assumeSge n a b) x)
+
+-- $assumeShrinks
+--
+-- The @assume*Shrinks@ properties bundle two laws that 'meet' makes
+-- unconditional for the bitwise domain:
+--
+--   * /Shrinking/: @assumeOp a b ⊑ a@ (the result never grows @a@). This
+--     holds for /every/ operand here, with no non-wrap side condition,
+--     because 'meet' (and 'join' of per-piece subsets) only ever removes
+--     values.
+--
+--   * /Idempotence/: @assumeOp (assumeOp a b) b@ denotes the same set as
+--     @assumeOp a b@. For the unsigned operations this is exactly 'meet'
+--     idempotence; for the signed operations it follows because each
+--     surviving piece is already saturated against @b@'s sign-split
+--     bounds.
+
+-- | 'assumeUlt' shrinks and is idempotent.
+assumeUltShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeUltShrinks n a b = property (shrinksAndIdempotent (assumeUlt n) a b)
+
+-- | 'assumeUle' shrinks and is idempotent.
+assumeUleShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeUleShrinks n a b = property (shrinksAndIdempotent (assumeUle n) a b)
+
+-- | 'assumeUgt' shrinks and is idempotent.
+assumeUgtShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeUgtShrinks n a b = property (shrinksAndIdempotent (assumeUgt n) a b)
+
+-- | 'assumeUge' shrinks and is idempotent.
+assumeUgeShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeUgeShrinks n a b = property (shrinksAndIdempotent (assumeUge n) a b)
+
+-- | 'assumeSlt' shrinks and is idempotent.
+assumeSltShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeSltShrinks n a b = property (shrinksAndIdempotent (assumeSlt n) a b)
+
+-- | 'assumeSle' shrinks and is idempotent.
+assumeSleShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeSleShrinks n a b = property (shrinksAndIdempotent (assumeSle n) a b)
+
+-- | 'assumeSgt' shrinks and is idempotent.
+assumeSgtShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeSgtShrinks n a b = property (shrinksAndIdempotent (assumeSgt n) a b)
+
+-- | 'assumeSge' shrinks and is idempotent.
+assumeSgeShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeSgeShrinks n a b = property (shrinksAndIdempotent (assumeSge n) a b)
+
+-- | Shared body of the @assume*Shrinks@ properties: @assumeOp a b@ is
+-- contained in @a@ (shrinking) and applying @assumeOp _ b@ again denotes
+-- the same set (idempotence). Set equality is checked via two-sided 'leq'.
+shrinksAndIdempotent :: (Domain n -> Domain n -> Domain n) -> Domain n -> Domain n -> Bool
+shrinksAndIdempotent op a b = leq c a && sameSet (op c b) c
+  where
+  c = op a b
+  sameSet p q = leq p q && leq q p
 

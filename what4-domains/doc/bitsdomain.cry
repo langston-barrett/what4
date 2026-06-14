@@ -536,6 +536,111 @@ srem a b = union (union r00 r01) (union r10 r11)
   r11 = bneg (urem (bneg aNeg) (bneg bNeg))         // dividend -
 
 ////////////////////////////////////////////////////////////
+// Branch-condition assumptions
+//
+// `assumeOp a b` returns a sound over-approximation of
+//
+//   { x in mem a | exists y in mem b. x op y }
+//
+// It is the canonical `bottom` when this set is provably empty. The
+// unsigned operations meet `a` with the bitwise hull of an unsigned
+// range derived from `b`'s bounds; the signed operations split on the
+// sign bit (like `sdiv`/`srem`) and join the surviving contributions.
+
+assumeUlt : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeUlt a b =
+  if bhi == 0 then bottom
+  else assumeUnsignedRange a 0 (bhi - 1)
+  where
+    (_blo, bhi) = ubounds b
+
+assumeUle : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeUle a b = assumeUnsignedRange a 0 bhi
+  where
+    (_blo, bhi) = ubounds b
+
+assumeUgt : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeUgt a b =
+  if blo == ~ 0 then bottom
+  else assumeUnsignedRange a (blo + 1) (~ 0)
+  where
+    (blo, _bhi) = ubounds b
+
+assumeUge : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeUge a b = assumeUnsignedRange a blo (~ 0)
+  where
+    (blo, _bhi) = ubounds b
+
+// Refine `a` by intersecting with the unsigned range `[lo, hi]`.
+// Yields `bottom` when `lo > hi` (empty range); `meet` canonicalizes
+// any further emptiness.
+assumeUnsignedRange : {n} (fin n, n >= 1) => Dom n -> [n] -> [n] -> Dom n
+assumeUnsignedRange a lo hi =
+  if lo > hi then bottom else meet a (rangeHull lo hi)
+
+// The bitwise (known-bits) hull of the unsigned interval `[lo, hi]`,
+// `lo <= hi`: bits above the highest differing position are forced;
+// lower bits are unknown.
+rangeHull : {n} (fin n, n >= 1) => [n] -> [n] -> Dom n
+rangeHull lo hi = { lomask = himask ^ u, himask = himask }
+  where
+    u      = fillrightBits (lo ^ hi)
+    himask = lo || u
+
+// `fillrightBits x` rounds `x` up to the nearest `2^k - 1` (every set
+// bit, and all lower positions, become 1). Same as arithdomain's
+// `fillright`, duplicated here to keep this module self-contained.
+fillrightBits : {n} (fin n) => [n] -> [n]
+fillrightBits x = tail (scanl (||) False x)
+
+assumeSlt : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeSlt a b = assumeSignedBy sltCase a b
+  where
+    sltCase aPos aNeg bPos bNeg =
+      // (+,+) signed = unsigned; (-,-) order agrees with unsigned;
+      // (-,+) always true; (+,-) always false (empty contribution).
+      [ assumeUlt aPos bPos, bottom, aNeg, assumeUlt aNeg bNeg ]
+
+assumeSle : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeSle a b = assumeSignedBy sleCase a b
+  where
+    sleCase aPos aNeg bPos bNeg =
+      [ assumeUle aPos bPos, bottom, aNeg, assumeUle aNeg bNeg ]
+
+assumeSgt : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeSgt a b = assumeSignedBy sgtCase a b
+  where
+    sgtCase aPos aNeg bPos bNeg =
+      // (+,-) always true; (-,+) always false (empty contribution).
+      [ assumeUgt aPos bPos, aPos, bottom, assumeUgt aNeg bNeg ]
+
+assumeSge : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeSge a b = assumeSignedBy sgeCase a b
+  where
+    sgeCase aPos aNeg bPos bNeg =
+      [ assumeUge aPos bPos, aPos, bottom, assumeUge aNeg bNeg ]
+
+// Signed-assume driver: split both operands on the sign bit and join
+// the four per-sign-pair contributions. `perPair aPos aNeg bPos bNeg`
+// returns the contributions in order [(+,+), (+,-), (-,+), (-,-)].
+//
+// Each contribution is a subset of `a`, so their union is `<= a`. But
+// `join` is the bitwise LUB, not the exact union, and can overshoot `a`
+// (joining a non-negative and a negative piece widens the hull). We
+// `meet` the join with `a` to pull it back: every contribution is already
+// `<= a <= join`, so the meet retains all of them (sound) while
+// guaranteeing the result is `<= a` (shrinking).
+assumeSignedBy :
+  {n} (fin n, n >= 1) =>
+  (Dom n -> Dom n -> Dom n -> Dom n -> [4](Dom n)) ->
+  Dom n -> Dom n -> Dom n
+assumeSignedBy perPair a b =
+  meet a (foldl join bottom (perPair aPos aNeg bPos bNeg))
+  where
+    (aPos, aNeg) = splitSign a
+    (bPos, bNeg) = splitSign b
+
+////////////////////////////////////////////////////////////
 // Soundness properties
 
 correct_any : {n} (fin n) => [n] -> Property
@@ -777,6 +882,76 @@ correct_slt : {n} (fin n, n >= 1) => Dom n -> Dom n -> [n] -> [n] -> Property
 correct_slt a b x y =
   slt a b ==> mem a x ==> mem b y ==> x <$ y
 
+// Branch-condition assumptions: soundness. Every x in a that satisfies
+// the comparison with some y in b survives.
+
+correct_assumeUlt : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeUlt a x b y =
+  mem a x ==> mem b y ==> x < y ==> mem (assumeUlt a b) x
+
+correct_assumeUle : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeUle a x b y =
+  mem a x ==> mem b y ==> x <= y ==> mem (assumeUle a b) x
+
+correct_assumeUgt : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeUgt a x b y =
+  mem a x ==> mem b y ==> x > y ==> mem (assumeUgt a b) x
+
+correct_assumeUge : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeUge a x b y =
+  mem a x ==> mem b y ==> x >= y ==> mem (assumeUge a b) x
+
+correct_assumeSlt : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeSlt a x b y =
+  mem a x ==> mem b y ==> x <$ y ==> mem (assumeSlt a b) x
+
+correct_assumeSle : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeSle a x b y =
+  mem a x ==> mem b y ==> x <=$ y ==> mem (assumeSle a b) x
+
+correct_assumeSgt : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeSgt a x b y =
+  mem a x ==> mem b y ==> x >$ y ==> mem (assumeSgt a b) x
+
+correct_assumeSge : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeSge a x b y =
+  mem a x ==> mem b y ==> x >=$ y ==> mem (assumeSge a b) x
+
+// Branch-condition assumptions: each operation shrinks (result <= a)
+// and is idempotent (re-applying with the same b denotes the same set).
+// `meet` makes both laws unconditional for the bitwise domain.
+
+assumeShrinksAndIdempotent :
+  {n} (fin n, n >= 1) => (Dom n -> Dom n -> Dom n) -> Dom n -> Dom n -> Bit
+assumeShrinksAndIdempotent op a b = leq c a /\ sameSet (op c b) c
+  where
+    c = op a b
+    sameSet p q = leq p q /\ leq q p
+
+assumeUltShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeUltShrinks a b = assumeShrinksAndIdempotent assumeUlt a b
+
+assumeUleShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeUleShrinks a b = assumeShrinksAndIdempotent assumeUle a b
+
+assumeUgtShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeUgtShrinks a b = assumeShrinksAndIdempotent assumeUgt a b
+
+assumeUgeShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeUgeShrinks a b = assumeShrinksAndIdempotent assumeUge a b
+
+assumeSltShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeSltShrinks a b = assumeShrinksAndIdempotent assumeSlt a b
+
+assumeSleShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeSleShrinks a b = assumeShrinksAndIdempotent assumeSle a b
+
+assumeSgtShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeSgtShrinks a b = assumeShrinksAndIdempotent assumeSgt a b
+
+assumeSgeShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeSgeShrinks a b = assumeShrinksAndIdempotent assumeSge a b
+
 property b1 = correct_any`{16}
 property b2 = correct_singleton`{16}
 property b3 = correct_overlap`{16}
@@ -822,6 +997,23 @@ property a13 = correct_srem`{8}
 property a14 = correct_mulPrecise`{8}  // NB: takes 60s
 property a15 = correct_udivPrecise`{8}
 property a16 = correct_uremPrecise`{8}
+
+property as1  = correct_assumeUlt`{8}
+property as2  = correct_assumeUle`{8}
+property as3  = correct_assumeUgt`{8}
+property as4  = correct_assumeUge`{8}
+property as5  = correct_assumeSlt`{8}
+property as6  = correct_assumeSle`{8}
+property as7  = correct_assumeSgt`{8}
+property as8  = correct_assumeSge`{8}
+property as9  = assumeUltShrinks`{8}
+property as10 = assumeUleShrinks`{8}
+property as11 = assumeUgtShrinks`{8}
+property as12 = assumeUgeShrinks`{8}
+property as13 = assumeSltShrinks`{8}
+property as14 = assumeSleShrinks`{8}
+property as15 = assumeSgtShrinks`{8}
+property as16 = assumeSgeShrinks`{8}
 
 property lat1  = correct_join`{8}
 property lat2  = correct_meet`{8}

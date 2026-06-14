@@ -583,6 +583,54 @@ bitwiseDomainTests =
   , genTest "correct_uremPrecise" $
       do SW n <- genWidth
          B.correct_uremPrecise n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeUlt" $
+      do SW n <- genWidth
+         B.correct_assumeUlt n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeUle" $
+      do SW n <- genWidth
+         B.correct_assumeUle n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeUgt" $
+      do SW n <- genWidth
+         B.correct_assumeUgt n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeUge" $
+      do SW n <- genWidth
+         B.correct_assumeUge n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeSlt" $
+      do SW n <- genWidth
+         B.correct_assumeSlt n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeSle" $
+      do SW n <- genWidth
+         B.correct_assumeSle n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeSgt" $
+      do SW n <- genWidth
+         B.correct_assumeSgt n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeSge" $
+      do SW n <- genWidth
+         B.correct_assumeSge n <$> B.genPair n <*> B.genPair n
+  , genTest "assumeUltShrinks" $
+      do SW n <- genWidth
+         B.assumeUltShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeUleShrinks" $
+      do SW n <- genWidth
+         B.assumeUleShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeUgtShrinks" $
+      do SW n <- genWidth
+         B.assumeUgtShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeUgeShrinks" $
+      do SW n <- genWidth
+         B.assumeUgeShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeSltShrinks" $
+      do SW n <- genWidth
+         B.assumeSltShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeSleShrinks" $
+      do SW n <- genWidth
+         B.assumeSleShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeSgtShrinks" $
+      do SW n <- genWidth
+         B.assumeSgtShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeSgeShrinks" $
+      do SW n <- genWidth
+         B.assumeSgeShrinks n <$> B.genDomain n <*> B.genDomain n
   ]
 
 overallDomainTests :: TestTree
