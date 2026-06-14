@@ -139,6 +139,12 @@ tests = TT.testGroup "Strides"
   , genTest "memberToList" $
       do SW n <- genWidthSmall
          S.memberToList <$> S.genDomain n <*> genNatBV n
+  , genTest "memberArcCorrect" $
+      do SW n <- genWidth
+         S.memberArcCorrect <$> S.genDomain n <*> genNatBV n
+  , genTest "containsZeroCorrect" $
+      do SW n <- genWidth
+         S.containsZeroCorrect <$> S.genDomain n
   , genTest "toListNoDuplicates" $
       do SW n <- genWidthSmall
          S.toListNoDuplicates <$> S.genDomain n
@@ -789,6 +795,9 @@ tests = TT.testGroup "Strides"
   , genTest "liftForcedBitsMember" $
       do SW n <- genWidth
          S.liftForcedBitsMember n <$> S.genDomain n <*> B.genDomain n
+  , genTest "liftForcedBitsRefinesSpec" $
+      do SW n <- genWidth
+         S.liftForcedBitsRefinesSpec n <$> S.genDomain n <*> B.genDomain n
   , genTest "arcClipBitwiseShrinks" $
       do SW n <- genWidth
          S.arcClipBitwiseShrinks n <$> S.genDomain n <*> genNatBV n <*> genNatBV n
