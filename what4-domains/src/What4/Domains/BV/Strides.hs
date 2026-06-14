@@ -496,6 +496,8 @@ module What4.Domains.BV.Strides
   , endMember
   , toListMember
   , memberToList
+  , memberArcCorrect
+  , containsZeroCorrect
   , toListNoDuplicates
   , leqCorrect
   , leqReflexive
@@ -677,6 +679,7 @@ module What4.Domains.BV.Strides
   , knownZerosOnesNatMember
   , liftForcedBitsShrinks
   , liftForcedBitsMember
+  , liftForcedBitsRefinesSpec
   , arcClipBitwiseShrinks
   , arcClipBitwiseMember
   , correct_refineByBits
@@ -2859,13 +2862,30 @@ hullArith w = \case
 -- ------------------------------------------------------------------
 -- ** Arithmetic (SMT-LIB div-by-zero semantics)
 
+-- | /O(w)/. Sound test for @0 ∈ γ(c)@ that avoids the @O(w log w)@ modular
+-- inverse of 'member'. Exact on non-self-wrapping progressions; a sound
+-- over-approximation (the coset condition alone) on self-wrapping ones.
+-- Used by the SMT-LIB division wrappers to decide the div-by-zero case.
+containsZero :: Domain w -> Bool
+-- For a non-self-wrapping orbit, every member index @i@ has @i·stride <=
+-- n·stride <= mask < 2^w@, so reaching @0@ means @start + i·stride = 2^w@
+-- exactly (a single wrap to 0) — i.e. @i·stride = woff@ with @woff = (-start)
+-- mod 2^w@. Hence @0@ is a member iff @stride@ divides @woff@ and the quotient
+-- is @<= n@; no modular inverse is needed. When the orbit self-wraps, partial
+-- sums can wrap, so we fall back to the necessary coset condition @g | woff@
+-- (a sound over-approximation).
+containsZero c
+  | isSelfWrapping c = woff .&. (strideGcd c - 1) == 0
+  | otherwise        = woff `mod` stride c == 0 && woff `Prelude.div` stride c <= n c
+  where woff = wrapOffset c 0
+
 -- | /O(w)/. Unsigned division with SMT-LIB div-by-zero semantics.
 udivSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- If the divisor may be zero, join the ordinary quotient with the SMT-LIB
 -- all-ones result for the zero case.
 udivSmtlib w a b
   | isSingletonZero b = mk w (mask a) 1 0            -- divisor exactly {0}: all-ones
-  | member b 0        = pseudoJoin w (udiv w a b) (mk w (mask a) 1 0)
+  | containsZero b    = pseudoJoin w (udiv w a b) (mk w (mask a) 1 0)
   | otherwise         = udiv w a b
 
 uremSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
@@ -2877,7 +2897,7 @@ sdivSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- SMT-LIB zero-divisor result.
 sdivSmtlib w a b
   | isSingletonZero b = sdivByZeroStrides w a
-  | member b 0        = pseudoJoin w (sdiv w a b) (sdivByZeroStrides w a)
+  | containsZero b    = pseudoJoin w (sdiv w a b) (sdivByZeroStrides w a)
   | otherwise         = sdiv w a b
 
 -- The result of @bvsdiv s 0@ as a function of the dividend's sign: all-ones
@@ -3582,19 +3602,25 @@ ashrRaw w a b
     lo = l_a `Bits.shiftR` (if l_a < 0 then l_b' else u_b')
     hi = u_a `Bits.shiftR` (if u_a < 0 then u_b' else l_b')
 
+-- | /O(w^2)/. Rotate left.
 rol :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rol w = psplitOp2 w (rolRaw w)
 
--- | /O(w log w)/. The single-pair rotate-left kernel; see 'rol' for the
--- 'psplitOp2'-wrapped variant.
+-- | /O(w^2)/. The single-pair rotate-left kernel; see 'rol' for the
+-- 'psplitOp2'-wrapped variant. Lifts through 'B.rolAbstract', which unions
+-- the rotate over up to @w@ reachable residues mod @w@ (each an @O(w)@
+-- bounds rotate), so the kernel is @O(w^2)@ — the @O(w)@ bitwise
+-- conversions of 'liftBitwise2' are dominated.
 rolRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rolRaw w = liftBitwise2 w (B.rolAbstract w)
 
+-- | /O(w^2)/. Rotate right.
 ror :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 ror w = psplitOp2 w (rorRaw w)
 
--- | /O(w log w)/. The single-pair rotate-right kernel; see 'ror' for the
--- 'psplitOp2'-wrapped variant.
+-- | /O(w^2)/. The single-pair rotate-right kernel; see 'ror' for the
+-- 'psplitOp2'-wrapped variant. Mirrors 'rolRaw' (via 'B.rorAbstract'), so
+-- it is @O(w^2)@ for the same reason.
 rorRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rorRaw w = liftBitwise2 w (B.rorAbstract w)
 
@@ -3889,6 +3915,18 @@ restrictToCoset w arith s d
            else let nn' = (end' - lo') `Prelude.div` d
                 in Just (mk w (modMask arith lo') d nn')
 
+-- | /O(w)/. Membership test specialized to a progression whose orbit lies in
+-- @[start, start + n·stride]@ without wrapping mod @2^w@ (the 'arcMeetClosed'
+-- precondition). Unlike the general 'member', it needs no modular inverse:
+-- with no wrap the orbit is a plain integer arithmetic progression, so @v@ is
+-- a member iff it lies in the closed interval @[start, start + n·stride]@ and
+-- @v − start@ is a multiple of the stride. Agrees with 'member' on such
+-- inputs ('memberArcCorrect').
+memberArc :: Domain w -> Natural -> Bool
+memberArc c v =
+  start c <= v && v <= start c + n c * stride c
+    && (v - start c) `mod` stride c == 0
+
 -- | /O(w)/. CLP-style intersection of two progressions whose orbits lie in
 -- @[start, start + n·stride]@ without wrap mod @2^w@ (i.e. plain integer
 -- intervals). Returns the exact intersection.
@@ -3899,10 +3937,12 @@ arcMeetClosed ::
   NatRepr w ->
   Domain w -> Domain w -> Maybe (Domain w)
 arcMeetClosed w a b
+  -- A singleton arc meets the other (non-wrapping, by precondition) arc iff
+  -- its point is a member; 'memberArc' keeps this @O(w)@ (no modular inverse).
   | n a == 0
-  = if member b (start a) then Just (mk w (start a) 1 0) else Nothing
+  = if memberArc b (start a) then Just (mk w (start a) 1 0) else Nothing
   | n b == 0
-  = if member a (start b) then Just (mk w (start b) 1 0) else Nothing
+  = if memberArc a (start b) then Just (mk w (start b) 1 0) else Nothing
   | otherwise =
       assert (sA + n a * stride a <= mask a) $
       assert (sB + n b * stride b <= mask a) $
@@ -4341,17 +4381,21 @@ exactJoin w a b =
     [c] -> Just c
     _   -> Nothing
 
--- | /O(m^2 · w)/, where @m@ is the input list length. Merges any pair of
+-- | /O(m^3 · w)/, where @m@ is the input list length. Merges any pair of
 -- progressions whose union is /exactly/ representable as a single
--- progression. Iterates until no more merges apply.
+-- progression. Iterates to a fixed point.
 --
 -- Uses 'leq', see 'compactifyPrecise' for the variant that uses 'leqExact'.
 compactify :: (1 <= w) => NatRepr w -> [Domain w] -> [Domain w]
+-- Each 'compactifyBy' pass is @O(m^2)@ pairwise 'tryMergeBy' attempts (@O(w)@
+-- each via 'leq'), and a fixed point takes up to @m@ length-reducing passes,
+-- so the worst case is @O(m^3 · w)@. Callers that pass a constant-length list
+-- (e.g. 'pseudoMeet', 'arcClipBitwise') pay only the per-merge factor.
 compactify = compactifyBy leq
 
--- | /O(m^2 · w^2)/. Like 'compactify' but uses 'leqExact' for the
+-- | /O(m^3 · w^2)/. Like 'compactify' but uses 'leqExact' for the
 -- containment check, catching all merges at the cost of a higher per-merge
--- complexity.
+-- complexity (@O(w^2)@ instead of @O(w)@).
 compactifyPrecise :: (1 <= w) => NatRepr w -> [Domain w] -> [Domain w]
 compactifyPrecise = compactifyBy leqExact
 
@@ -4567,7 +4611,7 @@ intersectionSize w c1 c2 =
 --     against signed bounds; the resulting unsigned range can wrap mod
 --     @2^w@ when the signed bound straddles the sign boundary.
 
--- | /O(w^2)/. Refine @a@ by the assumption @x < y@ (unsigned),
+-- | /O(w)/. Refine @a@ by the assumption @x < y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUlt ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
@@ -4579,7 +4623,7 @@ assumeUlt w a b
     (alo, _ahi) = A.ubounds (toArith a)
     (_blo, bhi) = A.ubounds (toArith b)
 
--- | /O(w^2)/. Refine @a@ by the assumption @x <= y@ (unsigned),
+-- | /O(w)/. Refine @a@ by the assumption @x <= y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUle ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
@@ -4590,7 +4634,7 @@ assumeUle w a b
     (alo, _ahi) = A.ubounds (toArith a)
     (_blo, bhi) = A.ubounds (toArith b)
 
--- | /O(w^2)/. Refine @a@ by the assumption @x > y@ (unsigned),
+-- | /O(w)/. Refine @a@ by the assumption @x > y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUgt ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
@@ -4602,7 +4646,7 @@ assumeUgt w a b
     (_alo, ahi) = A.ubounds (toArith a)
     (blo, _bhi) = A.ubounds (toArith b)
 
--- | /O(w^2)/. Refine @a@ by the assumption @x >= y@ (unsigned),
+-- | /O(w)/. Refine @a@ by the assumption @x >= y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUge ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
@@ -4676,7 +4720,7 @@ pieceSign w c
   | otherwise       = Neg
   where halfR = 1 `Bits.shiftL` (NR.widthVal w - 1)
 
--- | /O(w^2)/. Refine @a@ by intersecting with the unsigned range @[lo, hi]@,
+-- | /O(w)/. Refine @a@ by intersecting with the unsigned range @[lo, hi]@,
 -- where @0 <= lo <= hi <= 2^w - 1@. Returns 'Nothing' if the intersection is
 -- provably empty.
 --
@@ -4894,26 +4938,25 @@ knownZerosOnesNat b =
 -- | /O(w log w)/. Refine a progression by the forced-bit pair @(zeros,
 -- ones)@ of a 'B.Domain' (see 'knownZerosOnesNat') via stride lifting.
 --
--- Walks the contiguous run of forced bits starting at the stride
--- boundary of @s@: each step doubles the stride and halves the orbit
--- (selecting the parity that matches the forced bit). On a singleton
--- input, returns 'Just s' if @start s@ agrees with the forced bits and
--- 'Nothing' otherwise.
+-- Let @v = log2 (strideGcd s)@ be @s@\'s stride boundary and @k@ the
+-- length of the contiguous run of forced bits at positions @v, v+1, ...@.
+-- The result is the sub-progression of @s@ whose members agree with
+-- @(zeros, ones)@ on positions @0 .. v + k - 1@. On a singleton input,
+-- returns @Just s@ if @start s@ agrees with the forced bits and 'Nothing'
+-- otherwise.
 --
--- Returns 'Nothing' precisely when @s@ has no element whose low bits
--- match @(zeros, ones)@ on the contiguous-forced-prefix. The result is
--- always a subset of @s@ ('liftForcedBitsShrinks'), preserves every
--- element of @s@ that agrees with the forced bits on positions
--- @0..v - 1@ where @v@ is the lifted stride exponent
--- ('liftForcedBitsCompleteOnLowBits'), and any element of the result is
--- a member of @s@ whose forced positions agree with @(zeros, ones)@
--- ('liftForcedBitsMember').
+-- Returns 'Nothing' precisely when @s@ has no such member — either
+-- @start@\'s fixed low bits @0 .. v - 1@ conflict with a forced bit, or no
+-- orbit index in @[0, n]@ hits the required residue. The result is always
+-- a subset of @s@ ('liftForcedBitsShrinks'), and its @start@ — hence every
+-- member, which shares the low @strideGcd@ bits — agrees with @(zeros,
+-- ones)@ on its forced low bits ('liftForcedBitsMember').
 --
 -- This step beats projecting through 'fromBitwise' followed by
 -- 'pseudoMeet': @fromBitwise@ produces a single progression whose stride
 -- is set by the lowest /free/ bit of @b@, so forced bits /above/ a free
--- bit collapse on the projection. The lift consumes them one at a time
--- as stride doublings.
+-- bit collapse on the projection. The lift consumes them as stride
+-- doublings.
 liftForcedBits ::
   (1 <= w) =>
   NatRepr w ->
@@ -4921,7 +4964,85 @@ liftForcedBits ::
   -- | @(zeros, ones)@ as produced by 'knownZerosOnesNat'.
   (Natural, Natural) ->
   Maybe (Domain w)
+-- Closed form for the bit-at-a-time stride lift. Write @stride = 2^v *
+-- mOdd@ with @mOdd@ odd, so @2^v = strideGcd s@. Every orbit member @x =
+-- start + i*stride@ has bits @0..v-1@ fixed to @start@\'s, so agreeing with
+-- the contiguous forced run means @x ≡ c (mod 2^(v+k))@ for the constant
+-- @c@ whose low @v@ bits are @start@\'s and whose bits @v..v+k-1@ are the
+-- forced values. Subtracting @start@ and dividing by @2^v@ turns this into
+-- the linear congruence @i*mOdd ≡ d (mod 2^k)@ with @d = ((c - start) mod
+-- 2^(v+k)) >> v@. As @mOdd@ is odd it is invertible mod @2^k@, so the
+-- matching orbit indices are exactly @i ≡ r (mod 2^k)@ with @r = d *
+-- mOdd^(-1) mod 2^k@. The lifted progression starts at @start + r*stride@,
+-- has stride @2^k * stride@ (which is @0 mod 2^w@, i.e. a singleton, once
+-- @v + k = w@), and step count @floor((n - r) / 2^k)@ (empty when @r > n@).
+-- The single modular inverse ('invModPow2') costs @O(w log w)@; the rest is
+-- @O(w)@.
 liftForcedBits w s (zeros, ones)
+  -- Singleton: the orbit has one value; just check it.
+  | n s == 0 =
+      if (zeros .&. start s) == 0 && (ones .&. notN (start s)) == 0
+        then Just s
+        else Nothing
+  -- @start@\'s low bits below @v@ are fixed across the whole orbit.
+  -- Conflict with any forced bit there means the joint is empty.
+  | (zeros .&. start s .&. lowMask) /= 0 = Nothing
+  | (ones  .&. notN (start s) .&. lowMask) /= 0 = Nothing
+  -- Bit @v@ itself is free: the run is empty, nothing to lift.
+  | (forced .&. g) == 0 = Just s
+  -- No orbit index in @[0, n]@ hits the required residue @r@.
+  | r > n s = Nothing
+  -- @stride@ doubled to @2^w mod 2^w = 0@: the lift collapses to a
+  -- singleton.
+  | newStride == 0 = Just (mk w newStart 1 0)
+  | otherwise = Just (mk w newStart newStride newN)
+  where
+    m = mask s
+    notN x = m `Bits.xor` x
+    g = strideGcd s             -- @2^v@
+    lowMask = g - 1             -- bits @0 .. v-1@
+    st = stride s
+    mOdd = st `divByPow2` g      -- odd part of the stride
+
+    -- @twoK = 2^k@: length of the contiguous forced run from position @v@,
+    -- found as the trailing ones of @forced@ shifted to the boundary.
+    forced  = zeros Bits..|. ones
+    hiSpan  = (m + 1) `divByPow2` g         -- @2^(w-v)@
+    wMask   = hiSpan - 1                     -- window above the boundary
+    sf      = forced `divByPow2` g           -- @forced >> v@
+    csf     = sf `Bits.xor` wMask            -- 0 bits where @forced@ is set
+    twoK    = if csf == 0 then hiSpan else lowestSetBit csf
+    k       = popCount (twoK - 1)
+
+    -- Solve @i*mOdd ≡ d (mod 2^k)@ for the matching residue @r@.
+    runLow   = g * twoK - 1                  -- @2^(v+k) - 1@
+    runRange = runLow `Bits.xor` lowMask     -- bits @v .. v+k-1@
+    cLow     = (start s .&. lowMask) Bits..|. (ones .&. runRange)
+    d        = (modSub m cLow (start s) .&. runLow) `divByPow2` g
+    r        = (d * invModPow2 mOdd twoK) .&. (twoK - 1)
+
+    newStride = (st `shiftL` k) .&. m
+    newStart  = (start s + r * st) .&. m
+    newN      = (n s - r) `divByPow2` twoK
+
+-- | /O(w^2)/. Reference implementation of 'liftForcedBits': walks the
+-- contiguous run of forced bits one at a time, doubling the stride and
+-- halving the orbit at each step. Kept as an executable specification that
+-- the closed-form 'liftForcedBits' is property-tested against
+-- ('liftForcedBitsRefinesSpec').
+--
+-- Unlike 'liftForcedBits', this walk short-circuits the moment the orbit
+-- shrinks to a singleton, so it may /retain/ a value that disagrees with a
+-- forced bit higher in the run. 'liftForcedBits' enforces the whole run, so
+-- its result is always a (possibly strict) subset of this one — never a
+-- superset.
+liftForcedBitsSpec ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w ->
+  (Natural, Natural) ->
+  Maybe (Domain w)
+liftForcedBitsSpec w s (zeros, ones)
   -- Singleton: the orbit has one value; just check it.
   | n s == 0 =
       if (zeros .&. start s) == 0 && (ones .&. notN (start s)) == 0
@@ -4957,7 +5078,7 @@ liftForcedBits w s (zeros, ones)
                      wantOdd = case (forcedZero, forcedOne) of
                        (True, _)  -> startBitV
                        (_, True)  -> Prelude.not startBitV
-                       _          -> error "liftForcedBits: unreachable"
+                       _          -> error "liftForcedBitsSpec: unreachable"
                      newStride = (stB `shiftL` 1) .&. m
                      newStart =
                        if wantOdd
@@ -5750,6 +5871,24 @@ memberToList :: Domain w -> Natural -> Property
 memberToList c x =
   proper c ==> (member c x' ==> property (x' `elem` toList c))
   where x' = modMask c x
+
+-- | 'memberArc' agrees with the general 'member' on non-wrapping
+-- progressions — those satisfying the 'arcMeetClosed' precondition
+-- @start + n·stride <= mask@ (i.e. @Prelude.not (wrapsU c)@).
+memberArcCorrect :: Domain w -> Natural -> Property
+memberArcCorrect c x =
+  proper c ==> Prelude.not (wrapsU c) ==>
+    property (memberArc c x' == member c x')
+  where x' = modMask c x
+
+-- | 'containsZero' is a sound test for @0 ∈ γ(c)@ (it holds whenever @0@ is a
+-- 'member'), and is /exact/ on non-self-wrapping progressions.
+containsZeroCorrect :: Domain w -> Property
+containsZeroCorrect c =
+  proper c ==> property (sound && exact)
+  where
+    sound = Prelude.not (member c 0) || containsZero c
+    exact = isSelfWrapping c || (containsZero c == member c 0)
 
 -- | 'toList' produces no duplicate elements.
 toListNoDuplicates :: Domain w -> Property
@@ -7611,6 +7750,23 @@ liftForcedBitsMember w s b =
             startLow = start s' .&. lowMask
         in property ((zeros .&. startLow) == 0
                   && (ones .&. (lowMask `Bits.xor` startLow)) == 0)
+
+-- | The closed-form 'liftForcedBits' refines its reference implementation
+-- 'liftForcedBitsSpec': the result set is always contained in the spec\'s
+-- (strictly so only when the spec short-circuits on a singleton mid-run, in
+-- which case the closed form drops a value that disagrees with a higher
+-- forced bit). Completeness — that no member of @s@ consistent with @b@ is
+-- dropped — is pinned separately by 'correct_refineByBits'.
+liftForcedBitsRefinesSpec ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> B.Domain w -> Property
+liftForcedBitsRefinesSpec w s b =
+  proper s ==> toInteger (mask s) == B.bvdMask b ==>
+    let zo = knownZerosOnesNat b in
+    case (liftForcedBits w s zo, liftForcedBitsSpec w s zo) of
+      (Nothing, _)          -> property True
+      (Just fast, Just ref) -> property (leqExact fast ref)
+      (Just _, Nothing)     -> property False
 
 -- | 'arcClipBitwise' shrinks: when 'Just', the result is contained in
 -- the input under 'leqExact'.
