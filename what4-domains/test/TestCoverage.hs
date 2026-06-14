@@ -361,6 +361,9 @@ checkOpOrderMirrorsStrides = do
       newWrapperNames = Set.fromList
         [ "mulPrecise", "udivPrecise", "uremPrecise"
         , "correct_mulPrecise", "correct_udivPrecise", "correct_uremPrecise"
+        -- Reduced-product-only 'size' properties (no strides counterpart).
+        , "sizeAtMostComponents", "sizeExactCorrect", "windowMarginalCount"
+        , "uniformWindowBalanced", "pinsConflictEmpty"
         ]
       mismatches = [ (sec, bad)
                    | (sec, sNames, wNames) <- shared

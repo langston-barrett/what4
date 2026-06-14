@@ -130,6 +130,11 @@ module What4.Domains.BV.StridesBitwise
   , leqPreciseCorrect
   , leqPreciseReflexive
   , sizeViaToList
+  , sizeAtMostComponents
+  , sizeExactCorrect
+  , windowMarginalCount
+  , uniformWindowBalanced
+  , pinsConflictEmpty
   -- ** Arithmetic
   , correct_neg
   , correct_add
@@ -367,11 +372,136 @@ toList :: Domain w -> [Natural]
 toList (Domain s b) =
   [ x | x <- S.toList s, B.member b (toInteger x) ]
 
--- | Cardinality of the joint set: orbit elements that also satisfy
--- the bitwise component. Bounded above by both 'S.size (strides c)'
--- and the bitwise component's cardinality.
+-- | Cardinality of the joint set: orbit elements that also satisfy the
+-- bitwise component, bounded above by both 'S.size' of the strides
+-- component and 'B.size' of the bitwise component. Always /O(w)/.
+--
+-- __Exactness via the orbit's uniform window.__ Write @2^k =
+-- gcd(stride, 2^w)@ and @2^s@ for the largest power of two dividing the
+-- orbit length @n+1@. Then across the orbit:
+--
+--   * bits @[0, k)@ are /constant/ (every element shares @start@\'s low
+--     bits), and
+--   * bits @[k, k+s)@ are /uniform/: each of the @2^s@ combinations occurs
+--     in exactly @(n+1)\/2^s@ elements, jointly and independently.
+--
+-- (Bits @[0,k)@ are pinned by the stride; bits @[k,k+s)@ cycle with full
+-- period because @stride\/2^k@ is odd, and @2^s | n+1@ makes the cycle
+-- divide the orbit evenly.)
+--
+-- A /cut bit/ is a position that @b@ pins (forces to 0 or 1) but @s@
+-- leaves varying across the orbit. The name is what it does to the count:
+-- it is exactly the bits where @b@\'s constraint actually removes orbit
+-- elements. A bit @b@ pins that @s@ /also/ pins adds no constraint (every
+-- orbit element already agrees, or none does — a conflict, see below); a
+-- bit @b@ leaves free constrains nothing. So only the cut bits thin the
+-- orbit, and over a uniform window each one independently keeps half the
+-- elements.
+--
+-- Hence if every cut bit lies in the uniform window @[k, k+s)@, the answer
+-- is __exact__: @(n+1) \/ 2^(number of cut bits)@. This subsumes both the
+-- /entailment/ case (no cut bits ⇒ @'S.size' s@) and the /full coset/ case
+-- (@s = w-k@, the window is every high bit), and additionally nails many
+-- partial orbits. A forced bit conflicting with one @s@ pins makes the
+-- joint empty (@0@).
+--
+-- Otherwise — a cut bit lies above the uniform window, where the orbit
+-- shears across bit positions — the exact count @|AP ∩ bit-cube|@ has no
+-- closed form and is exponential in @w@. Rather than enumerate the orbit we
+-- return a sound /over-approximation/: the minimum of @'S.size' s@,
+-- @'B.size' b@, @2^(bits free in both components)@, and the /window
+-- marginal/ 'windowMarginal'. The last still exploits the orbit's balance:
+-- the in-window cut bits each exactly halve the count, so
+-- @(n+1)\/2^(in-window cut bits)@ is the exact number of orbit elements
+-- matching the in-window forced bits, hence an upper bound on the joint set
+-- (which additionally honors the above-window bits). This is typically far
+-- tighter than the @2^(bits free in both)@ ceiling.
 size :: Domain w -> Natural
-size c = fromIntegral (length (toList c))
+size c@(Domain s b) = case sizeExactMaybe c of
+  Just k  -> k
+  Nothing -> minimum [S.size s, fromInteger (B.size b), jointBound, windowMarginal c]
+  where
+    m          = B.bvdMask b
+    (loB, hiB) = B.bitbounds b
+    unknownB   = loB `Bits.xor` hiB
+    (zerosS0, onesS0) = S.forcedBits s
+    unknownS   = m `Bits.xor` (toInteger zerosS0 Bits..|. toInteger onesS0)
+    -- Over-approximation for the non-uniform case: every joint element is
+    -- pinned on every bit either component forces, so only bits free in
+    -- both can vary.
+    jointBound = Bits.bit (Bits.popCount (unknownS Bits..&. unknownB))
+
+-- | /O(w)/. The exact joint cardinality when the orbit's structure pins it
+-- down, or 'Nothing' when only an over-approximation is available. Exact in
+-- two cases: @s@ and @b@ pin a bit to opposite values ('pinsConflict' ⇒ the
+-- joint is empty), or every bit @b@ forces that @s@ leaves varying (a /cut/
+-- bit) lies within @s@'s 'uniformWindowMask' — each such bit independently
+-- halves the uniformly-distributed count, giving @(n+1) \/ 2^(cut bits)@.
+-- That second case is exactly when the 'windowMarginal' (which always counts
+-- elements matching the in-window forced bits) honors /every/ forced bit, so
+-- the marginal is the true count. See 'sizeExactCorrect'.
+sizeExactMaybe :: Domain w -> Maybe Natural
+sizeExactMaybe c@(Domain s b)
+  | pinsConflict s b = Just 0
+  | cutting Bits..&. Bits.complement window == 0 = Just (windowMarginal c)
+  | otherwise = Nothing
+  where
+    m          = B.bvdMask b
+    (loB, hiB) = B.bitbounds b
+    unknownB   = loB `Bits.xor` hiB
+    forcedB    = m `Bits.xor` unknownB                 -- bits @b@ pins
+    (zerosS0, onesS0) = S.forcedBits s
+    unknownS   = m `Bits.xor` (toInteger zerosS0 Bits..|. toInteger onesS0)
+    cutting    = forcedB Bits..&. unknownS             -- @b@ pins, @s@ varies
+    window     = toInteger (uniformWindowMask s)
+
+-- | /O(w)/. The exact number of orbit elements (of the strides component)
+-- that satisfy the bitwise component's forced bits __that lie in the uniform
+-- window__ @[0, k+s)@ — ignoring any forced bits above it. Because the orbit
+-- is balanced over the window, each in-window /cut/ bit (one @b@ forces and
+-- @s@ leaves varying) independently halves the count, giving
+-- @(n+1) \/ 2^(in-window cut bits)@. This counts a superset of the joint set
+-- (the joint set additionally honors the above-window forced bits), so it is
+-- a sound upper bound on 'size', and it is /exact/ when no cut bit lies above
+-- the window. See 'windowMarginalCount'.
+windowMarginal :: Domain w -> Natural
+windowMarginal (Domain s b) = (S.n s + 1) `Bits.shiftR` Bits.popCount cutWindow
+  where
+    m          = B.bvdMask b
+    (loB, hiB) = B.bitbounds b
+    unknownB   = loB `Bits.xor` hiB
+    forcedB    = m `Bits.xor` unknownB
+    (zerosS0, onesS0) = S.forcedBits s
+    unknownS   = m `Bits.xor` (toInteger zerosS0 Bits..|. toInteger onesS0)
+    cutWindow  = forcedB Bits..&. unknownS Bits..&. toInteger (uniformWindowMask s)
+
+-- | /O(w)/. The low-bit mask of positions @[0, k+s)@ over which the strides
+-- orbit is balanced: @2^k = gcd(stride, 2^w)@ pins bits @[0, k)@ constant,
+-- and @2^s@ — the largest power of two dividing the orbit length @n+1@ —
+-- makes bits @[k, k+s)@ take every combination equally often. See
+-- 'uniformWindowBalanced'.
+uniformWindowMask :: S.Domain w -> Natural
+uniformWindowMask s = g * lb - 1
+  where
+    st  = S.stride s
+    g   = st `Bits.xor` (st Bits..&. (st - 1))   -- @2^k@
+    lb  = np1 `Bits.xor` (np1 Bits..&. S.n s)    -- @2^s@
+    np1 = S.n s + 1
+
+-- | /O(w)/. Whether @s@ and @b@ pin some bit to opposite values, in which
+-- case the joint set is empty (see 'pinsConflictEmpty'). Sound but not
+-- complete: 'False' does not imply a nonempty joint, since 'S.forcedBits'
+-- under-approximates @s@'s constant bits.
+pinsConflict :: S.Domain w -> B.Domain w -> Bool
+pinsConflict s b =
+  loB Bits..&. zerosS /= 0 || zerosB Bits..&. onesS /= 0
+  where
+    m          = B.bvdMask b
+    (loB, hiB) = B.bitbounds b
+    zerosB     = m `Bits.xor` hiB
+    (zerosS0, onesS0) = S.forcedBits s
+    zerosS     = toInteger zerosS0
+    onesS      = toInteger onesS0
 
 -- | Lattice ordering (cheap approximation): conjunction of per-component
 -- 'leq's. Both must hold because the strides component does not in general
@@ -789,10 +919,72 @@ leqPreciseCorrect _w a b =
 leqPreciseReflexive :: (1 <= w) => NatRepr w -> Domain w -> Property
 leqPreciseReflexive _w a = proper a ==> property (leqPrecise a a)
 
+-- | Unlike the strides domain's exact 'S.size', the reduced product's
+-- 'size' is a sound /over-approximation/ of the joint cardinality: exact
+-- on the fast-path cases, an upper bound otherwise. So we check @>=@
+-- rather than @==@ against the enumerated count.
 sizeViaToList :: (1 <= w) => NatRepr w -> Domain w -> Property
 sizeViaToList _w c =
   proper c ==>
-    property (toInteger (size c) == toInteger (length (toList c)))
+    property (toInteger (size c) >= toInteger (length (toList c)))
+
+-- | 'size' never exceeds either component's cardinality (the two
+-- cardinality ceilings the 'minimum' in 'size' rests on).
+sizeAtMostComponents :: (1 <= w) => NatRepr w -> Domain w -> Property
+sizeAtMostComponents _w c =
+  proper c ==>
+    property (size c <= S.size (strides c)
+           && toInteger (size c) <= B.size (bitwise c))
+
+-- | Specification of 'sizeExactMaybe': when it commits to a count, that
+-- count is the true joint cardinality.
+sizeExactCorrect :: (1 <= w) => NatRepr w -> Domain w -> Property
+sizeExactCorrect _w c =
+  proper c ==>
+    case sizeExactMaybe c of
+      Nothing -> property True
+      Just k  -> property (toInteger k == toInteger (length (toList c)))
+
+-- | Specification of 'windowMarginal': it is exactly the number of orbit
+-- elements that match the bitwise component's forced bits lying inside the
+-- uniform window (above-window forced bits are ignored).
+windowMarginalCount :: (1 <= w) => NatRepr w -> Domain w -> Property
+windowMarginalCount _w c@(Domain s b) =
+  proper c ==>
+    let m          = B.bvdMask b
+        (loB, hiB) = B.bitbounds b
+        forcedB    = m `Bits.xor` (loB `Bits.xor` hiB)
+        fw         = forcedB Bits..&. toInteger (uniformWindowMask s)
+        target     = loB Bits..&. fw
+    in property
+         (toInteger (windowMarginal c)
+            == toInteger (length [ x | x <- S.toList s, (toInteger x Bits..&. fw) == target ]))
+
+-- | Specification of 'uniformWindowMask': the strides orbit hits every
+-- combination of those low bits the same number of times.
+uniformWindowBalanced :: (1 <= w) => NatRepr w -> Domain w -> Property
+uniformWindowBalanced _w c =
+  proper c ==>
+    let s      = strides c
+        wm     = uniformWindowMask s
+        counts = map length (List.group (List.sort [ x Bits..&. wm | x <- S.toList s ]))
+    in property (allEqual counts)
+  where
+    allEqual []       = True
+    allEqual (z : zs) = all (== z) zs
+
+-- | Specification of 'pinsConflict': when the components pin a bit to
+-- opposite values, no orbit element satisfies the bitwise component. The
+-- strides and bitwise parts are drawn from independent products so the
+-- conflicting case actually arises.
+pinsConflictEmpty ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+pinsConflictEmpty _w c1 c2 =
+  proper c1 ==> proper c2 ==>
+    let s = strides c1
+        b = bitwise c2
+    in pinsConflict s b ==>
+         property (Prelude.not (any (\x -> B.member b (toInteger x)) (S.toList s)))
 
 -- ------------------------------------------------------------------
 -- ** Arithmetic
