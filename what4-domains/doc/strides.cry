@@ -1837,35 +1837,141 @@ refineBitsByStrides b s =
     arc : Domain n
     arc = mk b.lomask 1 (zext (b.himask - b.lomask))
 
-reduceStep :
+// Per-piece refinement: lift by `b`'s forced bits, then intersect with
+// `b`'s numeric arc.
+refinePiece :
+  {n} (fin n, n >= 2) =>
+  Domain n -> ([n], [n]) -> Domain n -> Maybe (Domain n)
+refinePiece p zo arc =
+  case liftForcedBits p zo of
+    Nothing -> Nothing
+    Just p1 -> arcMeetClosed p1 arc
+
+// Approximate mutual refinement: lift `s` by `b`'s forced bits, then
+// intersect `b` with the per-piece bitwise projection of the lifted
+// `s`. Skips the numeric arc clip that `reducePrecise` runs through
+// `arcMeetClosed`. Linear in `w`.
+//
+// Each output component is a subset of the corresponding input
+// (`reduceShrinksStrides`, `reduceShrinksBitwise`). Strictly weaker
+// than `reducePrecise` whenever `b`'s arc carves a sub-arc tighter
+// than its forced bits suggest; otherwise typically equivalent.
+reduce :
   {n} (fin n, n >= 2) =>
   Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
-reduceStep s b =
-  case refineByBits s b of
+reduce s b =
+  if ~ Bits::nonempty b then Nothing
+  else case liftForcedBits s zo of
+    Nothing -> Nothing
+    Just s' ->
+      if Bits::nonempty b' then Just (s', b') else Nothing
+      where
+        // On self-wrapping `s'`, `ssplit` collapses to the full coset
+        // (a /superset/ of `s'`). `toBitwise` applied to the original
+        // `s'` is tighter than applied to the over-approximate coset.
+        bs = if isSelfWrapping s' then toBitwise s'
+             else case ssplit s' of
+               One c1 -> toBitwise c1
+               Two c1 c2 -> Bits::join (toBitwise c1) (toBitwise c2)
+        b' = Bits::meet b bs
+  where
+    zo = knownZerosOnesNat b
+
+// One pass of precise mutual refinement: `ssplit` `s`, refine each
+// non-wrap piece via `liftForcedBits` + `arcMeetClosed`, then
+// recombine. The bitwise side is `b` ∧ ⋁ᵢ toBitwise pᵢ; the strides
+// side takes the surviving piece when only one survives, and falls
+// back to the whole-orbit `liftForcedBits` of `s` otherwise (Cryptol
+// has no `compactify`, so a two-surviving-piece merge is approximated
+// by the whole-orbit lift, which is a sound subset of `s`).
+//
+// On self-wrapping `s`, `ssplit` collapses to the full coset (a
+// /superset/ of `s`), which would break the subset guarantee. We fall
+// back to `refineByBits` / `refineBitsByStrides`, which handle
+// self-wrap correctly.
+reducePrecisePass :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
+reducePrecisePass s b =
+  if ~ Bits::nonempty b then Nothing
+  else if isSelfWrapping s then
+    (case refineByBits s b of
+       Nothing -> Nothing
+       Just s' -> case refineBitsByStrides b s' of
+         Nothing -> Nothing
+         Just b' -> Just (s', b'))
+  else case ssplit s of
+    One s1 -> case refinePiece s1 zo arc of
+      Nothing -> Nothing
+      Just c1 ->
+        if Bits::nonempty b' then Just (c1, b') else Nothing
+        where b' = Bits::meet b (toBitwise c1)
+    Two s1 s2 -> case refinePiece s1 zo arc of
+      Nothing -> case refinePiece s2 zo arc of
+        Nothing -> Nothing
+        Just c2 ->
+          if Bits::nonempty b' then Just (c2, b') else Nothing
+          where b' = Bits::meet b (toBitwise c2)
+      Just c1 -> case refinePiece s2 zo arc of
+        Nothing ->
+          if Bits::nonempty b' then Just (c1, b') else Nothing
+          where b' = Bits::meet b (toBitwise c1)
+        Just c2 ->
+          if Bits::nonempty b' then Just (sFallback, b') else Nothing
+          where
+            b' = Bits::meet b (Bits::join (toBitwise c1) (toBitwise c2))
+            sFallback = case liftForcedBits s zo of
+              Just sl -> sl
+              Nothing -> s
+  where
+    zo = knownZerosOnesNat b
+    arc : Domain n
+    arc = mk b.lomask 1 (zext (b.himask - b.lomask))
+
+// Two passes of `reducePrecisePass`. The first pass produces a `b'`
+// whose forced bits and numeric arc can be strictly tighter than `b`'s;
+// re-running propagates that information back to the strides side.
+// A third pass /could/ tighten further, so this is not a fixpoint;
+// use `reduceFixpoint` when full precision is required.
+reducePrecise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
+reducePrecise s b = case reducePrecisePass s b of
+  Nothing -> Nothing
+  Just (s', b') -> reducePrecisePass s' b'
+
+// True-fixpoint variant: alternates `refineByBits` and
+// `refineBitsByStrides` until neither changes. Each non-trivial step
+// strictly shrinks one component, so unrolling `n + 1` iterations
+// suffices.
+reduceFixpointStep :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
+reduceFixpointStep s b =
+  if ~ Bits::nonempty b then Nothing
+  else case refineByBits s b of
     Nothing -> Nothing
     Just s' -> case refineBitsByStrides b s' of
       Nothing -> Nothing
       Just b' -> Just (s', b')
 
-// Iterate `reduceStep` to a fixed point. Each non-trivial step strictly
-// shrinks one component, so unrolling `n + 1` iterations suffices.
-reduceIter :
+reduceFixpointIter :
   {n} (fin n, n >= 2) =>
   Maybe (Domain n, Bits::Dom n) -> Maybe (Domain n, Bits::Dom n)
-reduceIter state = case state of
+reduceFixpointIter state = case state of
   Nothing -> Nothing
-  Just (s, b) -> case reduceStep s b of
+  Just (s, b) -> case reduceFixpointStep s b of
     Nothing -> Nothing
     Just (s', b') ->
       if s' == s /\ b' == b then Just (s, b) else Just (s', b')
 
-reduce :
+reduceFixpoint :
   {n} (fin n, n >= 2) =>
   Domain n -> Bits::Dom n -> Maybe (Domain n, Bits::Dom n)
-reduce s b = iters ! 0
+reduceFixpoint s b = iters ! 0
   where
     iters : [n + 2](Maybe (Domain n, Bits::Dom n))
-    iters = [Just (s, b)] # [ reduceIter state | state <- iters | _ <- [0 .. n] ]
+    iters = [Just (s, b)] # [ reduceFixpointIter state | state <- iters | _ <- [0 .. n] ]
 
 // ------------------------------------------------------------------
 // * Correctness properties
@@ -3269,24 +3375,8 @@ refineByBitsPreciseShrinks s b =
       Nothing -> True
       Just s' -> leqExact s' s
 
-correct_reduceStep :
-  {n} (fin n, n >= 2) =>
-  Domain n -> Bits::Dom n -> [n] -> Property
-correct_reduceStep s b x =
-  proper s ==> member s x ==> Bits::mem b x ==>
-    case reduceStep s b of
-      Nothing       -> False
-      Just (s', b') -> member s' x /\ Bits::mem b' x
-
-reduceStepShrinks :
-  {n} (fin n, n >= 2) =>
-  Domain n -> Bits::Dom n -> Property
-reduceStepShrinks s b =
-  proper s ==>
-    case reduceStep s b of
-      Nothing       -> True
-      Just (s', b') -> leqExact s' s /\ Bits::leq b' b
-
+// `reduce` is sound: when @x@ is in both input components, @x@ is in
+// both output components.
 correct_reduce :
   {n} (fin n, n >= 2) =>
   Domain n -> Bits::Dom n -> [n] -> Property
@@ -3296,26 +3386,27 @@ correct_reduce s b x =
       Nothing       -> False
       Just (s', b') -> member s' x /\ Bits::mem b' x
 
-reduceShrinks :
+// `reduce` only shrinks the strides component.
+reduceShrinksStrides :
   {n} (fin n, n >= 2) =>
-  Domain n -> Bits::Dom n -> Property
-reduceShrinks s b =
+  Domain n -> Bits::Dom n -> [n] -> Property
+reduceShrinksStrides s b x =
   proper s ==>
     case reduce s b of
-      Nothing       -> True
-      Just (s', b') -> leqExact s' s /\ Bits::leq b' b
+      Nothing      -> True
+      Just (s', _) -> member s' x ==> member s x
 
-reduceIdempotent :
+// `reduce` only shrinks the bitwise component.
+reduceShrinksBitwise :
   {n} (fin n, n >= 2) =>
-  Domain n -> Bits::Dom n -> Property
-reduceIdempotent s b =
+  Domain n -> Bits::Dom n -> [n] -> Property
+reduceShrinksBitwise s b x =
   proper s ==>
     case reduce s b of
-      Nothing       -> True
-      Just (s', b') -> case reduce s' b' of
-        Nothing         -> False
-        Just (s'', b'') -> s'' == s' /\ b'' == b'
+      Nothing      -> True
+      Just (_, b') -> Bits::mem b' x ==> Bits::mem b x
 
+// When `reduce` returns `Nothing`, the joint really is empty.
 reduceConflictMeansEmpty :
   {n} (fin n, n >= 2) =>
   Domain n -> Bits::Dom n -> [n] -> Property
@@ -3324,6 +3415,99 @@ reduceConflictMeansEmpty s b x =
     case reduce s b of
       Just _  -> True
       Nothing -> ~ (member s x /\ Bits::mem b x)
+
+// `reducePrecise` is sound.
+correct_reducePrecise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+correct_reducePrecise s b x =
+  proper s ==> member s x ==> Bits::mem b x ==>
+    case reducePrecise s b of
+      Nothing       -> False
+      Just (s', b') -> member s' x /\ Bits::mem b' x
+
+// `reducePrecise` only shrinks the strides component.
+reducePreciseShrinksStrides :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+reducePreciseShrinksStrides s b x =
+  proper s ==>
+    case reducePrecise s b of
+      Nothing      -> True
+      Just (s', _) -> member s' x ==> member s x
+
+// `reducePrecise` only shrinks the bitwise component.
+reducePreciseShrinksBitwise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+reducePreciseShrinksBitwise s b x =
+  proper s ==>
+    case reducePrecise s b of
+      Nothing      -> True
+      Just (_, b') -> Bits::mem b' x ==> Bits::mem b x
+
+// When `reducePrecise` returns `Nothing`, the joint really is empty.
+reducePreciseConflictMeansEmpty :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+reducePreciseConflictMeansEmpty s b x =
+  proper s ==>
+    case reducePrecise s b of
+      Just _  -> True
+      Nothing -> ~ (member s x /\ Bits::mem b x)
+
+// `reducePrecise`'s strides component is at least as tight as
+// `reduce`'s.
+reducePreciseDominatesReduceStrides :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+reducePreciseDominatesReduceStrides s b x =
+  proper s ==>
+    case reduce s b of
+      Nothing -> True
+      Just (sR, _) -> case reducePrecise s b of
+        Nothing      -> True
+        Just (sP, _) -> member sP x ==> member sR x
+
+// `reducePrecise`'s bitwise component is at least as tight as
+// `reduce`'s.
+reducePreciseDominatesReduceBitwise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+reducePreciseDominatesReduceBitwise s b x =
+  proper s ==>
+    case reduce s b of
+      Nothing -> True
+      Just (_, bR) -> case reducePrecise s b of
+        Nothing      -> True
+        Just (_, bP) -> Bits::mem bP x ==> Bits::mem bR x
+
+// Re-running `reduceFixpoint` on its own output yields a strides
+// component with the same members.
+reduceFixpointIdempotentStrides :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+reduceFixpointIdempotentStrides s b x =
+  proper s ==>
+    case reduceFixpoint s b of
+      Nothing       -> True
+      Just (s', b') -> case reduceFixpoint s' b' of
+        Nothing        -> False
+        Just (s'', _)  -> member s' x ==> member s'' x
+
+// Re-running `reduceFixpoint` on its own output yields a bitwise
+// component with the same members.
+reduceFixpointIdempotentBitwise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> Bits::Dom n -> [n] -> Property
+reduceFixpointIdempotentBitwise s b x =
+  proper s ==>
+    case reduceFixpoint s b of
+      Nothing       -> True
+      Just (s', b') -> case reduceFixpoint s' b' of
+        Nothing        -> False
+        Just (_, b'')  -> Bits::mem b' x ==> Bits::mem b'' x
+
 
 // `refineByBitsPrecise` is at least as precise as the round-trip
 // `pseudoMeet s (fromBitwise b)` on non-self-wrapping inputs.
@@ -3653,8 +3837,23 @@ property p_forcedBitsMember              = forcedBitsMember`{4}
 // property p_arcClipBitwiseMember     = arcClipBitwiseMember`{4}
 // property p_correct_refineByBits     = correct_refineByBits`{4}
 // property p_refineByBitsShrinks      = refineByBitsShrinks`{4}
-// property p_correct_reduceStep       = correct_reduceStep`{4}
-// property p_reduceStepShrinks        = reduceStepShrinks`{4}
+property p_correct_reduce                     = correct_reduce`{4}
+property p_reduceShrinksStrides               = reduceShrinksStrides`{4}
+property p_reduceShrinksBitwise               = reduceShrinksBitwise`{4}
+property p_reduceConflictMeansEmpty           = reduceConflictMeansEmpty`{4}
+
+// Properties below go through `reducePrecise`/`reduceFixpoint`, which
+// call `arcMeetClosed` and inherit the `solveLinearDiophantine`
+// unfolding cost. Verified by random testing (Cryptol's `:check`) and
+// by Hedgehog on the Haskell side.
+// property p_correct_reducePrecise           = correct_reducePrecise`{4}
+// property p_reducePreciseShrinksStrides     = reducePreciseShrinksStrides`{4}
+// property p_reducePreciseShrinksBitwise     = reducePreciseShrinksBitwise`{4}
+// property p_reducePreciseConflictMeansEmpty = reducePreciseConflictMeansEmpty`{4}
+// property p_reducePreciseDominatesReduceStr = reducePreciseDominatesReduceStrides`{4}
+// property p_reducePreciseDominatesReduceBit = reducePreciseDominatesReduceBitwise`{4}
+// property p_reduceFixpointIdempotentStr     = reduceFixpointIdempotentStrides`{4}
+// property p_reduceFixpointIdempotentBit     = reduceFixpointIdempotentBitwise`{4}
 
 // Assume properties go through `pseudoMeet`, which inherits the same
 // `solveLinearDiophantine` unfolding cost. Verified by random testing

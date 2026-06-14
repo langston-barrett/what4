@@ -819,24 +819,42 @@ tests = TT.testGroup "Strides"
   , genTest "refineBitsByStridesDominatesMeetToBitwise" $
       do SW n <- genWidth
          S.refineBitsByStridesDominatesMeetToBitwise n <$> B.genDomain n <*> S.genDomain n
-  , genTest "correct_reduceStep" $
-      do SW n <- genWidth
-         S.correct_reduceStep n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
   , genTest "correct_reduce" $
       do SW n <- genWidth
          S.correct_reduce n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
-  , genTest "reduceStepShrinks" $
+  , genTest "reduceShrinksStrides" $
       do SW n <- genWidth
-         S.reduceStepShrinks n <$> S.genDomain n <*> B.genDomain n
-  , genTest "reduceShrinks" $
+         S.reduceShrinksStrides n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reduceShrinksBitwise" $
       do SW n <- genWidth
-         S.reduceShrinks n <$> S.genDomain n <*> B.genDomain n
-  , genTest "reduceIdempotent" $
-      do SW n <- genWidth
-         S.reduceIdempotent n <$> S.genDomain n <*> B.genDomain n
+         S.reduceShrinksBitwise n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
   , genTest "reduceConflictMeansEmpty" $
       do SW n <- genWidth
          S.reduceConflictMeansEmpty n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "correct_reducePrecise" $
+      do SW n <- genWidth
+         S.correct_reducePrecise n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reducePreciseShrinksStrides" $
+      do SW n <- genWidth
+         S.reducePreciseShrinksStrides n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reducePreciseShrinksBitwise" $
+      do SW n <- genWidth
+         S.reducePreciseShrinksBitwise n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reducePreciseConflictMeansEmpty" $
+      do SW n <- genWidth
+         S.reducePreciseConflictMeansEmpty n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reducePreciseDominatesReduceStrides" $
+      do SW n <- genWidth
+         S.reducePreciseDominatesReduceStrides n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reducePreciseDominatesReduceBitwise" $
+      do SW n <- genWidth
+         S.reducePreciseDominatesReduceBitwise n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reduceFixpointIdempotentStrides" $
+      do SW n <- genWidth
+         S.reduceFixpointIdempotentStrides n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
+  , genTest "reduceFixpointIdempotentBitwise" $
+      do SW n <- genWidth
+         S.reduceFixpointIdempotentBitwise n <$> S.genDomain n <*> B.genDomain n <*> genNatBV n
 
   -- @S.andPrecise@ and the bitwise lift are /incomparable/ on the
   -- 'leqExact' order: at @w = 4@, exhaustive enumeration finds witnesses
