@@ -168,6 +168,7 @@ library
 
   exposed-modules:
     What4.Domains.BV
+    What4.Domains.BV.Bounds
     What4.Domains.BV.CLP
     What4.Domains.BV.Arith
     What4.Domains.BV.Bitwise
