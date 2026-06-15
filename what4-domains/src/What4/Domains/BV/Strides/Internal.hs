@@ -17,18 +17,17 @@ module What4.Domains.BV.Strides.Internal
 
 import           Control.Exception (assert)
 
--- | /O(log(min(a, b)))/. @solveLinearDiophantine a b c a_max b_max@
+import           What4.Domains.Arithmetic (egcd)
+
+-- | /O(G(w))/. @solveLinearDiophantine a b c a_max b_max@
 -- finds nonnegative integers @x, y@ with @0 <= x <= a_max@,
 -- @0 <= y <= b_max@ such that
 --
 -- > a * x - b * y = c
 --
 -- Assumes @a > 0@, @b > 0@, and @c /= 0@.  Returns 'Nothing' when no
--- such pair exists; when one does, returns the lex-least solution.
---
--- The cost is dominated by the 'eGCD' call. When called from
--- 'What4.Domains.BV.Strides.pseudoMeet' on width-@w@ inputs, both
--- @a@ and @b@ are bounded by @2^w@, giving /O(log(2^w)) = O(w)/.
+-- such pair exists; when one does, returns the lex-least solution. The cost is
+-- dominated by the 'eGCD' call (a true subquadratic extended gcd).
 --
 -- == Proof of correctness
 --
@@ -157,34 +156,25 @@ solveLinearDiophantine a b c a_max b_max
     t_upper   = min (floorDivPos (a_max * g - nc) b)
                     (floorDivPos (b_max * g - mc) a)
 
--- | /O(log(min(a, b)))/. Extended Euclidean algorithm. @eGCD a b@
+-- | /O(G(w))/. Extended Euclidean algorithm. @eGCD a b@
 -- returns @(g, n, m)@ such that @n * a + m * b = g@ and @g >= 0@.
 -- When @a@ and @b@ are both nonzero, @g@ is @gcd a b@.
 --
--- The Fibonacci bound on the Euclidean iteration count gives
--- /O(log(min(a, b)))/. For width-@w@ inputs both bounded by @2^w@,
--- this is /O(log(2^w)) = O(w)/.
---
--- Adapted from the Wikibooks reference implementation:
--- <http://en.wikibooks.org/wiki/Algorithm_Implementation/Mathematics/Extended_Euclidean_algorithm>
+-- Delegates to 'egcd', which on GHC 9.0+ is the GMP-backed
+-- 'GHC.Num.Integer.integerGcde#', a true subquadratic extended gcd (the @Õ(w)@
+-- G(w) class), and on older compilers a hand-rolled Euclid. Bézout coefficients
+-- are not unique; only the @n * a + m * b = g@ invariant is promised (the
+-- property 'eGCD' is tested against), so callers must not depend on the specific
+-- @(n, m)@ returned.
 eGCD :: Integer -> Integer -> (Integer, Integer, Integer)
-eGCD a0 b0 =
-  case go a0 b0 of
-    (g, n, m)
-      | g < 0     -> (-g, -n, -m)
-      | otherwise -> (g, n, m)
-  where
-    go a 0 = (a, 1, 0)
-    go a b =
-      case go b (rem a b) of
-        (g, x, y) -> (g, y, x - (a `quot` b) * y)
+eGCD = egcd
 
--- | /O(1)/. @ceilDivPos x y@ is @ceiling(x \/ y)@ as integers. Requires @y > 0@.
+-- | /O(M(w))/. @ceilDivPos x y@ is @ceiling(x \/ y)@ as integers. Requires @y > 0@.
 ceilDivPos :: Integer -> Integer -> Integer
 ceilDivPos x y = assert (y > 0) (negate (negate x `div` y))
 {-# INLINE ceilDivPos #-}
 
--- | /O(1)/. @floorDivPos x y@ is @floor(x \/ y)@ as integers. Requires @y > 0@.
+-- | /O(M(w))/. @floorDivPos x y@ is @floor(x \/ y)@ as integers. Requires @y > 0@.
 floorDivPos :: Integer -> Integer -> Integer
 floorDivPos x y = assert (y > 0) (x `div` y)
 {-# INLINE floorDivPos #-}

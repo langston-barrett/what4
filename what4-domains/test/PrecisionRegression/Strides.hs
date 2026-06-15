@@ -69,6 +69,10 @@ results =
   , latticeMaybeResult stridesEnum "assumeSle" (S.assumeSle w4) cAssumeSle
   , latticeMaybeResult stridesEnum "assumeSgt" (S.assumeSgt w4) cAssumeSgt
   , latticeMaybeResult stridesEnum "assumeSge" (S.assumeSge w4) cAssumeSge
+  , latticeMaybeResult stridesEnum "assumeSltPrecise" (S.assumeSltPrecise w4) cAssumeSlt
+  , latticeMaybeResult stridesEnum "assumeSlePrecise" (S.assumeSlePrecise w4) cAssumeSle
+  , latticeMaybeResult stridesEnum "assumeSgtPrecise" (S.assumeSgtPrecise w4) cAssumeSgt
+  , latticeMaybeResult stridesEnum "assumeSgePrecise" (S.assumeSgePrecise w4) cAssumeSge
   ]
 
 csvPath :: FilePath
