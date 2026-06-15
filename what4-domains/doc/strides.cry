@@ -1638,8 +1638,20 @@ enum Sign = Pos | Neg
 pieceSign : {n} (fin n, n >= 2) => Domain n -> Sign
 pieceSign c = if c.start @ 0 then Neg else Pos
 
+// The default signed assumes clamp surviving pieces against `a` with the
+// cheap `leq`; the `*Precise` variants use the exact `leqExact`. Both clamps
+// are sound (they only ever fall back to the looser operand), so the variants
+// differ in precision, not soundness.
 assumeSlt : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
-assumeSlt = assumeSignedBy sltCase
+assumeSlt = assumeSltBy leq
+
+assumeSltPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeSltPrecise = assumeSltBy leqExact
+
+assumeSltBy :
+  {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Bit) -> Domain n -> Domain n -> Maybe (Domain n)
+assumeSltBy leqOp = assumeSignedBy leqOp sltCase
   where
     sltCase ai bj sa sb = case sa of
       Pos -> case sb of
@@ -1650,7 +1662,15 @@ assumeSlt = assumeSignedBy sltCase
         Neg -> assumeUlt ai bj
 
 assumeSle : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
-assumeSle = assumeSignedBy sleCase
+assumeSle = assumeSleBy leq
+
+assumeSlePrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeSlePrecise = assumeSleBy leqExact
+
+assumeSleBy :
+  {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Bit) -> Domain n -> Domain n -> Maybe (Domain n)
+assumeSleBy leqOp = assumeSignedBy leqOp sleCase
   where
     sleCase ai bj sa sb = case sa of
       Pos -> case sb of
@@ -1661,7 +1681,15 @@ assumeSle = assumeSignedBy sleCase
         Neg -> assumeUle ai bj
 
 assumeSgt : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
-assumeSgt = assumeSignedBy sgtCase
+assumeSgt = assumeSgtBy leq
+
+assumeSgtPrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeSgtPrecise = assumeSgtBy leqExact
+
+assumeSgtBy :
+  {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Bit) -> Domain n -> Domain n -> Maybe (Domain n)
+assumeSgtBy leqOp = assumeSignedBy leqOp sgtCase
   where
     sgtCase ai bj sa sb = case sa of
       Pos -> case sb of
@@ -1672,7 +1700,15 @@ assumeSgt = assumeSignedBy sgtCase
         Neg -> assumeUgt ai bj
 
 assumeSge : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
-assumeSge = assumeSignedBy sgeCase
+assumeSge = assumeSgeBy leq
+
+assumeSgePrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeSgePrecise = assumeSgeBy leqExact
+
+assumeSgeBy :
+  {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Bit) -> Domain n -> Domain n -> Maybe (Domain n)
+assumeSgeBy leqOp = assumeSignedBy leqOp sgeCase
   where
     sgeCase ai bj sa sb = case sa of
       Pos -> case sb of
@@ -1688,19 +1724,20 @@ assumeSge = assumeSignedBy sgeCase
 // `pseudoJoin` across `aᵢ` and clamp by `a` itself.
 assumeSignedBy :
   {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Bit) ->
   (Domain n -> Domain n -> Sign -> Sign -> Maybe (Domain n)) ->
   Domain n -> Domain n -> Maybe (Domain n)
-assumeSignedBy perPair a b =
+assumeSignedBy leqOp perPair a b =
   case finalRaw of
     Nothing -> Nothing
-    Just c -> Just (if leqExact c a then c else a)
+    Just c -> Just (if leqOp c a then c else a)
   where
     aPieces : [4](Maybe (Domain n))
     aPieces = signPieces a
     bPieces : [4](Maybe (Domain n))
     bPieces = signPieces b
     perAi : [4](Maybe (Domain n))
-    perAi = [ combinePieceContribsMaybe ai
+    perAi = [ combinePieceContribsMaybe leqOp ai
                 [ pairContrib perPair ai bj | bj <- bPieces ]
             | ai <- aPieces
             ]
@@ -1722,13 +1759,14 @@ pairContrib perPair mai mbj = case mai of
 // `pseudoJoin` and clamping by `aᵢ`.
 combinePieceContribsMaybe :
   {n} (fin n, n >= 2) =>
+  (Domain n -> Domain n -> Bit) ->
   Maybe (Domain n) -> [4](Maybe (Domain n)) -> Maybe (Domain n)
-combinePieceContribsMaybe mai contribs = case mai of
+combinePieceContribsMaybe leqOp mai contribs = case mai of
   Nothing -> Nothing
   Just ai ->
     case foldl pseudoJoinMaybe Nothing contribs of
       Nothing -> Nothing
-      Just c  -> Just (if leqExact c ai then c else ai)
+      Just c  -> Just (if leqOp c ai then c else ai)
 
 pseudoJoinMaybe :
   {n} (fin n, n >= 2) =>
@@ -3895,6 +3933,42 @@ correct_assumeSge a x b y =
       Just c -> member c x
       Nothing -> False
 
+correct_assumeSltPrecise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeSltPrecise a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x <$ y ==>
+    case assumeSltPrecise a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeSlePrecise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeSlePrecise a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x <=$ y ==>
+    case assumeSlePrecise a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeSgtPrecise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeSgtPrecise a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x >$ y ==>
+    case assumeSgtPrecise a b of
+      Just c -> member c x
+      Nothing -> False
+
+correct_assumeSgePrecise :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeSgePrecise a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x >=$ y ==>
+    case assumeSgePrecise a b of
+      Just c -> member c x
+      Nothing -> False
+
 // The `assume*Shrinks` properties assert cardinality refinement,
 // unconditionally: `size (assumeOp a b) <= size a`. This is guaranteed
 // by construction (`assumeUnsignedRange` and the signed driver fall back
@@ -3967,6 +4041,38 @@ assumeSgeShrinks a b =
       Nothing -> True
       Just c  -> size c <= size a
 
+assumeSltPreciseShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSltPreciseShrinks a b =
+  proper a ==> proper b ==>
+    case assumeSltPrecise a b of
+      Nothing -> True
+      Just c  -> size c <= size a
+
+assumeSlePreciseShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSlePreciseShrinks a b =
+  proper a ==> proper b ==>
+    case assumeSlePrecise a b of
+      Nothing -> True
+      Just c  -> size c <= size a
+
+assumeSgtPreciseShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSgtPreciseShrinks a b =
+  proper a ==> proper b ==>
+    case assumeSgtPrecise a b of
+      Nothing -> True
+      Just c  -> size c <= size a
+
+assumeSgePreciseShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeSgePreciseShrinks a b =
+  proper a ==> proper b ==>
+    case assumeSgePrecise a b of
+      Nothing -> True
+      Just c  -> size c <= size a
+
 // Equality of `Maybe (Domain n)` via `leqExact` on the `Just` payloads.
 eqMaybeAssume :
   {n} (fin n, n >= 2) => Maybe (Domain n) -> Maybe (Domain n) -> Bit
@@ -3978,77 +4084,41 @@ eqMaybeAssume mx my = case mx of
     Nothing -> False
     Just y  -> leqExact x y /\ leqExact y x
 
-assumeUltIdempotent :
+assumeSltPreciseIdempotent :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-assumeUltIdempotent a b =
+assumeSltPreciseIdempotent a b =
   proper a ==> proper b ==>
     ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeUlt a b of
+      case assumeSltPrecise a b of
         Nothing -> True
-        Just c  -> eqMaybeAssume (assumeUlt c b) (Just c)
+        Just c  -> eqMaybeAssume (assumeSltPrecise c b) (Just c)
 
-assumeUleIdempotent :
+assumeSlePreciseIdempotent :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-assumeUleIdempotent a b =
+assumeSlePreciseIdempotent a b =
   proper a ==> proper b ==>
     ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeUle a b of
+      case assumeSlePrecise a b of
         Nothing -> True
-        Just c  -> eqMaybeAssume (assumeUle c b) (Just c)
+        Just c  -> eqMaybeAssume (assumeSlePrecise c b) (Just c)
 
-assumeUgtIdempotent :
+assumeSgtPreciseIdempotent :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-assumeUgtIdempotent a b =
+assumeSgtPreciseIdempotent a b =
   proper a ==> proper b ==>
     ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeUgt a b of
+      case assumeSgtPrecise a b of
         Nothing -> True
-        Just c  -> eqMaybeAssume (assumeUgt c b) (Just c)
+        Just c  -> eqMaybeAssume (assumeSgtPrecise c b) (Just c)
 
-assumeUgeIdempotent :
+assumeSgePreciseIdempotent :
   {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-assumeUgeIdempotent a b =
+assumeSgePreciseIdempotent a b =
   proper a ==> proper b ==>
     ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeUge a b of
+      case assumeSgePrecise a b of
         Nothing -> True
-        Just c  -> eqMaybeAssume (assumeUge c b) (Just c)
-
-assumeSltIdempotent :
-  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-assumeSltIdempotent a b =
-  proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeSlt a b of
-        Nothing -> True
-        Just c  -> eqMaybeAssume (assumeSlt c b) (Just c)
-
-assumeSleIdempotent :
-  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-assumeSleIdempotent a b =
-  proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeSle a b of
-        Nothing -> True
-        Just c  -> eqMaybeAssume (assumeSle c b) (Just c)
-
-assumeSgtIdempotent :
-  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-assumeSgtIdempotent a b =
-  proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeSgt a b of
-        Nothing -> True
-        Just c  -> eqMaybeAssume (assumeSgt c b) (Just c)
-
-assumeSgeIdempotent :
-  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
-assumeSgeIdempotent a b =
-  proper a ==> proper b ==>
-    ~ (wraps a) ==> ~ (wraps b) ==>
-      case assumeSge a b of
-        Nothing -> True
-        Just c  -> eqMaybeAssume (assumeSge c b) (Just c)
+        Just c  -> eqMaybeAssume (assumeSgePrecise c b) (Just c)
 
 
 
@@ -4108,6 +4178,10 @@ property p_reduceConflictMeansEmpty           = reduceConflictMeansEmpty`{4}
 // property p_correct_assumeSle        = correct_assumeSle`{4}
 // property p_correct_assumeSgt        = correct_assumeSgt`{4}
 // property p_correct_assumeSge        = correct_assumeSge`{4}
+// property p_correct_assumeSltPrecise = correct_assumeSltPrecise`{4}
+// property p_correct_assumeSlePrecise = correct_assumeSlePrecise`{4}
+// property p_correct_assumeSgtPrecise = correct_assumeSgtPrecise`{4}
+// property p_correct_assumeSgePrecise = correct_assumeSgePrecise`{4}
 // property p_assumeUltShrinks         = assumeUltShrinks`{4}
 // property p_assumeUleShrinks         = assumeUleShrinks`{4}
 // property p_assumeUgtShrinks         = assumeUgtShrinks`{4}
@@ -4116,14 +4190,14 @@ property p_reduceConflictMeansEmpty           = reduceConflictMeansEmpty`{4}
 // property p_assumeSleShrinks         = assumeSleShrinks`{4}
 // property p_assumeSgtShrinks         = assumeSgtShrinks`{4}
 // property p_assumeSgeShrinks         = assumeSgeShrinks`{4}
-// property p_assumeUltIdempotent      = assumeUltIdempotent`{4}
-// property p_assumeUleIdempotent      = assumeUleIdempotent`{4}
-// property p_assumeUgtIdempotent      = assumeUgtIdempotent`{4}
-// property p_assumeUgeIdempotent      = assumeUgeIdempotent`{4}
-// property p_assumeSltIdempotent      = assumeSltIdempotent`{4}
-// property p_assumeSleIdempotent      = assumeSleIdempotent`{4}
-// property p_assumeSgtIdempotent      = assumeSgtIdempotent`{4}
-// property p_assumeSgeIdempotent      = assumeSgeIdempotent`{4}
+// property p_assumeSltPreciseShrinks  = assumeSltPreciseShrinks`{4}
+// property p_assumeSlePreciseShrinks  = assumeSlePreciseShrinks`{4}
+// property p_assumeSgtPreciseShrinks  = assumeSgtPreciseShrinks`{4}
+// property p_assumeSgePreciseShrinks  = assumeSgePreciseShrinks`{4}
+// property p_assumeSltPreciseIdempot  = assumeSltPreciseIdempotent`{4}
+// property p_assumeSlePreciseIdempot  = assumeSlePreciseIdempotent`{4}
+// property p_assumeSgtPreciseIdempot  = assumeSgtPreciseIdempotent`{4}
+// property p_assumeSgePreciseIdempot  = assumeSgePreciseIdempotent`{4}
 
 property p_correct_pseudoJoin              = correct_pseudoJoin`{4}
 // This precise join soundness lemma is materially slower than the surrounding

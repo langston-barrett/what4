@@ -108,9 +108,13 @@ module What4.Domains.BV.StridesBitwise
   , assumeUgt
   , assumeUge
   , assumeSlt
+  , assumeSltPrecise
   , assumeSle
+  , assumeSlePrecise
   , assumeSgt
+  , assumeSgtPrecise
   , assumeSge
+  , assumeSgePrecise
   -- * Generators
   , genDomain
   , genElement
@@ -221,6 +225,10 @@ module What4.Domains.BV.StridesBitwise
   , correct_assumeSle
   , correct_assumeSgt
   , correct_assumeSge
+  , correct_assumeSltPrecise
+  , correct_assumeSlePrecise
+  , correct_assumeSgtPrecise
+  , correct_assumeSgePrecise
   , assumeUltShrinks
   , assumeUleShrinks
   , assumeUgtShrinks
@@ -229,14 +237,14 @@ module What4.Domains.BV.StridesBitwise
   , assumeSleShrinks
   , assumeSgtShrinks
   , assumeSgeShrinks
-  , assumeUltIdempotent
-  , assumeUleIdempotent
-  , assumeUgtIdempotent
-  , assumeUgeIdempotent
-  , assumeSltIdempotent
-  , assumeSleIdempotent
-  , assumeSgtIdempotent
-  , assumeSgeIdempotent
+  , assumeSltPreciseShrinks
+  , assumeSlePreciseShrinks
+  , assumeSgtPreciseShrinks
+  , assumeSgePreciseShrinks
+  , assumeSltPreciseIdempotent
+  , assumeSlePreciseIdempotent
+  , assumeSgtPreciseIdempotent
+  , assumeSgePreciseIdempotent
     -- * Re-exports
   , NatRepr
   , knownNat
@@ -802,14 +810,32 @@ assumeUge = liftAssume S.assumeUge B.assumeUge
 assumeSlt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
 assumeSlt = liftAssume S.assumeSlt B.assumeSlt
 
+-- | Like 'assumeSlt', but uses the strides domain's /precise/ signed
+-- assume ('S.assumeSltPrecise') for the strides component. The bitwise
+-- domain has a single signed assume, so its component is unchanged.
+assumeSltPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSltPrecise = liftAssume S.assumeSltPrecise B.assumeSlt
+
 assumeSle :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
 assumeSle = liftAssume S.assumeSle B.assumeSle
+
+-- | Like 'assumeSle', but precise in the strides component (see 'assumeSltPrecise').
+assumeSlePrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSlePrecise = liftAssume S.assumeSlePrecise B.assumeSle
 
 assumeSgt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
 assumeSgt = liftAssume S.assumeSgt B.assumeSgt
 
+-- | Like 'assumeSgt', but precise in the strides component (see 'assumeSltPrecise').
+assumeSgtPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSgtPrecise = liftAssume S.assumeSgtPrecise B.assumeSgt
+
 assumeSge :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
 assumeSge = liftAssume S.assumeSge B.assumeSge
+
+-- | Like 'assumeSge', but precise in the strides component (see 'assumeSltPrecise').
+assumeSgePrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSgePrecise = liftAssume S.assumeSgePrecise B.assumeSge
 
 -- | Shared driver for the lifted assume operations. Runs the strides
 -- assume (which returns 'Maybe', signalling empty) and the bitwise
@@ -1665,6 +1691,42 @@ correct_assumeSge w a x b y =
     signedOf w x >= signedOf w y ==>
       maybeMemberOrFail (assumeSge w a b) x
 
+-- | 'assumeSltPrecise' is sound.
+correct_assumeSltPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSltPrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    signedOf w x < signedOf w y ==>
+      maybeMemberOrFail (assumeSltPrecise w a b) x
+
+-- | 'assumeSlePrecise' is sound.
+correct_assumeSlePrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSlePrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    signedOf w x <= signedOf w y ==>
+      maybeMemberOrFail (assumeSlePrecise w a b) x
+
+-- | 'assumeSgtPrecise' is sound.
+correct_assumeSgtPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSgtPrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    signedOf w x > signedOf w y ==>
+      maybeMemberOrFail (assumeSgtPrecise w a b) x
+
+-- | 'assumeSgePrecise' is sound.
+correct_assumeSgePrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSgePrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    signedOf w x >= signedOf w y ==>
+      maybeMemberOrFail (assumeSgePrecise w a b) x
+
 -- $assumeShrinks
 --
 -- The @assume*Shrinks@ properties bundle two laws, under the same
@@ -1730,6 +1792,26 @@ assumeSgeShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
 assumeSgeShrinks w a b =
   proper a ==> proper b ==> property (stridesShrinks (assumeSge w) a b)
 
+-- | 'assumeSltPrecise' shrinks the strides orbit by cardinality (unconditionally).
+assumeSltPreciseShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeSltPreciseShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeSltPrecise w) a b)
+
+-- | 'assumeSlePrecise' shrinks the strides orbit by cardinality (unconditionally).
+assumeSlePreciseShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeSlePreciseShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeSlePrecise w) a b)
+
+-- | 'assumeSgtPrecise' shrinks the strides orbit by cardinality (unconditionally).
+assumeSgtPreciseShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeSgtPreciseShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeSgtPrecise w) a b)
+
+-- | 'assumeSgePrecise' shrinks the strides orbit by cardinality (unconditionally).
+assumeSgePreciseShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeSgePreciseShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeSgePrecise w) a b)
+
 -- | Shared body of the @assume*Shrinks@ properties: the result's strides
 -- orbit is no larger than @a@'s. Uses the /O(1)/ 'S.size' of the strides
 -- component, never the exponential joint 'size'\/'toList'. Returns 'Bool'
@@ -1750,69 +1832,37 @@ stridesShrinks op a b =
 -- under the non-wrap guard, where the underlying 'S.pseudoMeet' behaves
 -- as a lower bound.
 
--- | 'assumeUlt' is idempotent (under the non-wrap guard).
-assumeUltIdempotent ::
+-- | 'assumeSltPrecise' is idempotent (under the non-wrap guard).
+assumeSltPreciseIdempotent ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
-assumeUltIdempotent w a b x =
+assumeSltPreciseIdempotent w a b x =
   proper a ==> proper b ==>
   Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
-    property (idempotentAt (assumeUlt w) a b x)
+    property (idempotentAt (assumeSltPrecise w) a b x)
 
--- | 'assumeUle' is idempotent (under the non-wrap guard).
-assumeUleIdempotent ::
+-- | 'assumeSlePrecise' is idempotent (under the non-wrap guard).
+assumeSlePreciseIdempotent ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
-assumeUleIdempotent w a b x =
+assumeSlePreciseIdempotent w a b x =
   proper a ==> proper b ==>
   Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
-    property (idempotentAt (assumeUle w) a b x)
+    property (idempotentAt (assumeSlePrecise w) a b x)
 
--- | 'assumeUgt' is idempotent (under the non-wrap guard).
-assumeUgtIdempotent ::
+-- | 'assumeSgtPrecise' is idempotent (under the non-wrap guard).
+assumeSgtPreciseIdempotent ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
-assumeUgtIdempotent w a b x =
+assumeSgtPreciseIdempotent w a b x =
   proper a ==> proper b ==>
   Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
-    property (idempotentAt (assumeUgt w) a b x)
+    property (idempotentAt (assumeSgtPrecise w) a b x)
 
--- | 'assumeUge' is idempotent (under the non-wrap guard).
-assumeUgeIdempotent ::
+-- | 'assumeSgePrecise' is idempotent (under the non-wrap guard).
+assumeSgePreciseIdempotent ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
-assumeUgeIdempotent w a b x =
+assumeSgePreciseIdempotent w a b x =
   proper a ==> proper b ==>
   Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
-    property (idempotentAt (assumeUge w) a b x)
-
--- | 'assumeSlt' is idempotent (under the non-wrap guard).
-assumeSltIdempotent ::
-  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
-assumeSltIdempotent w a b x =
-  proper a ==> proper b ==>
-  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
-    property (idempotentAt (assumeSlt w) a b x)
-
--- | 'assumeSle' is idempotent (under the non-wrap guard).
-assumeSleIdempotent ::
-  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
-assumeSleIdempotent w a b x =
-  proper a ==> proper b ==>
-  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
-    property (idempotentAt (assumeSle w) a b x)
-
--- | 'assumeSgt' is idempotent (under the non-wrap guard).
-assumeSgtIdempotent ::
-  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
-assumeSgtIdempotent w a b x =
-  proper a ==> proper b ==>
-  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
-    property (idempotentAt (assumeSgt w) a b x)
-
--- | 'assumeSge' is idempotent (under the non-wrap guard).
-assumeSgeIdempotent ::
-  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Natural -> Property
-assumeSgeIdempotent w a b x =
-  proper a ==> proper b ==>
-  Prelude.not (wraps a) ==> Prelude.not (wraps b) ==>
-    property (idempotentAt (assumeSge w) a b x)
+    property (idempotentAt (assumeSgePrecise w) a b x)
 
 -- | Shared body of the @assume*Idempotent@ properties (the @proper@\/
 -- non-wrap guards live in each caller): @assumeOp _ b@ applied to

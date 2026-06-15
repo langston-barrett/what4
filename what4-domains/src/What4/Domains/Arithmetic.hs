@@ -15,6 +15,7 @@ module What4.Domains.Arithmetic
   , intLog2
   , isPow2Integer
   , isPow2Natural
+  , egcd
   , log2OfPowerOfTwo
   , bitsBelow
   , rotateLeft
@@ -28,7 +29,7 @@ import Numeric.Natural (Natural)
 import Data.Parameterized.NatRepr
 
 import What4.Domains.Arithmetic.Internal
-  ( ctzOpt, clzOpt, intLog2Opt, isPow2IntegerOpt, isPow2NaturalOpt )
+  ( ctzOpt, clzOpt, intLog2Opt, isPow2IntegerOpt, isPow2NaturalOpt, egcdOpt )
 
 -- | /O(w)/. Count trailing zeros, capped at the width.
 ctz :: NatRepr w -> Integer -> Integer
@@ -58,6 +59,15 @@ isPow2Integer = isPow2IntegerOpt
 isPow2Natural :: Natural -> Bool
 isPow2Natural = isPow2NaturalOpt
 {-# INLINE isPow2Natural #-}
+
+-- | /O(G(w))/. Extended Euclidean algorithm: @egcd a b@ returns @(g, n, m)@
+-- with @n * a + m * b = g@ and @g = |gcd a b| >= 0@. On GHC 9.0+ this delegates
+-- to the GMP-backed @integerGcde#@ primop (a true subquadratic extended gcd);
+-- on earlier GHCs it uses a hand-rolled Euclid. Bézout coefficients are not
+-- unique; only the @n * a + m * b = g@ invariant is promised.
+egcd :: Integer -> Integer -> (Integer, Integer, Integer)
+egcd = egcdOpt
+{-# INLINE egcd #-}
 
 -- | /O(w)/. Count trailing zeros of a non-negative 'Integer', returning @0@
 -- for input @0@. ('Data.Bits.countTrailingZeros' requires 'FiniteBits', which

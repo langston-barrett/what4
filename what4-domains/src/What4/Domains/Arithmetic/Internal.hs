@@ -2,6 +2,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE UnboxedSums #-}
+{-# LANGUAGE UnboxedTuples #-}
 
 -- | Internal module exposing both optimized and reference implementations
 -- for property testing. Items in this module should /not/ be considered part
@@ -13,12 +14,14 @@ module What4.Domains.Arithmetic.Internal
   , intLog2Ref
   , isPow2IntegerRef
   , isPow2NaturalRef
+  , egcdRef
     -- * Optimized implementations (GHC 9.0+ only)
   , ctzOpt
   , clzOpt
   , intLog2Opt
   , isPow2IntegerOpt
   , isPow2NaturalOpt
+  , egcdOpt
   ) where
 
 import Data.Bits (Bits(..), testBit, shiftR)
@@ -72,6 +75,26 @@ isPow2IntegerRef x = x > 0 && x .&. (x - 1) == 0
 isPow2NaturalRef :: Natural -> Bool
 isPow2NaturalRef x = x > 0 && x .&. (x - 1) == 0
 {-# INLINE isPow2NaturalRef #-}
+
+-- | Reference implementation: extended Euclidean algorithm via a hand-rolled
+-- recursion. @egcdRef a b@ returns @(g, n, m)@ with @n * a + m * b = g@ and
+-- @g >= 0@. Runs @O(log(min(|a|,|b|)))@ Euclid steps, each with a division, so
+-- it is a factor of @w@ short of the subquadratic 'egcdOpt' in the worst case.
+--
+-- Adapted from the Wikibooks reference implementation:
+-- <http://en.wikibooks.org/wiki/Algorithm_Implementation/Mathematics/Extended_Euclidean_algorithm>
+egcdRef :: Integer -> Integer -> (Integer, Integer, Integer)
+egcdRef a0 b0 =
+  case go a0 b0 of
+    (g, n, m)
+      | g < 0     -> (-g, -n, -m)
+      | otherwise -> (g, n, m)
+  where
+    go a 0 = (a, 1, 0)
+    go a b =
+      case go b (rem a b) of
+        (g, x, y) -> (g, y, x - (a `quot` b) * y)
+{-# INLINABLE egcdRef #-}
 
 ------------------------------------------------------------------------
 -- Optimized implementations (GHC 9.0+ primops)
@@ -142,3 +165,15 @@ isPow2NaturalOpt x = case Natural.naturalIsPowerOf2# x of
 isPow2NaturalOpt = isPow2NaturalRef
 #endif
 {-# INLINE isPow2NaturalOpt #-}
+
+-- | Optimized implementation: extended Euclidean algorithm via the GMP-backed
+-- 'Integer.integerGcde#' primop (a true subquadratic extended gcd). @egcdOpt a b@
+-- returns @(g, n, m)@ with @n * a + m * b = g@; 'Integer.integerGcde#' already
+-- yields @g = |gcd a b| >= 0@, so no sign normalisation is needed.
+egcdOpt :: Integer -> Integer -> (Integer, Integer, Integer)
+#if MIN_VERSION_base(4,15,0)
+egcdOpt a b = case Integer.integerGcde# a b of (# g, n, m #) -> (g, n, m)
+#else
+egcdOpt = egcdRef
+#endif
+{-# INLINE egcdOpt #-}

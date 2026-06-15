@@ -95,8 +95,93 @@ A Haskell equivalent is the exported 'diagram' function; see its doctests on
 
 This domain uses unbounded integers internally, and supports analysis of
 variables of any bit-width @w@. Every exported operation is documented with its
-complexity in big-O notation in terms of @w@. In particular, this means that
-operations like bitwise-and on 'Natural' are considered @O(w)@.
+complexity.
+
+Complexities are given in terms of three primitive cost functions, always written
+in this order:
+
+* @A(w)@: the cost of /addition/, and of the other /linear/ operations:
+  subtraction, comparison, bitwise @and@\/@or@\/@xor@\/@complement@, shifts,
+  'popCount', 'testBit'.
+* @M(w)@: the cost of /multiplication/, and of division\/@rem@ by an arbitrary
+  @w@-bit value.
+* @G(w)@: the cost of /gcd/ and /extended gcd/ (Bézout).
+
+These three behave differently across three /tiers/ of bit-width. Each operation's
+Haddock has a @== Complexity@ section giving its concrete bound at all three:
+
+1. @w <= 64@ (a single machine word): @A@ and @M@ are one hardware instruction,
+   but there is no hardware @gcd@, so @G@ loops over the @w@ bits.
+2. /Medium/ widths (several machine words): @M@ and @G@ are both quadratic
+   (ordinary \"schoolbook\" multiplication, and a @gcd@ that loops); @A@ stays
+   linear.
+3. The /limit/ (@w@ unbounded): with fast (FFT-based) multiplication, all three
+   are near-linear in @w@.
+
+@
+ tier        |  A(w)  |  M(w)    |  G(w)
+-------------+--------+----------+-----------------------
+ 1. w <= 64  |  O(1)  |  O(1)    |  O(w)
+ 2. medium   |  O(w)  |  O(w^2)  |  O(w^2)
+ 3. limit    |  O(w)  |  Õ(w)    |  Õ(w)
+@
+
+Here @Õ(w)@ (\"soft-O\") just means @O(w)@ up to logarithmic factors, for example
+@O(w log w)@; the exact power of @log@ depends on the multiplication algorithm and
+does not matter for our purposes.
+
+The cost leader moves between tiers: at tier 1 only @G@ is non-constant (@gcd@
+loops, with no hardware support); at tier 2 @A@ is the only linear one (@M@ and
+@G@ are both quadratic); at tier 3 all three are near-linear.
+
+At every tier @A(w) <= M(w) <= G(w)@: a linear pass is never more expensive than
+a multiply, which is never more expensive than a (general) gcd, both in the
+asymptotic table above and, we expect, in practice. So when we break an
+operation's cost into contributing factors, an @A(w)@ term is always subsumed by
+any @M(w)@ or @G(w)@ term present alongside it; we therefore omit @A(w)@ factors
+and list only the @M@- and @G@-class ones (except for the few operations whose
+/entire/ cost is linear, where the single @A(w)@ factor is all there is to list).
+
+The /first sentence/ of each operation's Haddock states its complexity in the
+@A@\/@M@\/@G@ form (always in @A@, @M@, @G@ order), giving only the /dominant/
+cost. When that cost comes from more than one operation, the @== Complexity@
+section shows the breakdown:
+
+* a @Contributing factors:@ list naming each @M@- or @G@-class operation called
+  and that operation's own cost (@A(w)@ factors are omitted, being subsumed);
+* an optional @Total:@ line of the form @O(a + b) = O(a)@, summing those factors
+  and simplifying to the dominant cost (the same bound as the first sentence).
+  It is omitted when there is a single factor, or when the factors are
+  incomparable and so the sum does not simplify; and
+* the concrete bound at tiers 1, 2, and 3.
+
+A caveat:
+
+* The hand-rolled Euclidean window count ('floorSum', behind 'leqExact' and
+  'eqExact') is @O(w · M(w))@ (not @Õ(w)@) at tier 3; the exact-containment
+  operations built on it ('leqExact', 'eqExact', 'pseudoMeetPrecise',
+  'exactMeet', 'exactJoin', …) inherit this, and bringing them to the tier-3
+  bound is a possible follow-up.
+
+== Operation variants: @*Fast@, default, and @*Precise@
+
+Some operations come in up to three flavors distinguished by a name suffix. All
+denote the same sound transfer function and differ only in the precision\/cost
+trade, with @G(w)@ as the dividing line; by cardinality each result is at least
+as tight as the cheaper flavor.
+
+* @*Fast@: the cheapest /meaningful/ kernel. The same asymptotic class as the
+  default, but a smaller constant factor.
+* /default/ (no suffix): the everyday choice, with cost @G(w)@ or below.
+* @*Precise@: opts into exact containment ('leqExact') or tighter bounds, which
+  pushes the cost /above/ @G(w)@ (to @w · M(w)@ or @w · A(w)@). Use it when a
+  strictly tighter result is worth the extra @w@ factor.
+
+The suffix is comparative, appearing only where a cheaper sibling exists: an
+operation above @G(w)@ with no cheaper alternative carries its cost unsuffixed
+(e.g. 'reduceFixpoint'), or uses the cousin name @*Exact@ ('leqExact',
+'eqExact'). A @*Raw@ suffix is orthogonal: the single-pair kernel before the
+'psplitOp2' parity-split wrapper, not a precision tier.
 
 == Comparison to other domains
 
@@ -127,9 +212,9 @@ gamma((start, end, stride)) :=
 @
 
 The immediate difference between CLPs and the strides domain is the
-representation. We can easily recover @end@ from @(start, stride, n)@ in @O(w)@
+representation. We can easily recover @end@ from @(start, stride, n)@ in @O(M(w))@
 via the identity @end = start + n * stride mod 2^w@, and check for self-wrap in
-@O(w)@ via @n * stride >= 2^w@.
+@O(M(w))@ via @n * stride >= 2^w@ (the multiplication @n * stride@ dominates).
 
 The procedure for deriving @n@ from @end@ is more complex. Let @g = gcd(2^w,
 stride)@. Note that:
@@ -148,7 +233,8 @@ desired:
 @
 
 Not only was this direction more complex, but also requires @O(w log w)@
-time. This is an important point of motivation for moving from CLP's @(start,
+time (the modular inverse). This is an important point of motivation for moving
+from CLP's @(start,
 end, stride)@ to our @(start, stride, n)@. In fact, several operations on
 CLPs compute with @n@ internally, only to recover @end@ post-hoc (e.g.,
 intersection).
@@ -429,9 +515,13 @@ module What4.Domains.BV.Strides
   , assumeUgt
   , assumeUge
   , assumeSlt
+  , assumeSltPrecise
   , assumeSle
+  , assumeSlePrecise
   , assumeSgt
+  , assumeSgtPrecise
   , assumeSge
+  , assumeSgePrecise
   -- * Reduced product with bitwise
   -- $reduced
   , refineByBits
@@ -672,6 +762,10 @@ module What4.Domains.BV.Strides
   , correct_assumeSle
   , correct_assumeSgt
   , correct_assumeSge
+  , correct_assumeSltPrecise
+  , correct_assumeSlePrecise
+  , correct_assumeSgtPrecise
+  , correct_assumeSgePrecise
   , assumeUltShrinks
   , assumeUleShrinks
   , assumeUgtShrinks
@@ -680,14 +774,14 @@ module What4.Domains.BV.Strides
   , assumeSleShrinks
   , assumeSgtShrinks
   , assumeSgeShrinks
-  , assumeUltIdempotent
-  , assumeUleIdempotent
-  , assumeUgtIdempotent
-  , assumeUgeIdempotent
-  , assumeSltIdempotent
-  , assumeSleIdempotent
-  , assumeSgtIdempotent
-  , assumeSgeIdempotent
+  , assumeSltPreciseShrinks
+  , assumeSlePreciseShrinks
+  , assumeSgtPreciseShrinks
+  , assumeSgePreciseShrinks
+  , assumeSltPreciseIdempotent
+  , assumeSlePreciseIdempotent
+  , assumeSgtPreciseIdempotent
+  , assumeSgePreciseIdempotent
   -- ** Reduced product with bitwise
   , knownZerosOnesNatDisjoint
   , knownZerosOnesNatMember
@@ -778,7 +872,7 @@ data Domain (w :: Nat)
     }
   deriving (Eq, Ord, Show)
 
--- | /O(w)/. The conceptual @end@ of the orbit: @(start + n * stride) mod 2^w@.
+-- | /O(M(w))/. The conceptual @end@ of the orbit: @(start + n * stride) mod 2^w@.
 end :: Domain w -> Natural
 end c@Domain{start, stride, n, mask} =
   assert (proper c) $ (start + n * stride) .&. mask
@@ -800,11 +894,23 @@ proper Domain {start, stride, n, mask} =
      , n + 1 < orbit || (start < g && stride == g)
      ]
 
--- | /O(2^w \/ g)/. ASCII diagram of a progression in the style of the
+-- | /O(2^w · M(w) log w)/. ASCII diagram of a progression in the style of the
 -- module-level visualization examples: @[@ followed by one @*@ per member value
 -- and one @.@ per non-member value, followed by @]@. Width is @mask + 1@ cells.
 --
 -- Useful in GHCi and in doctests to inspect progressions at a glance.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * @2^w@ cells, each a 'member' call (Hensel inverse): /O(2^w · M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(2^w · log w)/
+-- 2. /O(2^w · w^2 log w)/
+-- 3. /O(2^w · Õ(w))/
 --
 -- == Examples
 --
@@ -837,12 +943,12 @@ integerToNatural :: Integer -> Natural
 integerToNatural = fromIntegral
 {-# INLINE integerToNatural #-}
 
--- | /O(w)/. Reduce a 'Natural' modulo @2^w@, where @w@ is the width of the progression.
+-- | /O(A(w))/. Reduce a 'Natural' modulo @2^w@, where @w@ is the width of the progression.
 modMask :: Domain w -> Natural -> Natural
 modMask c v = assert (proper c) $ v .&. mask c
 {-# INLINE modMask #-}
 
--- | /O(w)/. Modular additive inverse modulo @mask + 1@.
+-- | /O(A(w))/. Modular additive inverse modulo @mask + 1@.
 modNeg :: Natural -> Natural -> Natural
 modNeg mask x =
   assert ((mask + 1) .&. mask == 0) $
@@ -850,7 +956,7 @@ modNeg mask x =
   (mask + 1 - x) .&. mask
 {-# INLINE modNeg #-}
 
--- | /O(w)/. Modular subtraction @x - y@ mod @mask + 1@.
+-- | /O(A(w))/. Modular subtraction @x - y@ mod @mask + 1@.
 modSub :: Natural -> Natural -> Natural -> Natural
 modSub mask x y =
   assert ((mask + 1) .&. mask == 0) $
@@ -859,19 +965,19 @@ modSub mask x y =
   (x + modNeg mask y) .&. mask
 {-# INLINE modSub #-}
 
--- | /O(w)/. The wrap-around offset of @v@ from @start@: @(v - start) mod 2^w@.
+-- | /O(A(w))/. The wrap-around offset of @v@ from @start@: @(v - start) mod 2^w@.
 wrapOffset :: Domain w -> Natural -> Natural
 wrapOffset c@Domain{start, mask} v =
   assert (proper c) $ modSub mask v start
 {-# INLINE wrapOffset #-}
 
--- | /O(w)/. The lowest set bit of @x@; equivalently @gcd(x, 2^w)@ for any
+-- | /O(A(w))/. The lowest set bit of @x@; equivalently @gcd(x, 2^w)@ for any
 -- @w@ at least the bit-length of @x@.
 lowestSetBit :: Natural -> Natural
 lowestSetBit x = 1 `shiftL` countTrailingZerosOr0 (toInteger x)
 {-# INLINE lowestSetBit #-}
 
--- | /O(w)/. The highest set bit of @x@ as a single-bit mask; @0@ when
+-- | /O(A(w))/. The highest set bit of @x@ as a single-bit mask; @0@ when
 -- @x == 0@.
 highestSetBit :: Natural -> Natural
 highestSetBit x =
@@ -879,13 +985,13 @@ highestSetBit x =
   in b `Bits.xor` (b `Bits.shiftR` 1)
 {-# INLINE highestSetBit #-}
 
--- | /O(w)/. @gcd(stride, 2^w)@. Since @2^w@ is a power of two, this equals the
--- lowest set bit of @stride@.
+-- | /O(A(w))/. @gcd(stride, 2^w)@. Since @2^w@ is a power of two, this equals the
+-- lowest set bit of @stride@ (a bit-trick, not a Euclidean gcd).
 strideGcd :: Domain w -> Natural
 strideGcd Domain{stride} = lowestSetBit stride
 {-# INLINE strideGcd #-}
 
--- | /O(w)/. Sufficient (but not necessary) condition that @a@ and @b@ share
+-- | /O(A(w))/. Sufficient (but not necessary) condition that @a@ and @b@ share
 -- no values: @start a − start b@ is not a multiple of @min(strideGcd a,
 -- strideGcd b)@, so the cosets @start a + ⟨stride a⟩@ and @start b + ⟨stride
 -- b⟩@ in @Z\/2^w@ don't intersect at all (regardless of the orbit windows).
@@ -897,7 +1003,7 @@ cosetsDisjoint a b =
     /= 0
 {-# INLINE cosetsDisjoint #-}
 
--- | /O(w)/. @2^w \/ g@, where @mask = 2^w - 1@ and @g@ is a power-of-two
+-- | /O(A(w))/. @2^w \/ g@, where @mask = 2^w - 1@ and @g@ is a power-of-two
 -- divisor of @2^w@ (e.g. @gcd(stride, 2^w)@). Used to compute the orbit
 -- length of a progression from raw @mask@ and @g@ before a 'Domain' value exists.
 orbitLenOf :: Natural -> Natural -> Natural
@@ -906,21 +1012,21 @@ orbitLenOf mask g =
   (mask + 1) `divByPow2` g
 {-# INLINE orbitLenOf #-}
 
--- | /O(w)/. The orbit length: the number of distinct bitvectors visited by
+-- | /O(A(w))/. The orbit length: the number of distinct bitvectors visited by
 -- the progression, which is @2^w \/ gcd(stride, 2^w)@. See
 -- 'orbitLenViaToList'.
 orbitLen :: Domain w -> Natural
 orbitLen c@Domain{mask} = orbitLenOf mask (strideGcd c)
 {-# INLINE orbitLen #-}
 
--- | /O(w)/. Cap @n@ at the orbit length minus 1: the maximum step count
+-- | /O(A(w))/. Cap @n@ at the orbit length minus 1: the maximum step count
 -- representable for stride @stride@ at width @log2 (mask + 1)@.
 clampToOrbit :: Natural -> Natural -> Natural -> Natural
 clampToOrbit mask stride i =
   min i (orbitLenOf mask (lowestSetBit stride) - 1)
 {-# INLINE clampToOrbit #-}
 
--- | /O(w)/. The smallest value @v@ in the wrapped arc starting at @lo@
+-- | /O(A(w))/. The smallest value @v@ in the wrapped arc starting at @lo@
 -- (i.e. @v = (lo + off) mod 2^w@ for some @off ≥ 0@) with @v ≡ x (mod g)@,
 -- where @g@ is a power-of-two divisor of @2^w = mask + 1@.
 firstCosetMember ::
@@ -937,19 +1043,31 @@ firstCosetMember mask lo g x =
   (lo + (modSub mask x lo .&. (g - 1))) .&. mask
 {-# INLINE firstCosetMember #-}
 
--- | /O(w)/. @x \/ p@ where @p@ is a power of two, computed as a right shift.
+-- | /O(A(w))/. @x \/ p@ where @p@ is a power of two, computed as a right shift.
 -- Asserts that @p@ is a (nonzero) power of two.
 divByPow2 :: Natural -> Natural -> Natural
 divByPow2 x p =
   assert (isPow2Natural p) $ x `shiftR` popCount (p - 1)
 {-# INLINE divByPow2 #-}
 
--- | /O(w log w)/. Modular inverse of @a@ modulo @m@ where @m@ is a power of two
--- and @a@ is odd.
+-- | /O(M(w) log w)/. Modular inverse of @a@ modulo @m@ where @m@ is a power of
+-- two and @a@ is odd.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * @O(log w)@ Hensel\/Newton steps, each a multiply: /O(M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 invModPow2 :: Natural -> Natural -> Natural
 -- Computed via Hensel lifting (Newton iteration): @x' = x * (2 - a*x) mod m@.
 -- Each step doubles the number of correct low bits, so the loop runs in @O(log
--- w)@ iterations of @O(w)@ work.
+-- w)@ iterations of one multiply each.
 invModPow2 a m = assert (a .&. 1 == 1) $ go 1
   where
     mMinus1 = m - 1
@@ -959,9 +1077,25 @@ invModPow2 a m = assert (a .&. 1 == 1) $ go 1
         then x
         else go ((x * (2 + m - ax)) .&. mMinus1)
 
--- | /O(w^2)/. Euclidean-like floor sum,
+-- | /O(w · M(w))/. Euclidean-like floor sum,
 -- @floorSum n m a b = sum_{i=0}^{n-1} ((a*i + b) \`Prelude.div\` m)@.
 -- Requires @m > 0@; all values are non-negative.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * @O(w)@ Euclidean steps, each a constant number of multiplies\/divides: /O(w · M(w))/
+--
+-- The operands shrink between steps, so tier 2 telescopes to @O(w^2)@ rather
+-- than @O(w^3)@. This hand-rolled recursion has no half-gcd speedup (unlike the
+-- GMP-backed 'eGCD'), so tier 3 stays @Õ(w^2)@.
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
 floorSum :: Natural -> Natural -> Natural -> Natural -> Natural
 floorSum n0 m0 a0 b0 = go 0 n0 m0 a0 b0
   where
@@ -978,12 +1112,24 @@ floorSum n0 m0 a0 b0 = go 0 n0 m0 a0 b0
                then ans
                else go ans (yMax `Prelude.div` m) a m (yMax `mod` m)
 
--- | /O(w log w)/. The progression index of @v@: the unique @i@ in @[0, 2^w \/
+-- | /O(M(w) log w)/. The progression index of @v@: the unique @i@ in @[0, 2^w \/
 -- g)@ such that @start + i*stride ≡ v (mod 2^w)@, where @g = gcd(stride, 2^w)@.
 -- Requires @g@ to divide @(v - start) mod 2^w@.
 --
--- This costs O(w log w) for the modular inverse via 'invModPow2'; the step
+-- This is dominated by the modular inverse via 'invModPow2'; the step
 -- count of the progression itself, @n c@, is available directly.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'invModPow2': /O(M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 valueIndex :: Domain w -> Natural -> Natural
 valueIndex c@Domain{stride, mask} v =
   assert (proper c) $
@@ -997,22 +1143,34 @@ valueIndex c@Domain{stride, mask} v =
     m'   = (mask + 1) `divByPow2` g
     sInv = invModPow2 (stride `divByPow2` g) m'
 
--- | /O(w log w)/. Like 'valueIndex', but returns 'Nothing' when @v@ is not on
+-- | /O(M(w) log w)/. Like 'valueIndex', but returns 'Nothing' when @v@ is not on
 -- the coset of @c@ (so 'valueIndex'\'s precondition would be violated).
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'valueIndex': /O(M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 valueIndexMaybe :: Domain w -> Natural -> Maybe Natural
 valueIndexMaybe c v
   | wrapOffset c v `mod` strideGcd c == 0 = Just (valueIndex c v)
   | otherwise                             = Nothing
 {-# INLINE valueIndexMaybe #-}
 
--- | /O(w)/. The value at progression index @i@: @(start + i * stride) mod 2^w@.
+-- | /O(M(w))/. The value at progression index @i@: @(start + i * stride) mod 2^w@.
 -- Left inverse of 'valueIndex' on indices in @[0, 2^w \/ g)@.
 valueAt :: Domain w -> Natural -> Natural
 valueAt c@Domain{start, stride} i = assert (proper c) $
   modMask c (start + i * stride)
 {-# INLINE valueAt #-}
 
--- | /O(w)/. SASI and WI's @≤_x@: @a ≤_x b@ iff @(a - x) mod 2^w <= (b - x) mod
+-- | /O(A(w))/. SASI and WI's @≤_x@: @a ≤_x b@ iff @(a - x) mod 2^w <= (b - x) mod
 -- 2^w@. Equivalently, traversing the circle of bitvectors starting at @x@, @a@
 -- is reached no later than @b@.
 circLeq :: Natural -> Natural -> Natural -> Natural -> Bool
@@ -1022,8 +1180,9 @@ circLeq m x a b = (a + nx) .&. m <= (b + nx) .&. m
 -- ------------------------------------------------------------------
 -- * Construction
 
--- | Construct a progression from @(start, stride, n)@: the orbit
+-- | /O(A(w))/. Construct a progression from @(start, stride, n)@: the orbit
 -- @{ start, start + stride, ..., start + n·stride }@ (all mod @2^w@).
+--
 -- Asserts that
 --
 -- * @start@ and @stride@ fit in @w@ bits
@@ -1072,16 +1231,28 @@ mk w s st nn =
     c = Domain { start = s', stride = st', n = n', mask = m }
 {-# INLINE mk #-}
 
--- | /O(w)/. The top element of the lattice: the progression containing every
+-- | /O(A(w))/. The top element of the lattice: the progression containing every
 -- @w@-bit value, @(0, 1, 2^w - 1)@.
 top :: NatRepr w -> Domain w
 top w = mk w 0 1 (integerToNatural (maxUnsigned w))
 {-# INLINE top #-}
 
--- | /O(n · w)/. Construct the tightest progression covering an ascending list of
+-- | /O(n · G(w))/. Construct the tightest progression covering an ascending list of
 -- distinct unsigned bitvectors. Elements are assumed to lie in @[0, 2^w)@ and
 -- to be strictly increasing (no duplicates). Returns 'Nothing' on the empty
 -- list.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * @n@ 'Prelude.gcd' folds over the successive differences: /O(n · G(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(n · w)/
+-- 2. /O(n · w^2)/
+-- 3. /O(n · Õ(w))/
 fromAscEltList :: (1 <= w) => NatRepr w -> [Natural] -> Maybe (Domain w)
 -- References:
 --
@@ -1125,15 +1296,15 @@ instance Hashable (Canonical w) where
     salt `hashWithSalt` start `hashWithSalt` stride
          `hashWithSalt` n `hashWithSalt` mask
 
--- | /O(w)/. Lossless canonical form: the unique 'proper' representative of a
+-- | /O(M(w))/. Lossless canonical form: the unique 'proper' representative of a
 -- progression's /set/, wrapped in 'Canonical'. Two progressions denote the same
 -- set iff their 'canonicalize' results are equal (the @'Eq' 'Canonical'@
--- instance), so consumers who want @O(1)@ equality — hash-consing, dedup, memo
--- keys — can 'canonicalize' on demand and then use the derived @Eq@\/@Ord@\/
+-- instance), so consumers who want @O(1)@ equality (hash-consing, dedup, memo
+-- keys) can 'canonicalize' on demand and then use the derived @Eq@\/@Ord@\/
 -- @Hashable@.
 --
 -- Among the 'proper' representations of a set this picks the one with the
--- smallest stride, tie-broken by smallest start. It is @O(w)@ rather than a
+-- smallest stride, tie-broken by smallest start. It avoids a
 -- number-theoretic search because the only representational freedom left to
 -- collapse on a non-saturated progression is /orientation/: a progression and
 -- its reverse denote the same set with strides @t@ and @2^w − t@, so the
@@ -1204,7 +1375,7 @@ canonicalize c@Domain{start = s, stride = t, n = nn, mask = m} = Canonical $
 -- ------------------------------------------------------------------
 -- * Conversion
 
--- | /O(w)/. Convert a progression to an arithmetic domain (wrapped interval).
+-- | /O(M(w))/. Convert a progression to an arithmetic domain (wrapped interval).
 --
 -- For non-self-wrapping progressions, the result is the interval @[start, end]@
 -- (over-approximating by collapsing to stride = 1). For self-wrapping progressions,
@@ -1220,7 +1391,7 @@ toArith :: Domain w -> A.Domain w
 -- very complex. You can find it in the git history if you need it.
 toArith c = if isSelfWrapping c then cosetArc c else startEndArc c
 
--- | The arith hull of a progression: the arc @[start, start + n·stride]@. In
+-- | /O(M(w))/. The arith hull of a progression: the arc @[start, start + n·stride]@. In
 -- contrast to 'toArith', saturates to top when @n·stride >= 2^w@ (i.e., on
 -- self-wrapping orbits).
 hull :: Domain w -> A.Domain w
@@ -1228,7 +1399,7 @@ hull c@Domain{start = s, stride = t, n = nn, mask = m} =
   assert (proper c) $
   A.interval (toInteger m) (toInteger s) (toInteger (nn * t))
 
--- | /O(w)/. The arc @[start, ..., end]@ on the number circle, ignoring stride.
+-- | /O(M(w))/. The arc @[start, ..., end]@ on the number circle, ignoring stride.
 -- The convex hull (in the wrapped-interval sense) of a non-self-wrapping orbit;
 -- under-approximates a self-wrapping orbit, so caller must ensure the input
 -- is not self-wrapping.
@@ -1239,7 +1410,7 @@ startEndArc c@Domain{start = s, stride = t, n = nn, mask = m} =
   -- Non-self-wrapping: @n·stride < 2^w@, so the arc length is exactly @n·t@.
   A.interval (toInteger m) (toInteger s) (toInteger (nn * t))
 
--- | /O(w)/. The arc @[start \`mod\` g, ..., start \`mod\` g + (2^w - g)]@,
+-- | /O(A(w))/. The arc @[start \`mod\` g, ..., start \`mod\` g + (2^w - g)]@,
 -- where @g = gcd(stride, 2^w)@. The union of all bitvectors congruent to
 -- @start@ modulo @g@; sound on any progression, but only a tight cover on
 -- self-wrapping orbits, so caller must ensure the input is self-wrapping.
@@ -1252,7 +1423,7 @@ cosetArc c@Domain{start = s, mask = m} =
       lo = toInteger (s .&. (g - 1))
   in A.interval imask lo (imask + 1 - toInteger g)
 
--- | /O(w)/. Convert an arithmetic domain (wrapped interval) to a progression.
+-- | /O(A(w))/. Convert an arithmetic domain (wrapped interval) to a progression.
 fromArith :: NatRepr w -> A.Domain w -> Maybe (Domain w)
 fromArith w = \case
   A.BVDAny _mask -> Just (mk w 0 1 (integerToNatural imask))
@@ -1267,7 +1438,7 @@ fromArith w = \case
 -- common module that 'Strides' can import (e.g. by adding a dep from
 -- 'BV.Bitwise' to 'BV.Arith'), inline-call it instead.
 
--- | /O(w)/. Convert a progression to a bitwise domain.
+-- | /O(M(w))/. Convert a progression to a bitwise domain.
 --
 -- A thin wrapper around 'forcedBits': the resulting bitwise domain has
 -- forced-1 bits exactly @ones@ and forced-0 bits exactly @zeros@. Both
@@ -1275,7 +1446,7 @@ fromArith w = \case
 toBitwise :: Domain w -> B.Domain w
 toBitwise = strideBitwise
 
--- | /O(w)/. Bitwise domain capturing every bit forced by the progression.
+-- | /O(M(w))/. Bitwise domain capturing every bit forced by the progression.
 -- Equivalent to 'toBitwise'; named for compatibility with downstream
 -- callers that distinguish stride-derived bitwise info from arc-derived
 -- info. Span pinning (see 'forcedBits') subsumes the high-bit information
@@ -1286,7 +1457,7 @@ strideBitwise c =
       (zeros, ones) = forcedBits c
   in B.interval imask (toInteger ones) (imask `Bits.xor` toInteger zeros)
 
--- | /O(w)/. Bits forced to known values across the whole orbit, as a
+-- | /O(M(w))/. Bits forced to known values across the whole orbit, as a
 -- @(zeros, ones)@ pair: a bit set in @zeros@ is @0@ in every member; a
 -- bit set in @ones@ is @1@ in every member; a bit in neither may take
 -- both values. The two values are bit-disjoint
@@ -1329,13 +1500,13 @@ forcedBits c@Domain{start = s, mask = m} =
       highZeros    = highForced Bits..&. notN s
   in (lowZeros Bits..|. highZeros, lowOnes Bits..|. highOnes)
 
--- | /O(w)/. The smallest value @y@ with @a <= y <= 2^w - 1@ that agrees
--- with the forced-bit pair @(zeros, ones)@ — a @0@ at every bit set in
--- @zeros@, a @1@ at every bit set in @ones@ — or 'Nothing' if no such
+-- | /O(A(w))/. The smallest value @y@ with @a <= y <= 2^w - 1@ that agrees
+-- with the forced-bit pair @(zeros, ones)@ (a @0@ at every bit set in
+-- @zeros@, a @1@ at every bit set in @ones@), or 'Nothing' if no such
 -- value exists. See 'nextAgreeingCorrect'.
 --
 -- A constant number of word-wide bit operations, /not/ a per-bit loop
--- (cf. the /O(w^2)/ 'warrenAndLo').
+-- (cf. the /O(w · A(w))/ 'warrenAndLo').
 nextAgreeing ::
   Natural {- ^ @mask@ -} ->
   Natural {- ^ @zeros@ -} ->
@@ -1371,7 +1542,7 @@ nextAgreeing m zeros ones a
     !hb = highestSetBit v
     keepAbove b = m `Bits.xor` (2 * b - 1)
 
--- | /O(w)/. The largest value @y@ with @0 <= y <= a@ that agrees with the
+-- | /O(A(w))/. The largest value @y@ with @0 <= y <= a@ that agrees with the
 -- forced-bit pair @(zeros, ones)@, or 'Nothing' if no such value exists.
 -- Dual of 'nextAgreeing'; see 'prevAgreeingCorrect'.
 prevAgreeing ::
@@ -1396,10 +1567,10 @@ prevAgreeing m zeros ones a
     !hb = highestSetBit v
     keepAbove b = m `Bits.xor` (2 * b - 1)
 
--- | /O(w)/. The signedness-agnostic core behind 'fromForcedBits' and
+-- | /O(A(w))/. The signedness-agnostic core behind 'fromForcedBits' and
 -- 'fromForcedBitsSigned': the progression covering every @w@-bit value
--- that agrees with the forced-bit pair @(zeros, ones)@ — a @0@ at every
--- bit set in @zeros@, a @1@ at every bit set in @ones@ — and lies on the
+-- that agrees with the forced-bit pair @(zeros, ones)@ (a @0@ at every
+-- bit set in @zeros@, a @1@ at every bit set in @ones@) and lies on the
 -- circular arc of @len + 1@ values starting at @anchor@, i.e.
 -- @(x - anchor) mod 2^w <= len@. See 'fromForcedBitsArcCorrect'.
 --
@@ -1466,8 +1637,8 @@ fromForcedBitsArc w (zeros, ones) (anchor, len) =
               -- violated; return a proper (but unspecified) singleton.
               Nothing -> mk w ones 1 0
 
--- | /O(w)/. Find the first and last positions, along a circular arc, of the
--- values matching a forced-bit pattern — the search at the heart of
+-- | /O(A(w))/. Find the first and last positions, along a circular arc, of the
+-- values matching a forced-bit pattern: the search at the heart of
 -- 'fromForcedBitsArc'.
 --
 -- The setting is the circle of @2^w@ bitvector values @0 .. m@ (where
@@ -1547,14 +1718,14 @@ arcExtremes m zeros ones anchor len =
                Just y | y >= anchor -> Just (y - anchor)
                _ -> Nothing
 
--- | /O(w)/. The progression covering every @w@-bit value that agrees with
--- the forced-bit pair @(zeros, ones)@ — a @0@ at every bit set in @zeros@,
--- a @1@ at every bit set in @ones@ — with no interval constraint. See
+-- | /O(A(w))/. The progression covering every @w@-bit value that agrees with
+-- the forced-bit pair @(zeros, ones)@ (a @0@ at every bit set in @zeros@,
+-- a @1@ at every bit set in @ones@) with no interval constraint. See
 -- 'fromForcedCorrect'.
 --
 -- Preconditions: @zeros@ and @ones@ are bit-disjoint and fit in @w@ bits.
--- Unlike 'fromForcedBits' there is no nonemptiness precondition — the set
--- always contains at least @ones@.
+-- Unlike 'fromForcedBits' there is no nonemptiness precondition (the set
+-- always contains at least @ones@).
 fromForced ::
   (1 <= w) =>
   NatRepr w ->
@@ -1580,9 +1751,9 @@ fromForced w (zeros, ones) =
        else let !d = lowestSetBit free
             in mk w ones d (free `divByPow2` d)
 
--- | /O(w)/. The progression covering every @w@-bit value that agrees with
--- the forced-bit pair @(zeros, ones)@ — a @0@ at every bit set in @zeros@,
--- a @1@ at every bit set in @ones@ — and lies in the unsigned interval
+-- | /O(A(w))/. The progression covering every @w@-bit value that agrees with
+-- the forced-bit pair @(zeros, ones)@ (a @0@ at every bit set in @zeros@,
+-- a @1@ at every bit set in @ones@) and lies in the unsigned interval
 -- @[lo, hi]@. See 'fromForcedBitsCorrect'.
 --
 -- Preconditions: @zeros@ and @ones@ are bit-disjoint and fit in @w@ bits,
@@ -1602,7 +1773,7 @@ fromForcedBits w bits (lo, hi) =
   assert (lo <= hi) $
   fromForcedBitsArc w bits (lo, hi - lo)
 
--- | /O(w)/. Signed-interval variant of 'fromForcedBits': the progression
+-- | /O(A(w))/. Signed-interval variant of 'fromForcedBits': the progression
 -- covering every @w@-bit value that agrees with the forced-bit pair
 -- @(zeros, ones)@ and whose /signed/ value lies in @[lo, hi]@. See
 -- 'fromForcedBitsSignedCorrect'.
@@ -1625,7 +1796,7 @@ fromForcedBitsSigned w bits (lo, hi) =
   assert (NR.minSigned w <= lo && hi <= NR.maxSigned w) $
   fromForcedBitsArc w bits (asN w lo, integerToNatural (hi - lo))
 
--- | /O(w)/. Convert a bitwise domain to a progression: 'fromForcedBits' at
+-- | /O(A(w))/. Convert a bitwise domain to a progression: 'fromForcedBits' at
 -- the bitwise domain's forced bits and numeric bounds.
 fromBitwise :: NatRepr w -> B.Domain w -> Maybe (Domain w)
 fromBitwise w b =
@@ -1639,7 +1810,22 @@ fromBitwise w b =
 -- ------------------------------------------------------------------
 -- * Queries
 
--- | /O(w log w)/. Test if the given value is a member of the progression.
+-- | /O(M(w) log w)/. Test if the given value is a member of the progression.
+--
+-- Dominated by the 'valueIndexMaybe' progression-index lookup, which routes
+-- through the Hensel modular inverse ('invModPow2').
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'valueIndexMaybe': /O(M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 --
 -- == Examples
 --
@@ -1666,11 +1852,24 @@ member c v = assert (proper c) $
     Just i  -> i <= n c
     Nothing -> False
 
--- | /O(2^w \/ g)/, where @g = gcd(stride, 2^w)@. Concretization function.
+-- | /O(2^w \/ g · A(w))/, where @g = gcd(stride, 2^w)@. Concretization
+-- function.
 --
 -- Enumerates the (distinct) elements of a progression, in the order they are
 -- produced by the progression: @start, start + stride, ..., end@ (all mod
 -- @2^w@).
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * @2^w \/ g@ elements (the orbit length), each one masked addition: /O(2^w \/ g · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(2^w \/ g)/
+-- 2. /O(2^w \/ g · w)/
+-- 3. /O(2^w \/ g · w)/
 toList :: Domain w -> [Natural]
 -- References:
 --
@@ -1682,7 +1881,7 @@ toList c@Domain{start, stride, n} = assert (proper c) $ go 0 start
       | i == n    = [v]
       | otherwise = v : go (i + 1) (modMask c (v + stride))
 
--- | /O(w)/. The number of distinct values in the progression: @n + 1@.
+-- | /O(A(w))/. The number of distinct values in the progression: @n + 1@.
 --
 -- == Examples
 --
@@ -1697,11 +1896,11 @@ size :: Domain w -> Natural
 size c@Domain{n} = assert (proper c) $ n + 1
 {-# INLINE size #-}
 
--- | /O(w)/. Exact set-equality: 'True' iff @a@ and @b@ denote the same set.
--- This is literally @'canonicalize' a == 'canonicalize' b@ — 'canonicalize' is
+-- | /O(M(w))/. Exact set-equality: 'True' iff @a@ and @b@ denote the same set.
+-- This is literally @'canonicalize' a == 'canonicalize' b@ ('canonicalize' is
 -- a lossless normal form, so structural equality of canonical forms /is/ set
--- equality (see 'eqCorrect'). At @O(w)@ it dominates the @O(w^2)@ 'eqExact'
--- oracle it is checked against.
+-- equality, see 'eqCorrect'). It dominates the 'eqExact' oracle it is checked
+-- against.
 --
 -- == Examples
 --
@@ -1712,7 +1911,7 @@ size c@Domain{n} = assert (proper c) $ n + 1
 eq :: Domain w -> Domain w -> Bool
 eq a b = canonicalize a == canonicalize b
 
--- | /O(w)/. Sound, reflexive, and transitive but coarse approximation of
+-- | /O(A(w))/. Sound, reflexive, and transitive but coarse approximation of
 -- 'leqExact'. Use 'leqPrecise' for a finer (but non-transitive) check, or
 -- 'leqExact' for an exact (but quadratic) one.
 --
@@ -1741,8 +1940,8 @@ leq :: Domain w -> Domain w -> Bool
 --       chain: @⟨stride a⟩ ⊆ ⟨stride b⟩ ⊆ ⟨stride c⟩@, etc.
 --
 -- A singleton-on-orbit fast path would also be sound and would catch
--- additional cases, but membership testing is /O(w log w)/ ('member'); we
--- keep that path in 'leqPrecise' instead so 'leq' stays /O(w)/.
+-- additional cases, but membership testing is /O(M(w) log w)/ ('member'); we
+-- keep that path in 'leqPrecise' instead so 'leq' stays /O(A(w))/.
 leq a b = assert (proper a) $ assert (proper b) $
   equal               -- (1)
   || (bIsFull         -- (2a)
@@ -1755,8 +1954,23 @@ leq a b = assert (proper a) $ assert (proper b) $
     cosetMatches      = wrapOffset b (start a) `mod` strideGcd b == 0
     subgroupContained = stride a `mod` strideGcd b == 0
 
--- | /O(w log w)/. Sound and finer approximation of 'leqExact' than 'leq'.
+-- | /O(M(w) log w)/. Sound and finer approximation of 'leqExact' than 'leq'.
 -- Reflexive but not transitive in general.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'valueIndexMaybe': /O(M(w) log w)/
+-- * divisibility test (@mod@ by an arbitrary stride): /O(M(w))/
+--
+-- Total: /O(M(w) log w + M(w))/ = /O(M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 leqPrecise :: Domain w -> Domain w -> Bool
 -- The check embeds @a@\'s orbit into @b@\'s index space:
 --
@@ -1785,10 +1999,22 @@ leqPrecise a b = assert (proper a) $ assert (proper b) $
     aStepInB      = stride a `Prelude.div` stride b
     aFitsInsideB i = i + n a * aStepInB <= n b
 
--- | /O(w log w)/. Like 'leqExact', but never runs the quadratic window count:
--- returns @Just@ the exact answer on the sub-domain it can decide cheaply, and
--- 'Nothing' on the one residual case that genuinely needs 'leqExact'\''s
--- 'floorSum'. Exact wherever it is defined.
+-- | /O(M(w) log w)/. Like 'leqExact', but never runs the quadratic window
+-- count: returns @Just@ the exact answer on the sub-domain it can decide
+-- cheaply, and 'Nothing' on the one residual case that genuinely needs
+-- 'leqExact'\''s 'floorSum'. Exact wherever it is defined.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * Hensel modular inverses ('valueIndexMaybe'\/'valueIndex' and 'invModPow2'): /O(M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 leqExactPartial :: Domain w -> Domain w -> Maybe Bool
 -- Writing @stride = 2^v · m@ for odd @m@, the subgroup of @Z\/2^w@ generated
 -- by @stride@ is @⟨2^v⟩@ — the odd factor @m@ is invertible mod @2^w\/2^v@
@@ -1855,11 +2081,26 @@ leqExactPartial a b = assert (proper a) $ assert (proper b) $
           backward = iEnd + nA * (mB - aStep)
       in iAStart <= n b && (forward <= n b || backward <= n b)
 
--- | /O(w^2)/. The 'floorSum'-based window count that decides the one case
+-- | /O(w · M(w))/. The 'floorSum'-based window count that decides the one case
 -- 'leqExactPartial' leaves open (a large window over a non-full @b@). Of the
 -- @n a + 1@ visited @b@-indices @{ iAStart + i · aStep mod orbitLen b }@,
 -- count how many fall in @[0, n b]@; @a@\'s window fits iff that count is
 -- @n a + 1@.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * two 'floorSum' Euclidean recursions: /O(w · M(w))/
+-- * 'invModPow2' setup: /O(M(w) log w)/
+--
+-- Total: /O(w · M(w) + M(w) log w)/ = /O(w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
 --
 -- Correct on /any/ proper @a@, @b@ with @start a@ on @b@\'s coset and
 -- @⟨stride a⟩ ⊆ ⟨stride b⟩@ (it does not rely on the large-window guard); the
@@ -1878,18 +2119,33 @@ leqExactWindow a b =
                     - floorSum nA1 mB aStep (iAStart + mB - wWidth)
   in hits == nA1
 
--- | /O(w log w)/, except /O(w^2)/ on the residual case: @b@\'s window is
+-- | /O(M(w) log w)/, except /O(w · M(w))/ on the residual case: @b@\'s window is
 -- larger than half its orbit, @b@ is not full, @a@ has at most as many points
 -- as @b@\'s window, and @a@\'s indices in @b@\'s index space neither fit
 -- forward nor backward without wrapping. Partial order on progressions:
 -- @leqExact a b@ iff every element of @a@ is in @b@.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'leqExactPartial' (common path): /O(M(w) log w)/
+-- * 'leqExactWindow' (residual 'floorSum' window count): /O(w · M(w))/
+--
+-- Total: /O(M(w) log w + w · M(w))/ = /O(w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
 leqExact :: Domain w -> Domain w -> Bool
 -- 'leqExactPartial' decides everything but the residual large-window wrapping
 -- case in @O(w)@; that remaining case is the only one where @a@ can fit @b@\'s
 -- window by wrapping, so it falls back to the @O(w^2)@ 'leqExactWindow' count.
 leqExact a b = fromMaybe (leqExactWindow a b) (leqExactPartial a b)
 
--- | /O(w)/. Does this progression self-wrap? A progression is self-wrapping if the
+-- | /O(M(w))/. Does this progression self-wrap? A progression is self-wrapping if the
 -- cumulative distance traversed by its orbit (@n * stride@, where @n@ is the
 -- number of steps from @start@ to @end@) exceeds @2^w@. Geometrically: walking
 -- around the number circle from @start@, the orbit passes its starting point
@@ -1902,12 +2158,24 @@ isSelfWrapping :: Domain w -> Bool
 isSelfWrapping Domain{stride, n, mask} = n * stride > mask
 {-# INLINE isSelfWrapping #-}
 
--- | /O(w^2)/. Exact set-equality on progressions: 'True' iff @a@ and @b@
+-- | /O(w · M(w))/. Exact set-equality on progressions: 'True' iff @a@ and @b@
 -- denote the same set of bitvectors. Short-circuits on size mismatch (a
--- necessary condition); otherwise checks 'leqExact' in one direction —
+-- necessary condition); otherwise checks 'leqExact' in one direction:
 -- equal cardinalities plus containment force set equality.
 --
--- Internal: the public equality test is 'eq' (@O(w)@ via 'canonicalize'). This
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'leqExact' (worst case its 'floorSum' window): /O(w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
+--
+-- Internal: the public equality test is 'eq' (@O(A(w))@ via 'canonicalize'). This
 -- @leqExact@-based decision is retained as an independent oracle that 'eq' is
 -- checked against (see 'eqCorrect'); 'eqExactCorrect' in turn ties it to the
 -- 'toList' ground truth, so the two algorithms cross-check each other.
@@ -1980,7 +2248,7 @@ liftBitwise2 w f a b =
 -- ------------------------------------------------------------------
 -- * Arithmetic
 
--- | /O(w)/. Negation: stride is preserved; the orbit reverses, so the new
+-- | /O(M(w))/. Negation: stride is preserved; the orbit reverses, so the new
 -- @start@ is the old @end@ negated. The step count @n@ is unchanged.
 --
 -- == Examples
@@ -1995,7 +2263,7 @@ negate w c@Domain{stride, n = nn, mask} =
   assert (proper c) $
   mk w (modNeg mask (end c)) stride nn
 
--- | /O(w)/. Addition.
+-- | /O(G(w))/. Addition.
 --
 -- == Examples
 --
@@ -2025,7 +2293,7 @@ negate w c@Domain{stride, n = nn, mask} =
 add :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 add w = orientRobustAddSub w (addRaw w)
 
--- | /O(w)/. The single-orientation addition kernel (see 'add' for the
+-- | /O(G(w))/. The single-orientation addition kernel (see 'add' for the
 -- orientation-robust wrapper that should be preferred).
 addRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
@@ -2054,7 +2322,7 @@ addRaw w a b =
     (d, n') = addSubStrideAndSteps (n a) (stride a) (n b) (stride b)
     start' = modMask a (start a + start b)
 
--- | /O(w)/. Subtraction.
+-- | /O(G(w))/. Subtraction.
 --
 -- == Examples
 --
@@ -2072,7 +2340,7 @@ addRaw w a b =
 sub :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 sub w = orientRobustAddSub w (subRaw w)
 
--- | /O(w)/. The single-orientation subtraction kernel (see 'sub' for the
+-- | /O(G(w))/. The single-orientation subtraction kernel (see 'sub' for the
 -- orientation-robust wrapper that should be preferred).
 subRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 subRaw w a b =
@@ -2099,7 +2367,7 @@ addSubStrideAndSteps na sa nb sb = (d, n')
           _      -> Prelude.gcd sa sb
     n' = na * (sa `div` d) + nb * (sb `div` d)
 
--- | /O(w)/. The /reverse orientation/ of a progression: the same set walked
+-- | /O(M(w))/. The /reverse orientation/ of a progression: the same set walked
 -- backwards. The new @start@ is the old 'end', the stride becomes its modular
 -- additive inverse @2^w - stride@, and the step count @n@ is unchanged.
 --
@@ -2126,8 +2394,8 @@ reverseD w c@Domain{stride, n = nn, mask} =
 -- the same set, every candidate is a sound abstraction of the same true
 -- result; taking the cardinality-minimum is therefore sound and /dominates/ the
 -- single-orientation result (which is among the candidates). See
--- 'addRobustDominatesRaw'. Cost is /O(w)/ — a 4x constant factor, no
--- asymptotic change.
+-- 'addRobustDominatesRaw'. Cost is a 4x constant factor over @op@, so the same
+-- complexity class.
 --
 -- Orientations that coincide after 'mk' canonicalization (singletons, full
 -- cosets) are deduplicated, so degenerate operands incur no extra work.
@@ -2148,7 +2416,7 @@ orientRobust w op a b =
     orientations c = let r = reverseD w c in if r == c then [c] else [c, r]
     minBySize x y = if size x <= size y then x else y
 
--- | /O(w)/. Split a progression by index parity into two sub-progressions
+-- | /O(A(w))/. Split a progression by index parity into two sub-progressions
 -- with stride @2·stride@: the even-index orbit @(start, 2t, n \`div\` 2)@ and
 -- the odd-index orbit @(start + t, 2t, (n - 1) \`div\` 2)@. Their union is
 -- exactly @c@, partitioned cleanly: writing @stride = 2^v · m@ for odd @m@,
@@ -2187,8 +2455,9 @@ psplit w c@Domain{start = s, stride = t, n = nn, mask = m} =
 -- worsens @op@ by cardinality.
 --
 -- Costs at most @5 · cost(op) + 3 · cost(pseudoJoin) + O(w)@ (the raw call,
--- 4 sub-ops, 3 folded pseudo-joins, and 2 'psplit' calls), still /O(w)/ for
--- /O(w)/ ops. Worth using for ops where the cross-operand interaction is
+-- 4 sub-ops, 3 folded pseudo-joins, and 2 'psplit' calls), so a constant factor
+-- over @op@ and 'pseudoJoin', the same complexity class. Worth using for ops
+-- where the cross-operand interaction is
 -- sensitive to bit-@v@ pinning (e.g. 'andPrecise', where each piece has one
 -- more fixed low bit than the input).
 psplitOp2 ::
@@ -2469,15 +2738,15 @@ scale w k = liftArith1 w (A.scale k)
 --   * /At least one wraps/: 'mulCorners' and 'mulCutUS' are
 --     incomparable. We compute both and take the cardinality minimum.
 
--- | /O(w)/. Multiplication.
+-- | /O(G(w))/. Multiplication.
 --
 -- Uses the cheap 'pseudoMeet' and 'pseudoJoin' for the cut + ×_us path. The
 -- @leqExact@-aware 'pseudoMeetPrecise'/'pseudoJoinPrecise' make individual
 -- sub-products tighter, but 'pseudoJoin' isn't monotone, so feeding tighter
 -- inputs through it can produce a /less/ tight aggregate. Empirically at
--- @w = 4@ the @O(w^2)@ variant is incomparable with this @O(w)@ one
--- (sometimes wins, often ties, sometimes loses), and we don't pay the
--- @w@-factor cost for an unreliable improvement.
+-- @w = 4@ the precise variant is incomparable with this cheaper one
+-- (sometimes wins, often ties, sometimes loses), and we don't pay its extra
+-- 'leqExact' cost for an unreliable improvement.
 --
 -- Like 'add'\/'sub', 'mul' is orientation-robust ('orientRobust'): the corner
 -- products and the cut\'s integer strides both depend on operand orientation,
@@ -2486,7 +2755,7 @@ scale w k = liftArith1 w (A.scale k)
 mul :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 mul w = orientRobust w (mulRaw w)
 
--- | /O(w)/. The single-orientation multiplication kernel (see 'mul' for the
+-- | /O(G(w))/. The single-orientation multiplication kernel (see 'mul' for the
 -- orientation-robust wrapper that should be preferred).
 mulRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
@@ -2584,7 +2853,7 @@ mulCutUS meetOp joinOp w a b =
             []     -> mk w 0 1 0  -- unreachable on proper inputs
             (c:cs) -> Prelude.foldr (joinOp w) c cs
 
--- | /O(w)/. The pole-crossing cut WI 3.2 uses for multiplication. We don't
+-- | /O(M(w))/. The pole-crossing cut WI 3.2 uses for multiplication. We don't
 -- need WI 3.2's full @ssplit ∘ nsplit@ here, just 'ssplit': the @×_s@
 -- sub-product handles signed-pole crossings via 'zbounds' style anchoring
 -- (treating an arc that crosses the signed pole as a contiguous arc in the
@@ -2605,7 +2874,7 @@ mulNoStraddleUS meetOp w u v =
       Nothing -> []
       Just c  -> [c]
 
--- | /O(w)/. Unsigned product of two cut pieces: treat the pieces as integer
+-- | /O(G(w))/. Unsigned product of two cut pieces: treat the pieces as integer
 -- intervals on @[0, 2^w)@, multiply with the same coset/step-count formula as
 -- 'mul', and saturate to top when the integer extent exceeds @2^w@.
 mulNoStraddleU ::
@@ -2769,7 +3038,7 @@ scaleSingleton w k c =
        then mk w s' 1 0  -- @k·t ≡ 0 (mod 2^w)@: every step lands on @k·s@.
        else mk w s' t' (clampToOrbit (mask c) t' (n c))
 
--- | /O(w)/. Unsigned division.
+-- | /O(M(w))/. Unsigned division.
 udiv :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
@@ -2807,7 +3076,7 @@ udivConst w a b
 urem :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 urem w = liftArith2 w A.urem
 
--- | /O(w)/. Signed division.
+-- | /O(M(w))/. Signed division.
 sdiv :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
 --
@@ -2893,7 +3162,7 @@ hullArith w = \case
 -- ------------------------------------------------------------------
 -- ** Arithmetic (SMT-LIB div-by-zero semantics)
 
--- | /O(w)/. Sound test for @0 ∈ γ(c)@ that avoids the @O(w log w)@ modular
+-- | /O(M(w))/. Sound test for @0 ∈ γ(c)@ that avoids the /O(M(w) log w)/ modular
 -- inverse of 'member'. Exact on non-self-wrapping progressions; a sound
 -- over-approximation (the coset condition alone) on self-wrapping ones.
 -- Used by the SMT-LIB division wrappers to decide the div-by-zero case.
@@ -2910,7 +3179,7 @@ containsZero c
   | otherwise        = woff `mod` stride c == 0 && woff `Prelude.div` stride c <= n c
   where woff = wrapOffset c 0
 
--- | /O(w)/. Unsigned division with SMT-LIB div-by-zero semantics.
+-- | /O(M(w))/. Unsigned division with SMT-LIB div-by-zero semantics.
 udivSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- If the divisor may be zero, join the ordinary quotient with the SMT-LIB
 -- all-ones result for the zero case.
@@ -2922,7 +3191,7 @@ udivSmtlib w a b
 uremSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 uremSmtlib w = liftArith2 w A.uremSmtlib
 
--- | /O(w)/. Signed division with SMT-LIB div-by-zero semantics.
+-- | /O(M(w))/. Signed division with SMT-LIB div-by-zero semantics.
 sdivSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- If the divisor may be zero, join the ordinary quotient with the sign-based
 -- SMT-LIB zero-divisor result.
@@ -2984,7 +3253,7 @@ _arithMeetCoset w arith d start' =
 -- ------------------------------------------------------------------
 -- ** Internal helpers
 
--- | /O(w)/. Sound unsigned @[lo, hi]@ range of an operand's orbit, suitable
+-- | /O(M(w))/. Sound unsigned @[lo, hi]@ range of an operand's orbit, suitable
 -- as input to interval-based bitwise bound algorithms (e.g. 'warrenAndLo').
 --
 --   * Non-wrap, non-self-wrap: @[start, end]@.
@@ -3010,11 +3279,23 @@ operandRange c@Domain{start = s, stride = t, n = nn, mask = m} =
        in (postMin, preMax)
      else (s, s + span_)                                  -- no wrap
 
--- | /O(w^2)/. Tight unsigned lower bound on @{ x .&. y | alo <= x <= ahi,
+-- | /O(w · A(w))/. Tight unsigned lower bound on @{ x .&. y | alo <= x <= ahi,
 -- blo <= y <= bhi }@.
 --
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * @w@ bit positions (MSB to LSB), each /O(A(w))/ of shifts\/masks\/comparisons: /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
+--
 -- /Hacker's Delight/ §4.3, minAND. Walks @w@ bit positions MSB to LSB,
--- doing /O(w)/ Natural ops per iteration (shifts, masks, comparisons).
+-- doing /A(w)/ Natural ops per iteration (shifts, masks, comparisons).
 warrenAndLo ::
   Natural {- ^ @mask@ -} ->
   Natural {- ^ @alo@ -} ->
@@ -3037,11 +3318,23 @@ warrenAndLo m alo ahi blo bhi =
              else if canFlip && bPrime <= bhi then go a bPrime (i - 1)
              else go a b (i - 1)
 
--- | /O(w^2)/. Tight unsigned upper bound on @{ x .&. y | alo <= x <= ahi,
+-- | /O(w · A(w))/. Tight unsigned upper bound on @{ x .&. y | alo <= x <= ahi,
 -- blo <= y <= bhi }@.
 --
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * @w@ bit positions (MSB to LSB), each /O(A(w))/ of shifts\/masks\/comparisons: /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
+--
 -- /Hacker's Delight/ §4.3, maxAND. Walks @w@ bit positions MSB to LSB,
--- doing /O(w)/ Natural ops per iteration (shifts, masks, comparisons).
+-- doing /A(w)/ Natural ops per iteration (shifts, masks, comparisons).
 warrenAndHi ::
   Natural {- ^ @mask@ -} ->
   Natural {- ^ @alo@ -} ->
@@ -3068,7 +3361,7 @@ warrenAndHi m alo ahi blo bhi =
 -- ------------------------------------------------------------------
 -- ** Definitions
 
--- | /O(w)/. Bitwise complement.
+-- | /O(M(w))/. Bitwise complement.
 --
 -- == Examples
 --
@@ -3090,7 +3383,7 @@ not w c@Domain{stride, n = nn, mask} =
   assert (proper c) $
   mk w (mask - end c) stride nn
 
--- | /O(w)/. The cheap bitwise-AND kernel: a single arithmetic pass, no parity
+-- | /O(M(w))/. The cheap bitwise-AND kernel: a single arithmetic pass, no parity
 -- splitting or Warren bounds. See 'and' for the default ('psplitOp2'-wrapped)
 -- variant and 'andPrecise' for the tightest one.
 --
@@ -3140,7 +3433,7 @@ andFast w a b =
           !(_, bHi) = operandRange b
       in fromForcedBits w (za Bits..|. zb, oa Bits..&. ob) (0, min aHi bHi)
 
--- | /O(w)/. Bitwise AND. Wraps 'andFast' through 'psplitOp2': each 'psplit'
+-- | /O(M(w))/. Bitwise AND. Wraps 'andFast' through 'psplitOp2': each 'psplit'
 -- piece of an operand has one more fixed low bit than the operand itself, so
 -- running 'andFast' on each pair of pieces and pseudo-joining can be tighter
 -- than the single 'andFast' call. The min-by-size guard inside 'psplitOp2'
@@ -3150,7 +3443,7 @@ andFast w a b =
 and :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 and w = psplitOp2 w (andFast w)
 
--- | /O(w)/. Bitwise AND of a singleton @{k}@ with an arbitrary progression
+-- | /O(M(w))/. Bitwise AND of a singleton @{k}@ with an arbitrary progression
 -- @c@. Sound (over-approximating), and tighter than the generic 'andFast' path.
 --
 -- Not exact in general: @{ k & y | y ∈ c }@ need not be a single progression.
@@ -3172,7 +3465,19 @@ andSingleton w k c =
       !(_, cHi)       = operandRange c
   in fromForcedBits w (zeros', ones') (0, cHi)
 
--- | /O(w^2)/. Bitwise AND. At least as precise as 'and' on all inputs.
+-- | /O(w · A(w))/. Bitwise AND. At least as precise as 'and' on all inputs.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'andPreciseRaw' over @O(1)@ 'psplit' pieces (via 'psplitOp2'): /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
 --
 -- Wraps 'andPreciseRaw' through 'psplitOp2': each 'psplit' piece of an operand
 -- has one more fixed low bit than the operand itself (writing
@@ -3183,8 +3488,20 @@ andSingleton w k c =
 andPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 andPrecise w = psplitOp2 w (andPreciseRaw w)
 
--- | /O(w^2)/. The single-progression-pair AND kernel; see 'andPrecise' for
+-- | /O(w · A(w))/. The single-progression-pair AND kernel; see 'andPrecise' for
 -- the 'psplitOp2' wrapper that should be preferred.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * the 'warrenAndLo'\/'warrenAndHi' bounds and the 'fromForcedBits' pass, each a @w@-iteration /O(A(w))/ bit loop: /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
 andPreciseRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- The Warren interval bounds and the forced-bits bounds inside
 -- 'fromForcedBits' are incomparable (Warren is tight for the interval
@@ -3208,22 +3525,34 @@ andPreciseRaw w a b =
           !wHi = warrenAndHi m aLo aHi bLo bHi
       in fromForcedBits w (za Bits..|. zb, oa Bits..&. ob) (wLo, wHi)
 
--- | /O(w)/. The cheap bitwise-OR kernel (De Morgan over 'andFast'). See 'or'
+-- | /O(M(w))/. The cheap bitwise-OR kernel (De Morgan over 'andFast'). See 'or'
 -- for the default ('psplitOp2'-wrapped) variant and 'orPrecise' for the
 -- tightest one.
 orFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 orFast w a b = not w (andFast w (not w a) (not w b))
 
--- | /O(w)/. Bitwise OR (De Morgan over 'and'). At least as precise as 'orFast'
+-- | /O(M(w))/. Bitwise OR (De Morgan over 'and'). At least as precise as 'orFast'
 -- by cardinality. See 'orPrecise' for the variant that also uses Warren bounds.
 or :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 or w a b = not w (and w (not w a) (not w b))
 
--- | /O(w^2)/. Bitwise OR. At least as precise as 'or' on all inputs.
+-- | /O(w · A(w))/. Bitwise OR. At least as precise as 'or' on all inputs.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'andPrecise' (De Morgan): /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
 orPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 orPrecise w a b = not w (andPrecise w (not w a) (not w b))
 
--- | /O(w)/. The cheap bitwise-XOR kernel: a single 'forcedBits'-driven pass.
+-- | /O(M(w))/. The cheap bitwise-XOR kernel: a single 'forcedBits'-driven pass.
 -- See 'xor' for the default variant.
 --
 -- == Examples
@@ -3260,7 +3589,7 @@ xorFast w a b =
       !forcedOnes     = (za Bits..&. ob) Bits..|. (oa Bits..&. zb)
   in fromForced w (forcedZeros, forcedOnes)
 
--- | /O(w)/. Bitwise XOR. At least as tight (by cardinality) as both the
+-- | /O(M(w))/. Bitwise XOR. At least as tight (by cardinality) as both the
 -- 'psplitOp2'-wrapped 'xorFast' kernel and the De Morgan identity
 -- composition @(a | b) & ~(a & b)@.
 xor :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
@@ -3303,7 +3632,7 @@ refineConversion arith bits
   | wrapsU arith = if size bits <= size arith then bits else arith
   | otherwise = bits
 
--- | /O(w)/. Zero extension.
+-- | /O(M(w))/. Zero extension.
 zext ::
   forall w u.
   (1 <= w, w + 1 <= u) =>
@@ -3331,7 +3660,7 @@ zext _w c u =
                         (integerToNatural loI, integerToNatural hiI)
           in refineConversion arith bits
 
--- | /O(w)/. Sign extension.
+-- | /O(M(w))/. Sign extension.
 sext ::
   forall w u.
   (1 <= w, w + 1 <= u) =>
@@ -3371,7 +3700,7 @@ sext w c u =
     endC = start c + n c * stride c
     arcNoWrap = endC <= mW
 
--- | /O(u + v)/. Concatenation: @a@ supplies the high @u@ bits, @b@ the low
+-- | /O(M(u + v))/. Concatenation: @a@ supplies the high @u@ bits, @b@ the low
 -- @v@ bits.
 concat ::
   forall u v.
@@ -3397,7 +3726,7 @@ concat u a v b =
                     (integerToNatural loI, integerToNatural hiI)
       in refineConversion arith bits
 
--- | /O(w)/. Bit slice: the @n@ bits of the operand starting at bit @i@
+-- | /O(M(w))/. Bit slice: the @n@ bits of the operand starting at bit @i@
 -- (counting from the least significant bit).
 select ::
   forall i n w.
@@ -3423,7 +3752,7 @@ select i n _w c =
 -- ------------------------------------------------------------------
 -- * Shifts and rotations
 
--- | /O(w)/. Left shift.
+-- | /O(G(w))/. Left shift.
 --
 -- == Examples
 --
@@ -3440,7 +3769,7 @@ select i n _w c =
 shl :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 shl w = psplitOp2R w (shlRaw w)
 
--- | /O(w)/. The single-pair shift-left kernel; see 'shl' for the
+-- | /O(G(w))/. The single-pair shift-left kernel; see 'shl' for the
 -- 'psplitOp2R'-wrapped variant.
 shlRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
@@ -3488,7 +3817,7 @@ shlRaw w a b
     mulResult   = mul w a c
     arithResult = liftArith2 w (A.shl w) a b
 
--- | /O(w)/. Logical right shift.
+-- | /O(M(w))/. Logical right shift.
 --
 -- == Examples
 --
@@ -3513,7 +3842,7 @@ shlRaw w a b
 lshr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 lshr w = psplitOp2R w (lshrRaw w)
 
--- | /O(w)/. The single-pair logical-right-shift kernel; see 'lshr' for the
+-- | /O(M(w))/. The single-pair logical-right-shift kernel; see 'lshr' for the
 -- 'psplitOp2R'-wrapped variant.
 lshrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
@@ -3566,11 +3895,11 @@ lshrRaw w a b
     lo = fromInteger (l_a `Bits.shiftR` u_b')
     hi = fromInteger (u_a `Bits.shiftR` l_b')
 
--- | /O(w)/. Arithmetic right shift.
+-- | /O(M(w))/. Arithmetic right shift.
 ashr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 ashr w = psplitOp2R w (ashrRaw w)
 
--- | /O(w)/. The single-pair arithmetic-right-shift kernel; see 'ashr' for
+-- | /O(M(w))/. The single-pair arithmetic-right-shift kernel; see 'ashr' for
 -- the 'psplitOp2R'-wrapped variant.
 ashrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 -- References:
@@ -3633,13 +3962,13 @@ ashrRaw w a b
     lo = l_a `Bits.shiftR` (if l_a < 0 then l_b' else u_b')
     hi = u_a `Bits.shiftR` (if u_a < 0 then u_b' else l_b')
 
--- | /O(w)/. Bitwise rotate-left. Wraps 'rolRaw' through 'psplitOp2'. See
+-- | /O(M(w))/. Bitwise rotate-left. Wraps 'rolRaw' through 'psplitOp2'. See
 -- 'rolPrecise' for the tighter (and more expensive) variant that intersects
 -- forced bits across every reachable residue.
 rol :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rol w = psplitOp2 w (rolRaw w)
 
--- | /O(w)/. The single-pair fast rotate-left kernel; see 'rol' for the
+-- | /O(M(w))/. The single-pair fast rotate-left kernel; see 'rol' for the
 -- 'psplitOp2'-wrapped variant. Tight when @b@\'s residues mod @w@ collapse
 -- to a single value (a constant rotation amount, including the singleton
 -- and stride-multiple-of-@w@ cases); otherwise falls back to the
@@ -3648,35 +3977,83 @@ rol w = psplitOp2 w (rolRaw w)
 rolRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rolRaw w a b = rotFastRaw w a b (\x r -> rotateLeftNat w x r)
 
--- | /O(w)/. Bitwise rotate-right. Mirrors 'rol'.
+-- | /O(M(w))/. Bitwise rotate-right. Mirrors 'rol'.
 ror :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 ror w = psplitOp2 w (rorRaw w)
 
--- | /O(w)/. The single-pair fast rotate-right kernel; see 'ror' for the
+-- | /O(M(w))/. The single-pair fast rotate-right kernel; see 'ror' for the
 -- 'psplitOp2'-wrapped variant. Mirrors 'rolRaw'.
 rorRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rorRaw w a b = rotFastRaw w a b (\x r -> rotateRightNat w x r)
 
--- | /O(w^2)/. Forced-bits-direct bitwise rotate-left. At least as precise
+-- | /O(w · A(w))/. Forced-bits-direct bitwise rotate-left. At least as precise
 -- as 'rol' on all inputs. Wraps 'rolPreciseRaw' through 'psplitOp2'.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'rolPreciseRaw' over @O(1)@ 'psplit' pieces (via 'psplitOp2'): /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
 rolPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rolPrecise w = psplitOp2 w (rolPreciseRaw w)
 
--- | /O(w^2)/. The single-pair precise rotate-left kernel; see 'rolPrecise'
+-- | /O(w · A(w))/. The single-pair precise rotate-left kernel; see 'rolPrecise'
 -- for the 'psplitOp2'-wrapped variant.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'rotPreciseRaw': /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
 rolPreciseRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rolPreciseRaw w a b = rotPreciseRaw w a b (\x r -> rotateLeftNat w x r)
 
--- | /O(w^2)/. Forced-bits-direct bitwise rotate-right. Mirrors 'rolPrecise'.
+-- | /O(w · A(w))/. Forced-bits-direct bitwise rotate-right. Mirrors 'rolPrecise'.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'rorPreciseRaw' over @O(1)@ 'psplit' pieces (via 'psplitOp2'): /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
 rorPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rorPrecise w = psplitOp2 w (rorPreciseRaw w)
 
--- | /O(w^2)/. The single-pair precise rotate-right kernel; see 'rorPrecise'
+-- | /O(w · A(w))/. The single-pair precise rotate-right kernel; see 'rorPrecise'
 -- for the 'psplitOp2'-wrapped variant.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'rotPreciseRaw': /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
 rorPreciseRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rorPreciseRaw w a b = rotPreciseRaw w a b (\x r -> rotateRightNat w x r)
 
--- | /O(w)/. Rotate a 'Natural' value of width @w@ left by @r@ bits.
+-- | /O(A(w))/. Rotate a 'Natural' value of width @w@ left by @r@ bits.
 -- Pre: @0 <= r < w@ and @x .&. mask == x@ where @mask = 2^w - 1@.
 rotateLeftNat :: NatRepr w -> Natural -> Int -> Natural
 rotateLeftNat w x r =
@@ -3686,7 +4063,7 @@ rotateLeftNat w x r =
      else ((x `shiftL` r) Bits..|. (x `shiftR` (wI - r))) Bits..&. m
 {-# INLINE rotateLeftNat #-}
 
--- | /O(w)/. Rotate a 'Natural' value of width @w@ right by @r@ bits.
+-- | /O(A(w))/. Rotate a 'Natural' value of width @w@ right by @r@ bits.
 -- Pre: @0 <= r < w@ and @x .&. mask == x@ where @mask = 2^w - 1@.
 rotateRightNat :: NatRepr w -> Natural -> Int -> Natural
 rotateRightNat w x r =
@@ -3696,7 +4073,7 @@ rotateRightNat w x r =
      else ((x `shiftR` r) Bits..|. (x `shiftL` (wI - r))) Bits..&. m
 {-# INLINE rotateRightNat #-}
 
--- | /O(w)/. Cheap rotate kernel shared by 'rolRaw' and 'rorRaw'. Two cases:
+-- | /O(M(w))/. Cheap rotate kernel shared by 'rolRaw' and 'rorRaw'. Two cases:
 --
 --   * @b@\'s residues mod @w@ collapse to a single value @r@ (e.g. a
 --     singleton, or a stride that is a multiple of @w@): rotate @a@\'s
@@ -3736,8 +4113,22 @@ rotFastRaw w a b rotBy =
              !forcedOnes  = if allOnes  then m else 0
          in fromForcedBits w (forcedZeros, forcedOnes) (0, m)
 
--- | /O(w^2)/. Forced-bits-direct rotate kernel shared by 'rolPreciseRaw'
--- and 'rorPreciseRaw'. For each residue @r ∈ [0, w-1]@ reachable from
+-- | /O(w · A(w))/. Forced-bits-direct rotate kernel shared by 'rolPreciseRaw'
+-- and 'rorPreciseRaw'.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * one rotation of 'forcedBits' per reachable residue (up to @w@), each /O(A(w))/: /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
+--
+-- For each residue @r ∈ [0, w-1]@ reachable from
 -- @b@, rotate @forcedBits a@ by @r@ in the requested direction and
 -- intersect: a bit is forced to @0@ in the result iff it is forced to
 -- @0@ in /every/ per-residue rotation of @a@\'s forced-zeros (and
@@ -3791,7 +4182,7 @@ rotPreciseRaw w a b rotBy =
              !(forcedZeros, forcedOnes) = go m m rs
          in fromForcedBits w (forcedZeros, forcedOnes) (0, m)
 
--- | /O(w)/. The set of residues mod @w@ that some member of @b@ can
+-- | /O(M(w))/. The set of residues mod @w@ that some member of @b@ can
 -- produce, as a list of values in @[0, w-1]@ (no ordering guarantee —
 -- 'rotPreciseRaw' folds an associative-commutative intersection over
 -- them, and 'rotFastRaw' only looks for a singleton). 'Nothing' means
@@ -4003,7 +4394,7 @@ walkResidues = go
 -- 3, 1) = {0, 3}@, and @(2, 1, 1) = {2, 3}@, which are pairwise incomparable
 -- under 'leqExact'.
 
--- | /O(w)/. Sound /over/-approximation of the intersection of two progressions.
+-- | /O(G(w))/. Sound /over/-approximation of the intersection of two progressions.
 -- For any concrete value @x@, if @x@ is a member of both @a@ and @b@, then
 -- @x@ is a member of @pseudoMeet a b@. Returns 'Nothing' when the result would
 -- be empty.
@@ -4057,9 +4448,24 @@ pseudoMeet w a b =
       | leq b a -> Just b
       | otherwise -> pseudoMeetStridesBy compactify w a b
 
--- | /O(w^2)/. Like 'pseudoMeet', but uses 'leqExact' for the containment
--- short-circuits. This preserves the smaller operand exactly when one is
--- contained in the other.
+-- | /O(w · M(w))/. Like 'pseudoMeet', but uses 'leqExact' for the
+-- containment short-circuits. This preserves the smaller operand exactly when
+-- one is contained in the other.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'leqExact' (containment short-circuits): /O(w · M(w))/
+-- * 'compactifyPrecise' (general path): /O(w · M(w))/
+--
+-- Total: /O(w · M(w) + w · M(w))/ = /O(w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
 pseudoMeetPrecise ::
   (1 <= w) =>
   NatRepr w ->
@@ -4127,13 +4533,13 @@ pseudoMeetStridesBy compactifyOp w a b
           !anchor = if g_a >= g_b then start a else start b
       restrictToCoset w arith anchor d
 
--- | /O(w)/. @lcm(x, y)@ on 'Natural's, computed via @x \/ gcd · y@. Both
+-- | /O(G(w))/. @lcm(x, y)@ on 'Natural's, computed via @x \/ gcd · y@. Both
 -- arguments must be positive.
 lcmNat :: Natural -> Natural -> Natural
 lcmNat x y = (x `Prelude.div` Prelude.gcd x y) * y
 {-# INLINE lcmNat #-}
 
--- | /O(w)/. Restrict a stride-1 progression @arith@ to the values
+-- | /O(M(w))/. Restrict a stride-1 progression @arith@ to the values
 -- congruent to @s@ modulo @d@: i.e., produce the stride-@d@ progression
 -- whose elements are exactly @arith ∩ (s + d·Z)@.
 --
@@ -4156,7 +4562,7 @@ restrictToCoset w arith s d
            else let nn' = (end' - lo') `Prelude.div` d
                 in Just (mk w (modMask arith lo') d nn')
 
--- | /O(w)/. Membership test specialized to a progression whose orbit lies in
+-- | /O(M(w))/. Membership test specialized to a progression whose orbit lies in
 -- @[start, start + n·stride]@ without wrapping mod @2^w@ (the 'arcMeetClosed'
 -- precondition). Unlike the general 'member', it needs no modular inverse:
 -- with no wrap the orbit is a plain integer arithmetic progression, so @v@ is
@@ -4168,7 +4574,7 @@ memberArc c v =
   start c <= v && v <= start c + n c * stride c
     && (v - start c) `mod` stride c == 0
 
--- | /O(w)/. CLP-style intersection of two progressions whose orbits lie in
+-- | /O(G(w))/. CLP-style intersection of two progressions whose orbits lie in
 -- @[start, start + n·stride]@ without wrap mod @2^w@ (i.e. plain integer
 -- intervals). Returns the exact intersection.
 --
@@ -4222,7 +4628,7 @@ arcMeetClosed w a b
     endA = sA + n a * stride a
     endB = sB + n b * stride b
 
--- | /O(w)/. \"South-pole split\": split at the unsigned boundary (between
+-- | /O(M(w))/. \"South-pole split\": split at the unsigned boundary (between
 -- @umax = 2^w - 1@ and @0@). Returns pieces whose concretizations partition
 -- @c@\'s concretization, where no piece crosses 0.
 --
@@ -4250,7 +4656,7 @@ ssplit w c@Domain{start = s, stride = t, n = nn, mask = m} =
           in [mk w s t i1, mk w s2 t n2]
 
 
--- | /O(w)/. \"North-pole split\": split at the signed boundary (between
+-- | /O(M(w))/. \"North-pole split\": split at the signed boundary (between
 -- @smax = 2^(w-1) - 1@ and @smin = 2^(w-1)@). Returns pieces whose
 -- concretizations partition @c@\'s concretization, where no piece crosses
 -- the sign boundary.
@@ -4299,9 +4705,24 @@ fullCoset w c =
       !s' = start c .&. (g - 1)
   in mk w s' g (orbitLen c - 1)
 
--- | /O(w^2)/. Exact intersection: returns @Just c@ when the intersection
+-- | /O(w · M(w))/. Exact intersection: returns @Just c@ when the intersection
 -- of @a@ and @b@'s element sets is itself representable as a single
 -- progression; @Nothing@ otherwise. Mirror of 'exactJoin'.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'arcMeetClosed' (per 'ssplit' piece pair): /O(G(w))/
+-- * 'compactifyPrecise': /O(w · M(w))/
+--
+-- Total: /O(G(w) + w · M(w))/ = /O(w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
 --
 -- Distinct from 'pseudoMeet' (sound /over/-approximation, always returns
 -- some progression) and 'lowerBound' (sound /under/-approximation, may
@@ -4344,7 +4765,7 @@ exactMeet w a b =
            [c] -> Just c
            _   -> Nothing
 
--- | /O(w)/. A strided lower bound on the intersection: a sound
+-- | /O(G(w))/. A strided lower bound on the intersection: a sound
 -- /under/-approximation. Note this is /not/ the greatest lower bound —
 -- the lattice of strided sets has no g.l.b. for incomparable elements (cf.
 -- 'pseudoMeet'). For any concrete value @x@, if @x@ is a member of @lowerBound
@@ -4408,7 +4829,7 @@ lowerBound w a b =
   where
     pickLarger x y = if size y > size x then y else x
 
--- | /O(w)/. Like 'lowerBound', but returns /every/ valid sub-progression
+-- | /O(G(w))/. Like 'lowerBound', but returns /every/ valid sub-progression
 -- arc-meet found across the @ssplit@ pairing. Each element is a sound
 -- under-approximation of the intersection on its own; the union of all
 -- elements is exactly the (split-aware) intersection of @a@ and @b@. Use
@@ -4444,7 +4865,7 @@ lowerBounds w a b =
               raw = [ c | (pa, pb) <- pairs, Just c <- [arcMeetClosed w pa pb] ]
           in compactify w raw
 
--- | /O(w)/. If @c@ self-wraps, drop to a non-self-wrapping sub-progression
+-- | /O(M(w))/. If @c@ self-wraps, drop to a non-self-wrapping sub-progression
 -- of @c@'s orbit. Otherwise return @c@ unchanged. Used by 'lowerBound' to
 -- extract a sound under-approximation from a self-wrapping operand.
 --
@@ -4478,7 +4899,7 @@ trimSelfWrap w c@Domain{start = s, stride = t, n = nn, mask = m}
                  then lap1End - lap1Start + 1
                  else 0
 
--- | /O(w)/. Sound /over/-approximation of the union of two progressions:
+-- | /O(M(w))/. Sound /over/-approximation of the union of two progressions:
 -- a single progression containing every member of either operand.
 --
 -- Uses 'leq' for the containment short-circuits. See 'pseudoJoinPrecise' for
@@ -4515,16 +4936,32 @@ pseudoJoin w a b
   | leq b a = a
   | otherwise = pseudoJoinStrides w a b
 
--- | /O(w^2)/. Like 'pseudoJoin', but uses 'leqExact' for the containment
+-- | /O(w · M(w))/. Like 'pseudoJoin', but uses 'leqExact' for the containment
 -- short-circuits. This preserves the larger operand exactly when one
 -- contains the other.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'leqExact' (containment short-circuits): /O(w · M(w))/
+-- * 'pseudoJoinStrides' (general path): /O(M(w))/
+--
+-- Total: /O(w · M(w) + M(w))/ = /O(w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
+--
 pseudoJoinPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 pseudoJoinPrecise w a b
   | leqExact a b = b
   | leqExact b a = a
   | otherwise = pseudoJoinStrides w a b
 
--- | /O(w)/. Sound (over-approximating) join used as the general
+-- | /O(M(w))/. Sound (over-approximating) join used as the general
 -- (non-short-circuit) path of 'pseudoJoin' and 'pseudoJoinPrecise'.
 pseudoJoinStrides :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 pseudoJoinStrides w a b =
@@ -4547,7 +4984,7 @@ pseudoJoinStrides w a b =
          Nothing  -> mk w 0 1 (mask a)
          Just dom' -> dom'
 
--- | /O(w)/. Bounding-box join: 'A.range' on the @min@\/@max@ of each
+-- | /O(M(w))/. Bounding-box join: 'A.range' on the @min@\/@max@ of each
 -- operand's unsigned bounds. Computed without going through 'A.join's
 -- shorter-arc heuristic, so the operator is associative and monotone.
 --
@@ -4587,11 +5024,23 @@ boundingBoxJoin w a b =
        Just c  -> c
        Nothing -> top w  -- 'A.range' of non-empty bounds is never bottom
 
--- | /O(w^2)/. Exact union: returns @Just c@ when the union of @a@ and @b@'s
+-- | /O(w · M(w))/. Exact union: returns @Just c@ when the union of @a@ and @b@'s
 -- element sets is itself representable as a single progression; @Nothing@
 -- otherwise. Distinguishes the (common) case where @a ∪ b@ stays inside a
 -- single arithmetic progression from the (also common) case where it
 -- doesn't and any single-progression cover would over-approximate.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'compactifyPrecise': /O(w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
 --
 -- /Lattice axioms:/
 --
@@ -4622,21 +5071,49 @@ exactJoin w a b =
     [c] -> Just c
     _   -> Nothing
 
--- | /O(m^3 · w)/, where @m@ is the input list length. Merges any pair of
+-- | /O(m^3 · G(w))/, where @m@ is the input list length. Merges any pair of
 -- progressions whose union is /exactly/ representable as a single
 -- progression. Iterates to a fixed point.
 --
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * up to @m^3@ 'tryMergeBy' attempts (up to @m@ fixed-point passes, each
+--   @O(m^2)@ pairwise), each dominated by 'intersectionSize' (/O(G(w))/): /O(m^3 · G(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(m^3 · w)/
+-- 2. /O(m^3 · w^2)/
+-- 3. /Õ(m^3 · w)/
+--
 -- Uses 'leq', see 'compactifyPrecise' for the variant that uses 'leqExact'.
 compactify :: (1 <= w) => NatRepr w -> [Domain w] -> [Domain w]
--- Each 'compactifyBy' pass is @O(m^2)@ pairwise 'tryMergeBy' attempts (@O(w)@
--- each via 'leq'), and a fixed point takes up to @m@ length-reducing passes,
--- so the worst case is @O(m^3 · w)@. Callers that pass a constant-length list
--- (e.g. 'pseudoMeet', 'arcClipBitwise') pay only the per-merge factor.
+-- Each 'compactifyBy' pass is @O(m^2)@ pairwise 'tryMergeBy' attempts (each
+-- dominated by 'intersectionSize'), and a fixed point takes up to @m@
+-- length-reducing passes, so the worst case is @O(m^3 · G(w))@. Callers that
+-- pass a constant-length list (e.g. 'pseudoMeet', 'arcClipBitwise') pay only
+-- the per-merge factor.
 compactify = compactifyBy leq
 
--- | /O(m^3 · w^2)/. Like 'compactify' but uses 'leqExact' for the
--- containment check, catching all merges at the cost of a higher per-merge
--- complexity (@O(w^2)@ instead of @O(w)@).
+-- | /O(m^3 · w · M(w))/. Like 'compactify' but uses 'leqExact' for the
+-- containment check, catching all merges that 'leq' misses, at the cost of the
+-- more expensive 'leqExact' check.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * up to @m^3@ 'tryMergeBy' attempts (up to @m@ fixed-point passes, each
+--   @O(m^2)@ pairwise), each dominated by 'leqExact'\/'floorSum' (/O(w · M(w))/): /O(m^3 · w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(m^3 · w)/
+-- 2. /O(m^3 · w^2)/
+-- 3. /Õ(m^3 · w^2)/
+--
 compactifyPrecise :: (1 <= w) => NatRepr w -> [Domain w] -> [Domain w]
 compactifyPrecise = compactifyBy leqExact
 
@@ -4670,11 +5147,24 @@ compactifyBy leqOp w cs0 =
         Just (merged, rest) -> merged : onePass rest
         Nothing             -> c : onePass cs
 
--- | /O(m · w)/, where @m@ is the length of @xs@. Find the first @x@ in
+-- | /O(m · G(w))/, where @m@ is the length of @xs@. Find the first @x@ in
 -- @xs@ such that @c@ and @x@ merge exactly into a single progression. If
 -- found, return the merged progression and the remaining list with @x@
 -- removed. Uses 'leq'; see 'tryMergeWithPrecise' for the 'leqExact'
 -- variant.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * up to @m@ 'tryMergeBy' attempts, each dominated by 'intersectionSize' (/O(G(w))/): /O(m · G(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(m · w)/
+-- 2. /O(m · w^2)/
+-- 3. /Õ(m · w)/
+--
 tryMergeWith ::
   (1 <= w) =>
   NatRepr w ->
@@ -4683,7 +5173,20 @@ tryMergeWith ::
   Maybe (Domain w, [Domain w])
 tryMergeWith = tryMergeWithBy leq
 
--- | /O(m · w^2)/. Like 'tryMergeWith', but uses 'leqExact'.
+-- | /O(m · w · M(w))/. Like 'tryMergeWith', but uses 'leqExact'.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * up to @m@ 'tryMergeBy' attempts, each dominated by 'leqExact'\/'floorSum' (/O(w · M(w))/): /O(m · w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(m · w)/
+-- 2. /O(m · w^2)/
+-- 3. /Õ(m · w^2)/
+--
 tryMergeWithPrecise ::
   (1 <= w) =>
   NatRepr w ->
@@ -4709,7 +5212,7 @@ tryMergeWithBy leqOp w c = \case
         Just (merged, rest) -> Just (merged, x : rest)
         Nothing             -> Nothing
 
--- | /O(w)/. Try to merge two progressions into a single progression
+-- | /O(G(w))/. Try to merge two progressions into a single progression
 -- representing /exactly/ their union. Returns 'Nothing' if the union
 -- isn't itself a progression.
 --
@@ -4744,7 +5247,7 @@ tryMergeBy leqOp w c1 c2 =
        Just c  -> Just c
        Nothing -> Nothing
 
--- | /O(w)/. Build the merge candidates for 'tryMergeBy'.
+-- | /O(M(w))/. Build the merge candidates for 'tryMergeBy'.
 --
 -- The merged progression — if one exists — has @unionSize@ elements
 -- equally spaced around @Z\/2^w@. Its stride is determined by its anchor
@@ -4791,7 +5294,7 @@ mergeCandidates w c1 c2 unionSize
                         else Just (mk w a t nMerge)
       in [c | a <- endpoints, Just c <- [tryAnchor a]]
 
--- | /O(w^2)/. An upper bound on the size of @c1 ∩ c2@. Splits each
+-- | /O(G(w))/. An upper bound on the size of @c1 ∩ c2@. Splits each
 -- operand's wrap and self-wrap structure with 'ssplit', runs
 -- 'arcMeetClosed' on each pair of non-wrapping pieces, and sums their
 -- sizes; clamps the result at @min |c1| |c2|@.
@@ -4852,7 +5355,7 @@ intersectionSize w c1 c2 =
 --     against signed bounds; the resulting unsigned range can wrap mod
 --     @2^w@ when the signed bound straddles the sign boundary.
 
--- | /O(w)/. Refine @a@ by the assumption @x < y@ (unsigned),
+-- | /O(G(w))/. Refine @a@ by the assumption @x < y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUlt ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
@@ -4864,7 +5367,7 @@ assumeUlt w a b
     (alo, _ahi) = A.ubounds (toArith a)
     (_blo, bhi) = A.ubounds (toArith b)
 
--- | /O(w)/. Refine @a@ by the assumption @x <= y@ (unsigned),
+-- | /O(G(w))/. Refine @a@ by the assumption @x <= y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUle ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
@@ -4875,7 +5378,7 @@ assumeUle w a b
     (alo, _ahi) = A.ubounds (toArith a)
     (_blo, bhi) = A.ubounds (toArith b)
 
--- | /O(w)/. Refine @a@ by the assumption @x > y@ (unsigned),
+-- | /O(G(w))/. Refine @a@ by the assumption @x > y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUgt ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
@@ -4887,7 +5390,7 @@ assumeUgt w a b
     (_alo, ahi) = A.ubounds (toArith a)
     (blo, _bhi) = A.ubounds (toArith b)
 
--- | /O(w)/. Refine @a@ by the assumption @x >= y@ (unsigned),
+-- | /O(G(w))/. Refine @a@ by the assumption @x >= y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUge ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
@@ -4898,11 +5401,48 @@ assumeUge w a b
     (_alo, ahi) = A.ubounds (toArith a)
     (blo, _bhi) = A.ubounds (toArith b)
 
--- | /O(w^2)/. Refine @a@ by the assumption @x < y@ (signed),
+-- | /O(G(w))/. Refine @a@ by the assumption @x < y@ (signed),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+--
+-- Surviving pieces are clamped against @a@ with the cheap 'leq' (sound but
+-- coarse), which keeps the cost at /O(G(w))/. Use 'assumeSltPrecise' for the
+-- exact 'leqExact' clamp, which is tighter but quadratic.
 assumeSlt ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-assumeSlt w = assumeSignedBy w sltCase
+assumeSlt = assumeSltBy leq
+
+-- | /O(w · M(w))/. Like 'assumeSlt', but clamps surviving pieces against @a@
+-- with the exact 'leqExact' instead of the coarse 'leq'. Tighter (it keeps
+-- pieces that 'leq' would conservatively discard) at the cost of 'leqExact'\'s
+-- 'floorSum' window.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * per sign-pair 'assumeUlt' and 'compactify': /O(G(w))/
+-- * 'pseudoJoin' across surviving pieces: /O(M(w))/
+-- * clamp via 'leqExact' (worst case its 'floorSum' window): /O(w · M(w))/
+--
+-- Total: /O(G(w) + M(w) + w · M(w))/ = /O(w · M(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /Õ(w^2)/
+--
+assumeSltPrecise ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSltPrecise = assumeSltBy leqExact
+
+-- | Shared kernel for 'assumeSlt' and 'assumeSltPrecise', parameterized over
+-- the clamp order ('leq' or 'leqExact').
+assumeSltBy ::
+  (1 <= w) =>
+  (Domain w -> Domain w -> Bool) ->
+  NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSltBy leqOp w = assumeSignedBy leqOp w sltCase
   where
     -- (sign aᵢ, sign bⱼ) → contribution of @aᵢ@ to @{x ∈ aᵢ | ∃y ∈ bⱼ. x_s < y_s}@
     sltCase ai bj sa sb = case (sa, sb) of
@@ -4911,11 +5451,28 @@ assumeSlt w = assumeSignedBy w sltCase
       (Pos, Neg) -> Nothing            -- x ≥ 0 > y: always false
       (Neg, Pos) -> Just ai            -- x < 0 ≤ y: always true
 
--- | /O(w^2)/. Refine @a@ by the assumption @x <= y@ (signed),
+-- | /O(G(w))/. Refine @a@ by the assumption @x <= y@ (signed),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+--
+-- Clamps surviving pieces against @a@ with the cheap 'leq'; use
+-- 'assumeSlePrecise' for the exact (but quadratic) 'leqExact' clamp.
 assumeSle ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-assumeSle w = assumeSignedBy w sleCase
+assumeSle = assumeSleBy leq
+
+-- | /O(w · M(w))/. Like 'assumeSle', but clamps surviving pieces against @a@
+-- with the exact 'leqExact' instead of the coarse 'leq'. See
+-- 'assumeSltPrecise' for the complexity breakdown.
+assumeSlePrecise ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSlePrecise = assumeSleBy leqExact
+
+-- | Shared kernel for 'assumeSle' and 'assumeSlePrecise'.
+assumeSleBy ::
+  (1 <= w) =>
+  (Domain w -> Domain w -> Bool) ->
+  NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSleBy leqOp w = assumeSignedBy leqOp w sleCase
   where
     sleCase ai bj sa sb = case (sa, sb) of
       (Pos, Pos) -> assumeUle w ai bj
@@ -4923,11 +5480,28 @@ assumeSle w = assumeSignedBy w sleCase
       (Pos, Neg) -> Nothing
       (Neg, Pos) -> Just ai
 
--- | /O(w^2)/. Refine @a@ by the assumption @x > y@ (signed),
+-- | /O(G(w))/. Refine @a@ by the assumption @x > y@ (signed),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+--
+-- Clamps surviving pieces against @a@ with the cheap 'leq'; use
+-- 'assumeSgtPrecise' for the exact (but quadratic) 'leqExact' clamp.
 assumeSgt ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-assumeSgt w = assumeSignedBy w sgtCase
+assumeSgt = assumeSgtBy leq
+
+-- | /O(w · M(w))/. Like 'assumeSgt', but clamps surviving pieces against @a@
+-- with the exact 'leqExact' instead of the coarse 'leq'. See
+-- 'assumeSltPrecise' for the complexity breakdown.
+assumeSgtPrecise ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSgtPrecise = assumeSgtBy leqExact
+
+-- | Shared kernel for 'assumeSgt' and 'assumeSgtPrecise'.
+assumeSgtBy ::
+  (1 <= w) =>
+  (Domain w -> Domain w -> Bool) ->
+  NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSgtBy leqOp w = assumeSignedBy leqOp w sgtCase
   where
     sgtCase ai bj sa sb = case (sa, sb) of
       (Pos, Pos) -> assumeUgt w ai bj
@@ -4935,11 +5509,28 @@ assumeSgt w = assumeSignedBy w sgtCase
       (Pos, Neg) -> Just ai            -- x ≥ 0 > y: always true
       (Neg, Pos) -> Nothing
 
--- | /O(w^2)/. Refine @a@ by the assumption @x >= y@ (signed),
+-- | /O(G(w))/. Refine @a@ by the assumption @x >= y@ (signed),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
+--
+-- Clamps surviving pieces against @a@ with the cheap 'leq'; use
+-- 'assumeSgePrecise' for the exact (but quadratic) 'leqExact' clamp.
 assumeSge ::
   (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-assumeSge w = assumeSignedBy w sgeCase
+assumeSge = assumeSgeBy leq
+
+-- | /O(w · M(w))/. Like 'assumeSge', but clamps surviving pieces against @a@
+-- with the exact 'leqExact' instead of the coarse 'leq'. See
+-- 'assumeSltPrecise' for the complexity breakdown.
+assumeSgePrecise ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSgePrecise = assumeSgeBy leqExact
+
+-- | Shared kernel for 'assumeSge' and 'assumeSgePrecise'.
+assumeSgeBy ::
+  (1 <= w) =>
+  (Domain w -> Domain w -> Bool) ->
+  NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeSgeBy leqOp w = assumeSignedBy leqOp w sgeCase
   where
     sgeCase ai bj sa sb = case (sa, sb) of
       (Pos, Pos) -> assumeUge w ai bj
@@ -4953,7 +5544,7 @@ assumeSge w = assumeSignedBy w sgeCase
 data Sign = Pos | Neg
   deriving (Eq, Show)
 
--- | /O(w)/. Sign of a sign-coherent piece. Precondition: @c@ is a piece of
+-- | /O(A(w))/. Sign of a sign-coherent piece. Precondition: @c@ is a piece of
 -- 'signPieces' (so its 'start' fully determines its sign half).
 pieceSign :: NatRepr w -> Domain w -> Sign
 pieceSign w c
@@ -4961,7 +5552,7 @@ pieceSign w c
   | otherwise       = Neg
   where halfR = 1 `Bits.shiftL` (NR.widthVal w - 1)
 
--- | /O(w)/. Refine @a@ by intersecting with the unsigned range @[lo, hi]@,
+-- | /O(G(w))/. Refine @a@ by intersecting with the unsigned range @[lo, hi]@,
 -- where @0 <= lo <= hi <= 2^w - 1@. Returns 'Nothing' if the intersection is
 -- provably empty.
 --
@@ -4979,10 +5570,10 @@ assumeUnsignedRange w a lo hi =
       Nothing -> Nothing
       Just c  -> Just (if size c <= size a then c else a)
 
--- | Shared driver for 'assumeSlt', 'assumeSle', 'assumeSgt', 'assumeSge'.
--- Splits both operands at the sign boundary with 'signPieces', dispatches
--- per sign-pair to the supplied case analysis, and joins the surviving
--- contributions with 'pseudoJoin'.
+-- | Shared driver for 'assumeSlt', 'assumeSle', 'assumeSgt', 'assumeSge' (and
+-- their @*Precise@ variants). Splits both operands at the sign boundary with
+-- 'signPieces', dispatches per sign-pair to the supplied case analysis, and
+-- joins the surviving contributions with 'pseudoJoin'.
 --
 -- For each piece @aᵢ@ of @a@, contributions from different @bⱼ@'s are
 -- joined; if any contribution covers @aᵢ@ exactly, that piece is taken
@@ -4990,13 +5581,22 @@ assumeUnsignedRange w a lo hi =
 -- the pieces are joined across all @aᵢ@. This preserves @result ⊑ a@
 -- piecewise (each contribution is a subset of its @aᵢ@) and
 -- 'compactify' merges adjacent pieces when possible.
+--
+-- The @leqOp@ parameter is the order used at the two clamp sites (against
+-- @aᵢ@ in 'combinePieceContribs' and against @a@ here). Any /sound/ order
+-- works: when it reports @c ⊑ a@ we keep the tighter @c@, otherwise we fall
+-- back to the operand, which is always a sound (if looser) result. The
+-- default assumes pass 'leq' (cheap, /O(A(w))/); the @*Precise@ assumes pass
+-- 'leqExact' (exact, but its 'floorSum' window is /O(w · M(w))/).
 assumeSignedBy ::
   (1 <= w) =>
+  -- | clamp order against the operand ('leq' or 'leqExact')
+  (Domain w -> Domain w -> Bool) ->
   NatRepr w ->
   -- | per-pair case analysis: @ai bj signOf-ai signOf-bj -> contribution of @ai@@
   (Domain w -> Domain w -> Sign -> Sign -> Maybe (Domain w)) ->
   Domain w -> Domain w -> Maybe (Domain w)
-assumeSignedBy w perPair a b =
+assumeSignedBy leqOp w perPair a b =
   case compactify w pieces of
     []     -> Nothing
     [c]    -> Just (clampToA c)
@@ -5013,23 +5613,25 @@ assumeSignedBy w perPair a b =
                               | bj <- bPieces
                               , Just c <- [perPair ai bj (pieceSign w ai) (pieceSign w bj)]
                               ]
-             , Just ci' <- [combinePieceContribs w ai contribs]
+             , Just ci' <- [combinePieceContribs leqOp w ai contribs]
              ]
     -- 'pseudoJoin' across pieces from different sign halves can overshoot
     -- @a@; clamp the final union by @a@ itself. (Each piece is already
     -- contained in some piece of @a@, so the true union is @⊆ a@.)
-    clampToA c = if leqExact c a then c else a
+    clampToA c = if leqOp c a then c else a
 
 -- | Combine per-piece contributions for a single @aᵢ@: join them with
--- 'pseudoJoin', then clamp by @aᵢ@ to preserve the subset invariant
--- (each contribution is already @⊑ aᵢ@, but 'pseudoJoin' may overshoot).
+-- 'pseudoJoin', then clamp by @aᵢ@ (using the supplied @leqOp@) to preserve
+-- the subset invariant (each contribution is already @⊑ aᵢ@, but 'pseudoJoin'
+-- may overshoot).
 combinePieceContribs ::
   (1 <= w) =>
+  (Domain w -> Domain w -> Bool) ->
   NatRepr w -> Domain w -> [Domain w] -> Maybe (Domain w)
-combinePieceContribs _w _ai []     = Nothing
-combinePieceContribs w  ai  (c:cs) =
+combinePieceContribs _leqOp _w _ai []     = Nothing
+combinePieceContribs  leqOp  w  ai  (c:cs) =
   let joined = List.foldl' (pseudoJoin w) c cs
-  in Just (if leqExact joined ai then joined else ai)
+  in Just (if leqOp joined ai then joined else ai)
 
 -- ------------------------------------------------------------------
 -- * Reduced product with bitwise
@@ -5054,7 +5656,23 @@ combinePieceContribs w  ai  (c:cs) =
 -- Each side\'s extra information helps refine the other. 'reduce' returns
 -- 'Nothing' precisely when the two components are jointly unsatisfiable.
 
--- | /O(w log w)/. Refine a progression using a bitwise value.
+-- | /O(M(w) log w + G(w))/. Refine a progression using a bitwise value.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'liftForcedBits' (Hensel stride lift): /O(M(w) log w)/
+-- * 'arcClipBitwise' (gcd-based arc clip): /O(G(w))/
+--
+-- These are incomparable (the lift's @log w@ factor dominates the medium regime,
+-- the gcd dominates tier 1), so the cost is their sum.
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 --
 -- Works directly, without going through a lossy 'fromBitwise' projection or
 -- 'pseudoMeet'.
@@ -5125,10 +5743,27 @@ refineByBits ::
   Maybe (Domain w)
 refineByBits = refineByBitsBy compactify
 
--- | /O(w^2)/. Like 'refineByBits', but uses 'compactifyPrecise' (and
--- thus 'leqExact') for the post-arc-clip merge. Catches the
+-- | /O(M(w) log w + w · M(w))/. Like 'refineByBits', but uses 'compactifyPrecise'
+-- (and thus 'leqExact') for the post-arc-clip merge. Catches the
 -- complementary-singleton case described in 'arcClipBitwise' that
 -- 'refineByBits' misses, at the cost of a higher per-call complexity.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'liftForcedBits' (Hensel stride lift): /O(M(w) log w)/
+-- * 'compactifyPrecise' via 'leqExact' (its hand-rolled 'floorSum' window): /O(w · M(w))/
+--
+-- These are incomparable, so the cost is their sum; the 'floorSum' window keeps
+-- tier 3 at /Õ(w^2)/.
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w^2)/
+--
 refineByBitsPrecise ::
   (1 <= w) =>
   NatRepr w ->
@@ -5156,7 +5791,7 @@ refineByBitsBy compactifyOp w s b = do
     blo = integerToNatural bloI
     bhi = integerToNatural bhiI
 
--- | /O(w)/. Forced bits of a 'B.Domain' as a @(zeros, ones)@ pair of
+-- | /O(A(w))/. Forced bits of a 'B.Domain' as a @(zeros, ones)@ pair of
 -- 'Natural's: @zeros@ has a 1 at every position forced to 0, @ones@ at
 -- every position forced to 1.
 --
@@ -5172,8 +5807,20 @@ knownZerosOnesNat b =
       bm       = B.bvdMask b
   in (integerToNatural (bm `Bits.xor` hi), integerToNatural lo)
 
--- | /O(w log w)/. Refine a progression by the forced-bit pair @(zeros,
+-- | /O(M(w) log w)/. Refine a progression by the forced-bit pair @(zeros,
 -- ones)@ of a 'B.Domain' (see 'knownZerosOnesNat') via stride lifting.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'invModPow2' (single Hensel inverse): /O(M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 --
 -- Let @v = log2 (strideGcd s)@ be @s@\'s stride boundary and @k@ the
 -- length of the contiguous run of forced bits at positions @v, v+1, ...@.
@@ -5262,11 +5909,23 @@ liftForcedBits w s (zeros, ones)
     newStart  = (start s + r * st) .&. m
     newN      = (n s - r) `divByPow2` twoK
 
--- | /O(w^2)/. Reference implementation of 'liftForcedBits': walks the
+-- | /O(w · A(w))/. Reference implementation of 'liftForcedBits': walks the
 -- contiguous run of forced bits one at a time, doubling the stride and
 -- halving the orbit at each step. Kept as an executable specification that
 -- the closed-form 'liftForcedBits' is property-tested against
 -- ('liftForcedBitsRefinesSpec').
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * walks the contiguous forced-bit run (up to @w@ steps), each /O(A(w))/: /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
 --
 -- Unlike 'liftForcedBits', this walk short-circuits the moment the orbit
 -- shrinks to a singleton, so it may /retain/ a value that disagrees with a
@@ -5339,7 +5998,7 @@ liftForcedBitsSpec w s (zeros, ones)
                              then Nothing  -- only i=0 available, parity wrong
                              else go (mk w newStart newStride newN)
 
--- | /O(w log w)/, with the supplied 'compactify'-style merger. Intersect
+-- | /O(G(w))/, with the supplied 'compactify'-style merger. Intersect
 -- a progression with the unsigned arc @[blo, bhi]@ (the unsigned bounds
 -- of a 'B.Domain'). Above the contiguous run of forced bits
 -- 'liftForcedBits' consumes, scattered forced bits aren\'t representable
@@ -5349,8 +6008,7 @@ liftForcedBitsSpec w s (zeros, ones)
 --
 -- 'ssplit's the input at the unsigned pole and runs 'arcMeetClosed' on
 -- each non-wrap piece, then folds with the supplied merger. Pass
--- 'compactify' for /O(w log w)/ overall, or 'compactifyPrecise' for an
--- /O(w^2)/ variant that catches one extra merge — two complementary
+-- 'compactify', or 'compactifyPrecise' for a variant that catches one extra merge — two complementary
 -- singletons whose union is a stride-@(2^w − 1)@ progression — that the
 -- 'leq'-based 'compactify' misses since it lacks the singleton-on-orbit
 -- containment check (kept out of 'leq' to preserve its /O(w)/ bound).
@@ -5392,7 +6050,7 @@ arcClipBitwise compactifyOp w l (blo, bhi)
            -- cover would over-approximate beyond @l@. Fall back to @l@.
            _   -> Just l
 
--- | /O(w log w)/. Refine a bitwise domain @b@ using a strides domain @s@.
+-- | /O(G(w))/. Refine a bitwise domain @b@ using a strides domain @s@.
 --
 -- Always at least as precise as @B.meet b (toBitwise s)@
 -- ('refineBitsByStridesDominatesMeetToBitwise'), and strictly tighter on
@@ -5476,12 +6134,24 @@ refineBitsByStrides w b s
                  b' = B.meet b stridesB
              in if B.isBottom b' then Nothing else Just b'
 
--- | /O(w)/. Approximate mutual refinement of a strides\/bitwise pair:
+-- | /O(M(w) log w)/. Approximate mutual refinement of a strides\/bitwise pair:
 -- tightens @s@ using @b@\'s forced bits, then tightens @b@ using the
 -- per-piece bitwise projection of the refined @s@. Returns 'Nothing' iff
 -- the joint represents an empty set.
 --
--- Skips the numeric arc clip ('arcMeetClosed', /O(w log w)/ via
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'liftForcedBits' (single Hensel inverse): /O(M(w) log w)/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
+--
+-- Skips the numeric arc clip ('arcMeetClosed', /O(G(w))/ via
 -- Diophantine eGCD) that 'reducePrecise' runs, keeping the reduction at
 -- the same asymptotic cost as its underlying components — which matters
 -- more in practice than fully closing the lattice.
@@ -5536,9 +6206,25 @@ reduce w s b
           b' = B.meet b bs
       if B.isBottom b' then Nothing else Just (s', b')
 
--- | /O(w log w)/. Precise mutual refinement of a strides\/bitwise pair:
--- like 'reduce', but additionally clips each piece to @b@\'s numeric
+-- | /O(M(w) log w + G(w))/. Precise mutual refinement of a strides\/bitwise
+-- pair: like 'reduce', but additionally clips each piece to @b@\'s numeric
 -- arc @[blo, bhi]@ via 'arcMeetClosed'.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'liftForcedBits' (Hensel stride lift): /O(M(w) log w)/
+-- * 'arcMeetClosed' (gcd-based arc clip): /O(G(w))/
+--
+-- These are incomparable (the lift's @log w@ factor dominates the medium regime,
+-- the gcd dominates tier 1), so the cost is their sum.
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
 --
 -- == Algorithm
 --
@@ -5658,11 +6344,27 @@ reducePrecisePass w s b
                   in Just (s', b')
 
 
--- | /O(w^2 log w)/. Iterated mutual refinement to a true fixed point:
+-- | /O(w · G(w))/. Iterated mutual refinement to a true fixed point:
 -- alternates 'refineByBits' (refine @s@ using @b@) and
 -- 'refineBitsByStrides' (refine @b@ using the new @s@) until neither
 -- changes. Each non-trivial round strictly reduces 'size' of one
 -- component, so the loop runs at most @O(w)@ times before stabilizing.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * @O(w)@ refinement rounds, each a 'refineByBits' (Hensel lift, /O(M(w) log w)/)
+--   and a 'refineBitsByStrides' (gcd-based arc clip, /O(G(w))/)
+--
+-- Total: /O(w · (M(w) log w + G(w)))/ = /O(w · G(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w^2)/
+-- 2. /O(w^3 log w)/
+-- 3. /Õ(w^2)/
+--
 reduceFixpoint ::
   (1 <= w) =>
   NatRepr w ->
@@ -8001,6 +8703,51 @@ correct_assumeSge w a x b y =
         Just c  -> property (member c x)
         Nothing -> property False
 
+-- | 'assumeSltPrecise' is sound (same soundness as 'assumeSlt'; the precise
+-- clamp only keeps more elements, never drops one).
+correct_assumeSltPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSltPrecise w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> toSigned w (toInteger x) < toSigned w (toInteger y) ==>
+      case assumeSltPrecise w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeSlePrecise' is sound.
+correct_assumeSlePrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSlePrecise w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> toSigned w (toInteger x) <= toSigned w (toInteger y) ==>
+      case assumeSlePrecise w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeSgtPrecise' is sound.
+correct_assumeSgtPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSgtPrecise w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> toSigned w (toInteger x) > toSigned w (toInteger y) ==>
+      case assumeSgtPrecise w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
+-- | 'assumeSgePrecise' is sound.
+correct_assumeSgePrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeSgePrecise w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> toSigned w (toInteger x) >= toSigned w (toInteger y) ==>
+      case assumeSgePrecise w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
 -- $assumeShrinks
 --
 -- The @assume*Shrinks@ properties assert that each assume refines its
@@ -8095,6 +8842,46 @@ assumeSgeShrinks w a b =
       Nothing -> property True
       Just c  -> property (size c <= size a)
 
+-- | 'assumeSltPrecise' shrinks by cardinality (unconditionally).
+assumeSltPreciseShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSltPreciseShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case assumeSltPrecise w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
+
+-- | 'assumeSlePrecise' shrinks by cardinality (unconditionally).
+assumeSlePreciseShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSlePreciseShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case assumeSlePrecise w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
+
+-- | 'assumeSgtPrecise' shrinks by cardinality (unconditionally).
+assumeSgtPreciseShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSgtPreciseShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case assumeSgtPrecise w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
+
+-- | 'assumeSgePrecise' shrinks by cardinality (unconditionally).
+assumeSgePreciseShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeSgePreciseShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case assumeSgePrecise w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
+
 -- $idempotence
 --
 -- The 'assume*' operations are tested for idempotence: applying the same
@@ -8107,100 +8894,52 @@ assumeSgeShrinks w a b =
 -- check the equation empirically (under the non-wrap guard, where
 -- 'pseudoMeet' actually behaves as a lower bound).
 
--- | 'assumeUlt' is idempotent under the non-wrap guard.
-assumeUltIdempotent ::
+-- | 'assumeSltPrecise' is idempotent under the non-wrap guard.
+assumeSltPreciseIdempotent ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
-assumeUltIdempotent w a b =
+assumeSltPreciseIdempotent w a b =
   proper a ==> proper b ==> mask a == mask b ==>
     Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeUlt w a b of
+      case assumeSltPrecise w a b of
         Nothing -> property True
-        Just c  -> property (eqMaybeAssume (assumeUlt w c b) (Just c))
+        Just c  -> property (eqMaybeAssume (assumeSltPrecise w c b) (Just c))
   where wrapsMod c = start c + n c * stride c > mask c
 
--- | 'assumeUle' is idempotent under the non-wrap guard.
-assumeUleIdempotent ::
+-- | 'assumeSlePrecise' is idempotent under the non-wrap guard.
+assumeSlePreciseIdempotent ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
-assumeUleIdempotent w a b =
+assumeSlePreciseIdempotent w a b =
   proper a ==> proper b ==> mask a == mask b ==>
     Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeUle w a b of
+      case assumeSlePrecise w a b of
         Nothing -> property True
-        Just c  -> property (eqMaybeAssume (assumeUle w c b) (Just c))
+        Just c  -> property (eqMaybeAssume (assumeSlePrecise w c b) (Just c))
   where wrapsMod c = start c + n c * stride c > mask c
 
--- | 'assumeUgt' is idempotent under the non-wrap guard.
-assumeUgtIdempotent ::
+-- | 'assumeSgtPrecise' is idempotent under the non-wrap guard.
+assumeSgtPreciseIdempotent ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
-assumeUgtIdempotent w a b =
+assumeSgtPreciseIdempotent w a b =
   proper a ==> proper b ==> mask a == mask b ==>
     Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeUgt w a b of
+      case assumeSgtPrecise w a b of
         Nothing -> property True
-        Just c  -> property (eqMaybeAssume (assumeUgt w c b) (Just c))
+        Just c  -> property (eqMaybeAssume (assumeSgtPrecise w c b) (Just c))
   where wrapsMod c = start c + n c * stride c > mask c
 
--- | 'assumeUge' is idempotent under the non-wrap guard.
-assumeUgeIdempotent ::
+-- | 'assumeSgePrecise' is idempotent under the non-wrap guard.
+assumeSgePreciseIdempotent ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Property
-assumeUgeIdempotent w a b =
+assumeSgePreciseIdempotent w a b =
   proper a ==> proper b ==> mask a == mask b ==>
     Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeUge w a b of
+      case assumeSgePrecise w a b of
         Nothing -> property True
-        Just c  -> property (eqMaybeAssume (assumeUge w c b) (Just c))
-  where wrapsMod c = start c + n c * stride c > mask c
-
--- | 'assumeSlt' is idempotent under the non-wrap guard.
-assumeSltIdempotent ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Domain w -> Property
-assumeSltIdempotent w a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeSlt w a b of
-        Nothing -> property True
-        Just c  -> property (eqMaybeAssume (assumeSlt w c b) (Just c))
-  where wrapsMod c = start c + n c * stride c > mask c
-
--- | 'assumeSle' is idempotent under the non-wrap guard.
-assumeSleIdempotent ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Domain w -> Property
-assumeSleIdempotent w a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeSle w a b of
-        Nothing -> property True
-        Just c  -> property (eqMaybeAssume (assumeSle w c b) (Just c))
-  where wrapsMod c = start c + n c * stride c > mask c
-
--- | 'assumeSgt' is idempotent under the non-wrap guard.
-assumeSgtIdempotent ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Domain w -> Property
-assumeSgtIdempotent w a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeSgt w a b of
-        Nothing -> property True
-        Just c  -> property (eqMaybeAssume (assumeSgt w c b) (Just c))
-  where wrapsMod c = start c + n c * stride c > mask c
-
--- | 'assumeSge' is idempotent under the non-wrap guard.
-assumeSgeIdempotent ::
-  (1 <= w) =>
-  NatRepr w -> Domain w -> Domain w -> Property
-assumeSgeIdempotent w a b =
-  proper a ==> proper b ==> mask a == mask b ==>
-    Prelude.not (wrapsMod a) ==> Prelude.not (wrapsMod b) ==>
-      case assumeSge w a b of
-        Nothing -> property True
-        Just c  -> property (eqMaybeAssume (assumeSge w c b) (Just c))
+        Just c  -> property (eqMaybeAssume (assumeSgePrecise w c b) (Just c))
   where wrapsMod c = start c + n c * stride c > mask c
 
 -- | Equality of @Maybe (Domain w)@ via 'leqExact' on the @Just@ payloads.

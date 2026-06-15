@@ -392,6 +392,26 @@ tests = TT.testGroup "StridesBitwise"
          (a, x) <- SB.genPair n
          (b, y) <- SB.genPair n
          pure (SB.correct_assumeSge n a x b y)
+  , genTest "correct_assumeSltPrecise" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeSltPrecise n a x b y)
+  , genTest "correct_assumeSlePrecise" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeSlePrecise n a x b y)
+  , genTest "correct_assumeSgtPrecise" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeSgtPrecise n a x b y)
+  , genTest "correct_assumeSgePrecise" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeSgePrecise n a x b y)
   , genTest "assumeUltShrinks" $
       do SW n <- genWidth
          SB.assumeUltShrinks n <$> SB.genDomain n <*> SB.genDomain n
@@ -416,28 +436,28 @@ tests = TT.testGroup "StridesBitwise"
   , genTest "assumeSgeShrinks" $
       do SW n <- genWidth
          SB.assumeSgeShrinks n <$> SB.genDomain n <*> SB.genDomain n
-  , genTest "assumeUltIdempotent" $
+  , genTest "assumeSltPreciseShrinks" $
       do SW n <- genWidth
-         SB.assumeUltIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
-  , genTest "assumeUleIdempotent" $
+         SB.assumeSltPreciseShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeSlePreciseShrinks" $
       do SW n <- genWidth
-         SB.assumeUleIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
-  , genTest "assumeUgtIdempotent" $
+         SB.assumeSlePreciseShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeSgtPreciseShrinks" $
       do SW n <- genWidth
-         SB.assumeUgtIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
-  , genTest "assumeUgeIdempotent" $
+         SB.assumeSgtPreciseShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeSgePreciseShrinks" $
       do SW n <- genWidth
-         SB.assumeUgeIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
-  , genTest "assumeSltIdempotent" $
+         SB.assumeSgePreciseShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeSltPreciseIdempotent" $
       do SW n <- genWidth
-         SB.assumeSltIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
-  , genTest "assumeSleIdempotent" $
+         SB.assumeSltPreciseIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeSlePreciseIdempotent" $
       do SW n <- genWidth
-         SB.assumeSleIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
-  , genTest "assumeSgtIdempotent" $
+         SB.assumeSlePreciseIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeSgtPreciseIdempotent" $
       do SW n <- genWidth
-         SB.assumeSgtIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
-  , genTest "assumeSgeIdempotent" $
+         SB.assumeSgtPreciseIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "assumeSgePreciseIdempotent" $
       do SW n <- genWidth
-         SB.assumeSgeIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+         SB.assumeSgePreciseIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
   ]
