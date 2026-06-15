@@ -61,6 +61,11 @@ module What4.Domains.BV.Bitwise
   , ashrAbstract
   , rolAbstract
   , rorAbstract
+  , shlAbstractBounded
+  , lshrAbstractBounded
+  , ashrAbstractBounded
+  , rolAbstractBounded
+  , rorAbstractBounded
   , shlAbstractSpec
   , lshrAbstractSpec
   , ashrAbstractSpec
@@ -79,6 +84,15 @@ module What4.Domains.BV.Bitwise
   , srem
   , udivPrecise
   , uremPrecise
+  -- ** arithmetic (caller-supplied operand bounds)
+  --
+  -- $bounds
+  , mulBounded
+  , mulPreciseBounded
+  , udivBounded
+  , udivPreciseBounded
+  , uremBounded
+  , uremPreciseBounded
   -- ** arithmetic (SMT-LIB div-by-zero semantics)
   , udivSmtlib
   , uremSmtlib
@@ -206,6 +220,7 @@ import qualified Prelude
 import           Prelude hiding (any, concat, negate, and, or, not)
 
 import qualified What4.Domains.Arithmetic as Arith
+import           What4.Domains.BV.Bounds (UnsignedBounds(..))
 
 -- | A bitwise interval domain, defined via a
 --   bitwise upper and lower bound.  The ordering
@@ -524,8 +539,8 @@ knownZerosOnes (BVBitInterval mask lo hi) = (mask `Bits.xor` hi, lo)
 memberMask :: Integer -> Integer -> Integer -> Bool
 memberMask zeros ones s = (zeros .&. s) == 0 && (ones .|. s) == s
 
--- | Generic shift skeleton shared by 'shlAbstract', 'lshrAbstract', and
--- 'ashrAbstract'.
+-- | Generic shift skeleton shared by 'shlAbstractBounded', 'lshrAbstractBounded',
+-- and 'ashrAbstractBounded'.
 --
 -- The idea: try every concrete shift amount @s@ that @b@ could be, apply
 -- @op s@, and union the results. \"Union\" here means \"a result bit is
@@ -547,17 +562,22 @@ memberMask zeros ones s = (zeros .&. s) == 0 && (ones .|. s) == s
 --
 -- Same iteration strategy as LLVM's @KnownBits::shl@, @KnownBits::lshr@,
 -- and @KnownBits::ashr@.
-{-# INLINE foldShifts #-}
-foldShifts ::
+--
+-- Iterates over the caller-supplied unsigned bounds for the shift amount; the
+-- amount's known bits (used to skip unreachable amounts) come from @b@. The
+-- bounds must be sound for @b@; tightening them (e.g.\ from a partner strides
+-- domain) cuts the iteration range and sharpens the result.
+{-# INLINE foldShiftsBounded #-}
+foldShiftsBounded ::
   NatRepr w ->
-  Domain w {- ^ shift-amount domain -} ->
+  Domain w {- ^ shift-amount domain (source of known bits) -} ->
+  UnsignedBounds {- ^ unsigned bounds for the amount -} ->
   (Int -> Domain w) {- ^ per-shift transfer; @s@ ranges over @[0..w]@ -} ->
   Domain w
-foldShifts w b op = collapse (go bl (conflict mask))
+foldShiftsBounded w b (UnsignedBounds bl bh) op = collapse (go bl (conflict mask))
   where
   mask = bvdMask b
   wI = intValue w
-  (bl, bh) = ubounds b
   (zeros, ones) = knownZerosOnes b
   iterEnd = min bh wI
   go !s !acc
@@ -577,13 +597,19 @@ foldShifts w b op = collapse (go bl (conflict mask))
     | otherwise    = d
 
 -- | /O(w²)/. Shift left by an amount drawn from the domain @b@. See
--- 'foldShifts' for the algorithm.
+-- 'foldShiftsBounded' for the algorithm.
 --
 -- More precisely, /O(n · w)/ where @w@ is the bitvector width and
 -- @n = min(bh − bl + 1, w + 1)@ is the number of candidate shift amounts
 -- considered, with @bl@ and @bh@ the unsigned bounds of @b@.
 shlAbstract :: NatRepr w -> Domain w -> Domain w -> Domain w
-shlAbstract w a@(BVBitInterval mask aLo aHi) b
+shlAbstract w a b = shlAbstractBounded w a b (unsignedBounds b)
+
+-- | Like 'shlAbstract', but uses caller-supplied unsigned bounds @(bl, bh)@ for
+-- the shift amount (see 'foldShiftsBounded').
+{-# INLINE shlAbstractBounded #-}
+shlAbstractBounded :: NatRepr w -> Domain w -> Domain w -> UnsignedBounds -> Domain w
+shlAbstractBounded w a@(BVBitInterval mask aLo aHi) b bnds@(UnsignedBounds bl _)
   -- Fast path: a fully unknown @a@ shifts in zeros at the bottom. Bits
   -- @[0..min bl w - 1]@ are forced to 0 because every concrete shift
   -- amount is at least @bl@ (and shift @>= w@ kills every bit).
@@ -591,40 +617,50 @@ shlAbstract w a@(BVBitInterval mask aLo aHi) b
       let k = fromInteger (min bl (intValue w))
           lowZeros = bit k - 1
       in BVBitInterval mask 0 (mask .&. complement lowZeros)
-  | otherwise = foldShifts w b shiftBy
+  | otherwise = foldShiftsBounded w b bnds shiftBy
   where
-  (bl, _) = ubounds b
   shiftBy s = BVBitInterval mask ((aLo `shiftL` s) .&. mask)
                                  ((aHi `shiftL` s) .&. mask)
 
 -- | /O(w²)/. Logical (zero-fill) shift right by an amount drawn from
--- the domain @b@. See 'foldShifts' for the algorithm.
+-- the domain @b@. See 'foldShiftsBounded' for the algorithm.
 --
 -- More precisely, /O(n · w)/ where @w@ is the bitvector width and
 -- @n = min(bh − bl + 1, w + 1)@ is the number of candidate shift amounts
 -- considered, with @bl@ and @bh@ the unsigned bounds of @b@.
 lshrAbstract :: NatRepr w -> Domain w -> Domain w -> Domain w
-lshrAbstract w a@(BVBitInterval mask aLo aHi) b
+lshrAbstract w a b = lshrAbstractBounded w a b (unsignedBounds b)
+
+-- | Like 'lshrAbstract', but uses caller-supplied unsigned bounds @(bl, bh)@ for
+-- the shift amount (see 'foldShiftsBounded').
+{-# INLINE lshrAbstractBounded #-}
+lshrAbstractBounded :: NatRepr w -> Domain w -> Domain w -> UnsignedBounds -> Domain w
+lshrAbstractBounded w a@(BVBitInterval mask aLo aHi) b bnds@(UnsignedBounds bl _)
   -- Fast path: every shift @>= bl@ forces the top @min bl w@ bits of
   -- the result to 0.
   | isAny a =
       let k = fromInteger (min bl (intValue w))
           highMask = mask `shiftR` k
       in BVBitInterval mask 0 highMask
-  | otherwise = foldShifts w b shiftBy
+  | otherwise = foldShiftsBounded w b bnds shiftBy
   where
-  (bl, _) = ubounds b
   shiftBy s = BVBitInterval mask (aLo `shiftR` s) (aHi `shiftR` s)
 
 -- | /O(w²)/. Arithmetic (sign-extending) shift right by an amount drawn
--- from the domain @b@. See 'foldShifts' for the algorithm.
+-- from the domain @b@. See 'foldShiftsBounded' for the algorithm.
 --
 -- More precisely, /O(n · w)/ where @w@ is the bitvector width and
 -- @n = min(bh − bl + 1, w + 1)@ is the number of candidate shift amounts
 -- considered, with @bl@ and @bh@ the unsigned bounds of @b@.
 ashrAbstract :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-ashrAbstract w (BVBitInterval mask aLo aHi) b =
-  foldShifts w b shiftBy
+ashrAbstract w a b = ashrAbstractBounded w a b (unsignedBounds b)
+
+-- | Like 'ashrAbstract', but uses caller-supplied unsigned bounds @(bl, bh)@ for
+-- the shift amount (see 'foldShiftsBounded').
+{-# INLINE ashrAbstractBounded #-}
+ashrAbstractBounded :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> UnsignedBounds -> Domain w
+ashrAbstractBounded w (BVBitInterval mask aLo aHi) b bnds =
+  foldShiftsBounded w b bnds shiftBy
   where
   -- Sign-extending shift on the @lo@ and @hi@ bounds independently is
   -- sound: if every member of @a@ has a known-1 at position @i >= sign@,
@@ -634,13 +670,21 @@ ashrAbstract w (BVBitInterval mask aLo aHi) b =
                 ((toSigned w aHi `shiftR` s) .&. mask)
 
 -- | /O(w²)/. Rotate left by an amount drawn from the domain @b@. See
--- 'foldRotates' for the algorithm.
+-- 'foldRotatesBounded' for the algorithm.
 --
 -- More precisely, /O(r · w)/ where @w@ is the bitvector width and @r@ is
 -- the number of distinct residues mod @w@ that are reachable from @b@
 -- (at most @w@).
 rolAbstract :: NatRepr w -> Domain w -> Domain w -> Domain w
-rolAbstract w (BVBitInterval mask aLo aHi) b = foldRotates w b rotBy fullDom
+rolAbstract w a b = rolAbstractBounded w a b (unsignedBounds b)
+
+-- | Like 'rolAbstract', but uses caller-supplied unsigned bounds @(bl, bh)@ for
+-- the rotate amount (see 'foldRotatesBounded'). The bounds only affect
+-- non-power-of-two widths; on power-of-two widths the reachable residues are
+-- determined by @b@'s low bits alone.
+{-# INLINE rolAbstractBounded #-}
+rolAbstractBounded :: NatRepr w -> Domain w -> Domain w -> UnsignedBounds -> Domain w
+rolAbstractBounded w (BVBitInterval mask aLo aHi) b bnds = foldRotatesBounded w b bnds rotBy fullDom
   where
   -- Fast path: if every residue in @[0, w-1]@ is reachable from @b@,
   -- every output bit could come from any input bit, so the answer is
@@ -657,14 +701,21 @@ rolAbstract w (BVBitInterval mask aLo aHi) b = foldRotates w b rotBy fullDom
 -- the number of distinct residues mod @w@ that are reachable from @b@
 -- (at most @w@).
 rorAbstract :: NatRepr w -> Domain w -> Domain w -> Domain w
-rorAbstract w (BVBitInterval mask aLo aHi) b = foldRotates w b rotBy fullDom
+rorAbstract w a b = rorAbstractBounded w a b (unsignedBounds b)
+
+-- | Like 'rorAbstract', but uses caller-supplied unsigned bounds @(bl, bh)@ for
+-- the rotate amount (see 'rolAbstractBounded').
+{-# INLINE rorAbstractBounded #-}
+rorAbstractBounded :: NatRepr w -> Domain w -> Domain w -> UnsignedBounds -> Domain w
+rorAbstractBounded w (BVBitInterval mask aLo aHi) b bnds = foldRotatesBounded w b bnds rotBy fullDom
   where
   fullDom = fullCoverage mask aLo aHi
   rotBy s = BVBitInterval mask
               (Arith.rotateRight w aLo (toInteger s))
               (Arith.rotateRight w aHi (toInteger s))
 
--- | Generic rotate skeleton shared by 'rolAbstract' and 'rorAbstract'.
+-- | Generic rotate skeleton shared by 'rolAbstractBounded' and
+-- 'rorAbstractBounded'.
 --
 -- Rotating by @s@ is the same as rotating by @s `mod` w@, so we only
 -- ever care about @w@ distinct rotation amounts. The trick is figuring
@@ -675,8 +726,8 @@ rorAbstract w (BVBitInterval mask aLo aHi) b = foldRotates w b rotBy fullDom
 --   @log2 w@ bits of @s@. So the reachable residues are exactly the
 --   values consistent with @b@'s known bits restricted to those low
 --   bits, and we use the same @KnownBits@-style mask check as
---   'foldShifts' to skip residues no member of @b@ can produce. This
---   gives the smallest sound result.
+--   'foldShiftsBounded' to skip residues no member of @b@ can produce.
+--   This gives the smallest sound result.
 --
 -- * Non-power-of-two width: there's no clean correspondence between
 --   @b@'s bits and residues mod @w@. We fall back to bounds: the
@@ -686,14 +737,20 @@ rorAbstract w (BVBitInterval mask aLo aHi) b = foldRotates w b rotBy fullDom
 --
 -- Iteration is always at most @w@ steps, never over the (possibly
 -- enormous) integer range @[bl, bh]@.
-{-# INLINE foldRotates #-}
-foldRotates ::
+--
+-- Iterates over the caller-supplied unsigned bounds for the rotate amount; the
+-- bounds are only consulted on non-power-of-two widths (where residues mod @w@
+-- are derived from the numeric range). On power-of-two widths the reachable
+-- residues come from @b@'s low bits and the bounds are unused.
+{-# INLINE foldRotatesBounded #-}
+foldRotatesBounded ::
   NatRepr w ->
-  Domain w {- ^ rotate-amount domain -} ->
+  Domain w {- ^ rotate-amount domain (source of known bits) -} ->
+  UnsignedBounds {- ^ unsigned bounds for the amount -} ->
   (Int -> Domain w) {- ^ per-amount transfer; argument is residue mod @w@ -} ->
   Domain w {- ^ result when all residues are reachable -} ->
   Domain w
-foldRotates w b op fullDom
+foldRotatesBounded w b (UnsignedBounds bl bh) op fullDom
   | Arith.isPow2Integer wI =
       let residueMask = wI - 1
           zerosLow = zeros .&. residueMask
@@ -710,7 +767,6 @@ foldRotates w b op fullDom
   where
   mask = bvdMask b
   wI = intValue w
-  (bl, bh) = ubounds b
   (zeros, ones) = knownZerosOnes b
 
   -- Reduce @[bl, bh]@ mod @w@ to a list of residue ranges in @[0, w-1]@.
@@ -810,6 +866,11 @@ xor a@(BVBitInterval mask alo _) b@(BVBitInterval _ blo _) = BVBitInterval mask 
 -- 1 maximizes.
 ubounds :: Domain w -> (Integer, Integer)
 ubounds = bitbounds
+
+-- | /O(1)/. 'ubounds' packaged as an 'UnsignedBounds'. Used to feed a domain's
+-- own bounds into the @*Bounded@ transfer functions.
+unsignedBounds :: Domain w -> UnsignedBounds
+unsignedBounds d = let (l, h) = ubounds d in UnsignedBounds l h
 
 -- | /O(1)/. The mask with just the sign bit set: @bit (w - 1)@.
 signBit :: (1 <= w) => NatRepr w -> Integer
@@ -1055,17 +1116,13 @@ scale k a = mulPrecise (mkSingleton (bvdMask a) k) a
 -- precise; this is the cheaper alternative when middle-bit precision
 -- doesn't matter.
 mul :: Domain w -> Domain w -> Domain w
-mul a@(BVBitInterval mask _ _) b =
-  fromTnum mask (Tnum.mul mask (toTnum a) (toTnum b))
+mul a b = mulBounded a (unsignedBounds a) b (unsignedBounds b)
 
 -- | /O(w²)/. Multiply two bitwise domains, combining the shift-and-add
 -- tristate-number algorithm (BPF @tnum_mul@) with the interval and
 -- trailing-zero analysis of 'mul'. Strictly at least as precise as 'mul'.
 mulPrecise :: Domain w -> Domain w -> Domain w
-mulPrecise a@(BVBitInterval mask _ _) b =
-  intersection
-    (fromTnum mask (Tnum.mulPrecise mask (toTnum a) (toTnum b)))
-    (mul a b)
+mulPrecise a b = mulPreciseBounded a (unsignedBounds a) b (unsignedBounds b)
 
 -- | /O(w)/. Unsigned division via interval analysis on the quotient bounds.
 -- Assumes the divisor is nonzero.
@@ -1077,8 +1134,7 @@ mulPrecise a@(BVBitInterval mask _ _) b =
 -- bits known zero). 'udivPrecise' is strictly more precise; this is the
 -- cheaper alternative when middle-bit precision doesn't matter.
 udiv :: Domain w -> Domain w -> Domain w
-udiv a@(BVBitInterval mask _ _) b =
-  fromTnum mask (Tnum.udiv mask (toTnum a) (toTnum b))
+udiv a b = udivBounded a (unsignedBounds a) b (unsignedBounds b)
 
 -- | /O(w)/. Unsigned remainder via leading-zero analysis. Assumes the divisor
 -- is nonzero.
@@ -1089,8 +1145,7 @@ udiv a@(BVBitInterval mask _ _) b =
 -- leading bits here.) When the divisor is a known power of two,
 -- @urem a (singleton w (2^k))@ is exactly the low @k@ bits of @a@.
 urem :: Domain w -> Domain w -> Domain w
-urem a@(BVBitInterval mask _ _) b =
-  fromTnum mask (Tnum.urem mask (toTnum a) (toTnum b))
+urem a b = uremBounded a (unsignedBounds a) b (unsignedBounds b)
 
 -- | /O(w²)/. Unsigned division combining abstract schoolbook long division
 -- with the interval analysis of 'udiv'. Assumes the divisor is nonzero.
@@ -1102,13 +1157,86 @@ urem a@(BVBitInterval mask _ _) b =
 -- analysis can't see, but joins through any undetermined comparison and so
 -- loses on power-of-two divisors).
 udivPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-udivPrecise w a b = intersection (fst (longDivision w a b)) (udiv a b)
+udivPrecise w a b = udivPreciseBounded w a (unsignedBounds a) b (unsignedBounds b)
 
 -- | /O(w²)/. Unsigned remainder combining schoolbook long division with the
 -- leading-zero analysis of 'urem'. Assumes the divisor is nonzero. Strictly
 -- at least as precise as 'urem'.
 uremPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-uremPrecise w a b = intersection (snd (longDivision w a b)) (urem a b)
+uremPrecise w a b = uremPreciseBounded w a (unsignedBounds a) b (unsignedBounds b)
+
+-- $bounds
+--
+-- These variants take, for each operand, an unsigned bounds pair
+-- @(lo, hi)@ that is used in place of the operand's own bit-pattern bounds for
+-- the interval-analysis component of the transfer function (the bit-structure
+-- component is unchanged). They exist for the reduced product
+-- "What4.Domains.BV.StridesBitwise", where the strides component supplies
+-- bounds strictly tighter than the bitwise domain's bit-pattern bounds can
+-- express, letting the interval analysis determine leading bits it otherwise
+-- could not.
+--
+-- The supplied bounds must be sound for the operand's (nonempty) value set
+-- (@lo <= x <= hi@ for every concrete @x@ it admits). Each result refines the
+-- corresponding unbounded operation ('mul', 'udiv', 'urem', \&c.).
+
+-- | /O(w²)/. 'mul' with caller-supplied operand bounds (see the section note
+-- above): each @(lo, hi)@ overrides its operand's bit-pattern bounds for the
+-- product's interval analysis.
+mulBounded ::
+  Domain w -> UnsignedBounds -> Domain w -> UnsignedBounds -> Domain w
+mulBounded a@(BVBitInterval mask _ _) ba b bb =
+  fromTnum mask (Tnum.mulBounds mask ba (toTnum a) bb (toTnum b))
+{-# INLINE mulBounded #-}
+
+-- | /O(w²)/. 'mulPrecise' with caller-supplied operand bounds (see 'mulBounded'):
+-- the shift-and-add (tnum) factor is unaffected by bounds, so only the interval
+-- factor is bound-fed.
+mulPreciseBounded ::
+  Domain w -> UnsignedBounds -> Domain w -> UnsignedBounds -> Domain w
+mulPreciseBounded a@(BVBitInterval mask _ _) ba b bb =
+  intersection
+    (fromTnum mask (Tnum.mulPrecise mask (toTnum a) (toTnum b)))
+    (mulBounded a ba b bb)
+{-# INLINE mulPreciseBounded #-}
+
+-- | /O(w)/. 'udiv' with caller-supplied operand bounds (see 'mulBounded').
+-- Assumes the divisor is nonzero.
+udivBounded ::
+  Domain w -> UnsignedBounds -> Domain w -> UnsignedBounds -> Domain w
+udivBounded a@(BVBitInterval mask _ _) ba b bb =
+  fromTnum mask (Tnum.udivBounds mask ba (toTnum a) bb (toTnum b))
+{-# INLINE udivBounded #-}
+
+-- | /O(w²)/. 'udivPrecise' with caller-supplied operand bounds (see 'mulBounded'):
+-- only the interval (@udiv@) factor is bound-fed; the schoolbook factor is
+-- unchanged. Assumes the divisor is nonzero.
+udivPreciseBounded ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w -> UnsignedBounds -> Domain w -> UnsignedBounds -> Domain w
+udivPreciseBounded w a ba b bb =
+  intersection (fst (longDivision w a b)) (udivBounded a ba b bb)
+{-# INLINE udivPreciseBounded #-}
+
+-- | /O(w)/. 'urem' with caller-supplied operand bounds (see 'mulBounded').
+-- Assumes the divisor is nonzero.
+uremBounded ::
+  Domain w -> UnsignedBounds -> Domain w -> UnsignedBounds -> Domain w
+uremBounded a@(BVBitInterval mask _ _) ba b bb =
+  fromTnum mask (Tnum.uremBounds mask ba (toTnum a) bb (toTnum b))
+{-# INLINE uremBounded #-}
+
+-- | /O(w²)/. 'uremPrecise' with caller-supplied operand bounds (see 'mulBounded'):
+-- only the interval (@urem@) factor is bound-fed; the schoolbook factor is
+-- unchanged. Assumes the divisor is nonzero.
+uremPreciseBounded ::
+  (1 <= w) =>
+  NatRepr w ->
+  Domain w -> UnsignedBounds -> Domain w -> UnsignedBounds -> Domain w
+uremPreciseBounded w a ba b bb =
+  intersection (snd (longDivision w a b)) (uremBounded a ba b bb)
+{-# INLINE uremPreciseBounded #-}
 
 -- | Abstract schoolbook long division: simultaneously computes the
 -- quotient and remainder by walking the bits of the dividend from MSB to

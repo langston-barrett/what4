@@ -37,6 +37,10 @@ module What4.Domains.BV.Bitwise.Tnum
   , mulPrecise
   , udiv
   , urem
+  -- * Bounds-parametrized variants
+  , mulBounds
+  , udivBounds
+  , uremBounds
   ) where
 
 import qualified Control.Exception as X
@@ -48,6 +52,7 @@ import           What4.Domains.Arithmetic
                   , isPow2Integer
                   , log2OfPowerOfTwo
                   )
+import           What4.Domains.BV.Bounds (UnsignedBounds(..))
 
 -- | A tristate-number representation.
 --
@@ -65,6 +70,14 @@ data Tnum = Tnum
 mk :: Integer -> Integer -> Tnum
 mk v m = X.assert (v .&. m == 0) (Tnum v m)
 {-# INLINE mk #-}
+
+-- | /O(1)/. A tnum's own bit-pattern bounds @[v, v .|. m]@ (masked to
+-- @bvmask@) as an 'UnsignedBounds'. Feeding these to a @*Bounds@ operation
+-- reproduces the corresponding unbounded operation, so the latter forward
+-- through the former.
+selfBounds :: Integer {- ^ bvmask -} -> Tnum -> UnsignedBounds
+selfBounds bvmask (Tnum v m) = UnsignedBounds (v .&. bvmask) ((v .|. m) .&. bvmask)
+{-# INLINE selfBounds #-}
 
 -- | /O(w)/. Tristate-number add, with the result truncated to @bvmask@.
 add ::
@@ -103,23 +116,46 @@ mul ::
   Tnum {- ^ a -} ->
   Tnum {- ^ b -} ->
   Tnum
-mul bvmask (Tnum av am) (Tnum bv bm)
+mul bvmask a b = mulBounds bvmask (selfBounds bvmask a) a (selfBounds bvmask b) b
+{-# INLINE mul #-}
+
+-- | /O(w)/. Like 'mul', but the interval-analysis half uses caller-supplied
+-- unsigned bounds @(aLo, aHi)@ / @(bLo, bHi)@ for the operands in place of the
+-- bit-pattern bounds, after intersecting them with each tnum's own bounds
+-- @[v, v .|. m]@. The trailing-zero analysis is unchanged. Intended for the
+-- reduced product, where a partner domain (e.g.\ strides) supplies bounds
+-- tighter than the bit-pattern bounds alone, sharpening the leading bits the
+-- product's interval determines.
+--
+-- Precondition: the supplied bounds are sound for the operand's (nonempty)
+-- value set, i.e.\ @aLo <= x <= aHi@ for every concrete @x@ the operand can
+-- take. With sound bounds the clamped interval is nonempty and the result is a
+-- sound over-approximation that refines 'mul'.
+mulBounds ::
+  Integer {- ^ bvmask -} ->
+  UnsignedBounds {- ^ @a@'s unsigned bounds -} ->
+  Tnum {- ^ a -} ->
+  UnsignedBounds {- ^ @b@'s unsigned bounds -} ->
+  Tnum {- ^ b -} ->
+  Tnum
+mulBounds bvmask (UnsignedBounds aLo aHi) (Tnum av am) (UnsignedBounds bLo bHi) (Tnum bv bm)
   | am == 0, bm == 0 = mk ((av * bv) .&. bvmask) 0
   | otherwise = mk (highValue .&. bvmask) (highUnknown .&. complement lowZeros .&. bvmask)
   where
-  -- Trailing-zero analysis: ctz(value | mask) is the lowest bit that is not
-  -- known-zero in each operand.
   ctzA = countTrailingZerosOr0 (av .|. am)
   ctzB = countTrailingZerosOr0 (bv .|. bm)
   lowZeros = (bit (ctzA + ctzB) - 1) .&. bvmask
-  -- Interval analysis: the product lies in [aMin*bMin, aMax*bMax] (computed
-  -- in unbounded Integer). 'wrappedKnownBitsOfInterval' reduces this modulo
-  -- @bvmask+1@ and extracts known bits whether or not the interval crosses a
-  -- modulus boundary.
-  prodMin = av * bv
-  prodMax = (av .|. am) * (bv .|. bm)
+  -- Intersect the supplied bounds with the tnum's own bit-pattern bounds.
+  -- @max aMin _@ on the upper end guards against an out-of-order interval if a
+  -- caller passes unsound bounds.
+  aMin = max av aLo
+  aMax = max aMin (min (av .|. am) aHi)
+  bMin = max bv bLo
+  bMax = max bMin (min (bv .|. bm) bHi)
+  prodMin = aMin * bMin
+  prodMax = aMax * bMax
   (highValue, highUnknown) = wrappedKnownBitsOfInterval bvmask prodMin prodMax
-{-# INLINE mul #-}
+{-# INLINE mulBounds #-}
 
 -- | /O(w)/. @knownBitsOfInterval lo hi@ analyzes the arithmetic interval @[lo, hi]@
 -- (where @0 <= lo <= hi@) and returns @(value, mask)@ in tnum form: the bits
@@ -214,22 +250,34 @@ udiv ::
   Tnum {- ^ a -} ->
   Tnum {- ^ b -} ->
   Tnum
-udiv bvmask (Tnum av am) (Tnum bv bm)
+udiv bvmask a b = udivBounds bvmask (selfBounds bvmask a) a (selfBounds bvmask b) b
+{-# INLINE udiv #-}
+
+-- | /O(w)/. Like 'udiv', but the quotient-interval bounds use caller-supplied
+-- unsigned bounds for the operands, intersected with their bit-pattern bounds.
+-- The power-of-two divisor fast path (exact) is unchanged. See 'mulBounds' for
+-- the precondition and intent.
+udivBounds ::
+  Integer {- ^ bvmask -} ->
+  UnsignedBounds {- ^ @a@ (dividend) bounds -} ->
+  Tnum {- ^ a -} ->
+  UnsignedBounds {- ^ @b@ (divisor) bounds -} ->
+  Tnum {- ^ b -} ->
+  Tnum
+udivBounds bvmask (UnsignedBounds aLo aHi) (Tnum av am) (UnsignedBounds bLo bHi) (Tnum bv bm)
   | bm == 0, isPow2Integer bv =
       let k = log2OfPowerOfTwo bv
       in mk ((av `shiftR` k) .&. bvmask) ((am `shiftR` k) .&. bvmask)
   | otherwise = mk (highValue .&. bvmask) (highUnknown .&. bvmask)
   where
-  aMin = av .&. bvmask
-  aMax = (av .|. am) .&. bvmask
-  bMin = max 1 bv
-  bMax = max 1 ((bv .|. bm) .&. bvmask)
-  -- a / b lies in [aMin/bMax, aMax/bMin]. Both quotients are non-negative
-  -- and within @bvmask@, so no overflow check is needed.
+  aMin = max (av .&. bvmask) aLo
+  aMax = max aMin (min ((av .|. am) .&. bvmask) aHi)
+  bMin = max 1 (max bv bLo)
+  bMax = max bMin (min ((bv .|. bm) .&. bvmask) bHi)
   qMin = aMin `quot` bMax
   qMax = aMax `quot` bMin
   (highValue, highUnknown) = knownBitsOfInterval qMin qMax
-{-# INLINE udiv #-}
+{-# INLINE udivBounds #-}
 
 -- | /O(w)/. Tristate-number unsigned remainder, with the result truncated to
 -- @bvmask@.
@@ -242,14 +290,29 @@ urem ::
   Tnum {- ^ a -} ->
   Tnum {- ^ b -} ->
   Tnum
-urem bvmask (Tnum av am) (Tnum bv bm)
+urem bvmask a b = uremBounds bvmask (selfBounds bvmask a) a (selfBounds bvmask b) b
+{-# INLINE urem #-}
+
+-- | /O(w)/. Like 'urem', but the leading-zero bound uses caller-supplied
+-- unsigned upper bounds for the operands, intersected with their bit-pattern
+-- bounds. The power-of-two divisor fast path (exact) is unchanged. The lower
+-- bounds are unused (the remainder's lower bound is trivially 0). See
+-- 'mulBounds' for the precondition and intent.
+uremBounds ::
+  Integer {- ^ bvmask -} ->
+  UnsignedBounds {- ^ @a@ (dividend) bounds -} ->
+  Tnum {- ^ a -} ->
+  UnsignedBounds {- ^ @b@ (divisor) bounds -} ->
+  Tnum {- ^ b -} ->
+  Tnum
+uremBounds bvmask (UnsignedBounds _aLo aHi) (Tnum av am) (UnsignedBounds _bLo bHi) (Tnum bv bm)
   | bm == 0, isPow2Integer bv =
       let m = bv - 1
       in mk (av .&. m) (am .&. m)
   | otherwise = mk 0 (bitsBelow rMax .&. bvmask)
   where
-  aMax = (av .|. am) .&. bvmask
-  bMax = (bv .|. bm) .&. bvmask
+  aMax = min ((av .|. am) .&. bvmask) aHi
+  bMax = min ((bv .|. bm) .&. bvmask) bHi
   rMax = min aMax (max 0 (bMax - 1))
-{-# INLINE urem #-}
+{-# INLINE uremBounds #-}
 

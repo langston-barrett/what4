@@ -263,6 +263,7 @@ import qualified Data.Parameterized.NatRepr as NR
 
 import qualified What4.Domains.BV.Arith as A
 import qualified What4.Domains.BV.Bitwise as B
+import           What4.Domains.BV.Bounds (UnsignedBounds(..))
 import qualified What4.Domains.BV.Strides as S
 import           What4.Domains.Verification (Property, property, (==>), Gen)
 
@@ -298,15 +299,40 @@ proper (Domain s b) =
 -- 'Nothing' implying an actually-empty joint. Use 'tryMkReduced' when
 -- the operation should propagate \"empty joint\" rather than fall back.
 mkReduced :: (1 <= w) => NatRepr w -> S.Domain w -> B.Domain w -> Domain w
-mkReduced w s b = case S.reduce w s b of
+mkReduced = mkReducedBy S.reduce
+
+-- | Like 'mkReduced', but uses 'S.reducePrecise' — the precise mutual
+-- refinement (per-piece stride lift + numeric-arc clip). This is where the
+-- bitwise component's known bits are lifted into the strides orbit (and the
+-- tightened orbit\'s bits pushed back into the bitwise component) more
+-- aggressively than single-pass 'S.reduce'. Used by the @*Precise@ operations.
+--
+-- 'S.reducePrecise' is sound but /incomplete/: on some self-wrapping orbits it
+-- conservatively returns 'Nothing' (skipping the arc clip) even when the joint
+-- is nonempty. So on 'Nothing' we do not conclude \"empty\"; we fall back to
+-- single-pass 'mkReduced', which handles those cases (and the genuine
+-- empty-joint fallback). This never loses precision relative to 'mkReduced'.
+mkReducedPrecise :: (1 <= w) => NatRepr w -> S.Domain w -> B.Domain w -> Domain w
+mkReducedPrecise w s b = case S.reducePrecise w s b of
+  Just (s', b') -> Domain s' b'
+  Nothing       -> mkReduced w s b
+
+-- | Shared driver for 'mkReduced' / 'mkReducedPrecise', parameterized over the
+-- reduction. On a 'Nothing' (joint concluded empty) it falls back to dropping
+-- the bitwise component (@reduceOp w s (S.toBitwise s)@); see 'mkReduced'.
+mkReducedBy ::
+  (1 <= w) =>
+  (NatRepr w -> S.Domain w -> B.Domain w -> Maybe (S.Domain w, B.Domain w)) ->
+  NatRepr w -> S.Domain w -> B.Domain w -> Domain w
+mkReducedBy reduceOp w s b = case reduceOp w s b of
   Just (s', b') -> Domain s' b'
   Nothing ->
-    case S.reduce w s (S.toBitwise s) of
+    case reduceOp w s (S.toBitwise s) of
       Just (s', b') -> Domain s' b'
-      Nothing       -> error "StridesBitwise.mkReduced: reduce failed on \
+      Nothing       -> error "StridesBitwise.mkReducedBy: reduce failed on \
                              \(s, toBitwise s) — invariant violated."
 
--- | Strict smart constructor: returns 'Nothing' iff 'S.reduce' concludes
+-- | Strict smart constructor: returns 'Nothing' iff the reduction concludes
 -- the joint is empty. Use this from @Maybe Domain@-returning operations
 -- (e.g. 'pseudoMeet', 'lowerBound') so that an empty joint propagates
 -- as 'Nothing' rather than silently widening to 'mkReduced'\'s fallback,
@@ -316,6 +342,17 @@ tryMkReduced ::
 tryMkReduced w s b = case S.reduce w s b of
   Just (s', b') -> Just (Domain s' b')
   Nothing       -> Nothing
+
+-- | Like 'tryMkReduced', but uses 'S.reducePrecise' (see 'mkReducedPrecise').
+-- Because 'S.reducePrecise' is incomplete on self-wrapping orbits (it can
+-- return 'Nothing' on a nonempty joint), a 'Nothing' here does /not/ mean
+-- empty: we defer to single-pass 'tryMkReduced', which only reports 'Nothing'
+-- when the joint genuinely is empty.
+tryMkReducedPrecise ::
+  (1 <= w) => NatRepr w -> S.Domain w -> B.Domain w -> Maybe (Domain w)
+tryMkReducedPrecise w s b = case S.reducePrecise w s b of
+  Just (s', b') -> Just (Domain s' b')
+  Nothing       -> tryMkReduced w s b
 
 -- ------------------------------------------------------------------
 -- * Construction
@@ -560,6 +597,22 @@ isSelfWrapping :: Domain w -> Bool
 isSelfWrapping (Domain s _) = S.isSelfWrapping s
 
 -- ------------------------------------------------------------------
+-- * Internal helpers
+
+-- | /O(1)/. The tightest sound unsigned value range for an operand: the strides
+-- component's arithmetic bounds ('S.toArith' then 'A.ubounds') intersected with
+-- the bitwise component's bit-pattern bounds ('B.bitbounds'). This is the cross-
+-- component bound fed into the bitwise domain's @*Bounded@ transfer functions
+-- ('B.mulBounded', 'B.udivBounded', 'B.shlAbstractBounded', \&c.), so the
+-- bitwise interval analysis benefits from bounds the bit-pattern alone can't
+-- express (e.g.\ an orbit @[0, 100]@ whose forced bits only give @[0, 127]@).
+tightUBounds :: Domain w -> UnsignedBounds
+tightUBounds (Domain s b) =
+  let (sl, sh) = A.ubounds (S.toArith s)
+      (bl, bh) = B.bitbounds b
+  in UnsignedBounds (max sl bl) (min sh bh)
+
+-- ------------------------------------------------------------------
 -- * Arithmetic
 
 negate :: (1 <= w) => NatRepr w -> Domain w -> Domain w
@@ -577,28 +630,31 @@ scale :: (1 <= w) => NatRepr w -> Integer -> Domain w -> Domain w
 scale w k (Domain s b) = mkReduced w (S.scale w k s) (B.scale k b)
 
 mul :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-mul w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.mul w sa sb) (B.mul ba bb)
+mul w a@(Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.mul w sa sb) (B.mulBounded ba (tightUBounds a) bb (tightUBounds b))
 
 mulPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-mulPrecise w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.mul w sa sb) (B.mulPrecise ba bb)
+mulPrecise w a@(Domain sa ba) b@(Domain sb bb) =
+  mkReducedPrecise w (S.mul w sa sb)
+    (B.mulPreciseBounded ba (tightUBounds a) bb (tightUBounds b))
 
 udiv :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-udiv w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.udiv w sa sb) (B.udiv ba bb)
+udiv w a@(Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.udiv w sa sb) (B.udivBounded ba (tightUBounds a) bb (tightUBounds b))
 
 udivPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-udivPrecise w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.udiv w sa sb) (B.udivPrecise w ba bb)
+udivPrecise w a@(Domain sa ba) b@(Domain sb bb) =
+  mkReducedPrecise w (S.udiv w sa sb)
+    (B.udivPreciseBounded w ba (tightUBounds a) bb (tightUBounds b))
 
 urem :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-urem w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.urem w sa sb) (B.urem ba bb)
+urem w a@(Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.urem w sa sb) (B.uremBounded ba (tightUBounds a) bb (tightUBounds b))
 
 uremPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-uremPrecise w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.urem w sa sb) (B.uremPrecise w ba bb)
+uremPrecise w a@(Domain sa ba) b@(Domain sb bb) =
+  mkReducedPrecise w (S.urem w sa sb)
+    (B.uremPreciseBounded w ba (tightUBounds a) bb (tightUBounds b))
 
 sdiv :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 sdiv w (Domain sa ba) (Domain sb bb) =
@@ -643,7 +699,7 @@ and w (Domain sa ba) (Domain sb bb) =
 
 andPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 andPrecise w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.andPrecise w sa sb) (B.and ba bb)
+  mkReducedPrecise w (S.andPrecise w sa sb) (B.and ba bb)
 
 orFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 orFast w (Domain sa ba) (Domain sb bb) =
@@ -655,7 +711,7 @@ or w (Domain sa ba) (Domain sb bb) =
 
 orPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 orPrecise w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.orPrecise w sa sb) (B.or ba bb)
+  mkReducedPrecise w (S.orPrecise w sa sb) (B.or ba bb)
 
 xorFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 xorFast w (Domain sa ba) (Domain sb bb) =
@@ -705,45 +761,50 @@ select i n w (Domain s b) =
 -- ------------------------------------------------------------------
 -- * Shifts and rotations
 
+-- For shifts and rotates the second operand is the amount; its 'tightUBounds'
+-- (the strides view's numeric range, intersected with the bitwise bounds) bound
+-- how many shift\/rotate amounts the bitwise transfer function must consider,
+-- which both speeds it up and tightens the result.
+
 shl :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-shl w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.shl w sa sb) (B.shlAbstract w ba bb)
+shl w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.shl w sa sb) (B.shlAbstractBounded w ba bb (tightUBounds b))
 
 shlRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-shlRaw w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.shlRaw w sa sb) (B.shlAbstract w ba bb)
+shlRaw w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.shlRaw w sa sb) (B.shlAbstractBounded w ba bb (tightUBounds b))
 
 lshr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-lshr w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.lshr w sa sb) (B.lshrAbstract w ba bb)
+lshr w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.lshr w sa sb) (B.lshrAbstractBounded w ba bb (tightUBounds b))
 
 lshrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-lshrRaw w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.lshrRaw w sa sb) (B.lshrAbstract w ba bb)
+lshrRaw w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.lshrRaw w sa sb) (B.lshrAbstractBounded w ba bb (tightUBounds b))
 
 ashr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-ashr w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.ashr w sa sb) (B.ashrAbstract w ba bb)
+ashr w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.ashr w sa sb) (B.ashrAbstractBounded w ba bb (tightUBounds b))
 
 ashrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-ashrRaw w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.ashrRaw w sa sb) (B.ashrAbstract w ba bb)
+ashrRaw w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.ashrRaw w sa sb) (B.ashrAbstractBounded w ba bb (tightUBounds b))
 
 rol :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-rol w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.rol w sa sb) (B.rolAbstract w ba bb)
+rol w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.rol w sa sb) (B.rolAbstractBounded w ba bb (tightUBounds b))
 
 rolRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-rolRaw w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.rolRaw w sa sb) (B.rolAbstract w ba bb)
+rolRaw w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.rolRaw w sa sb) (B.rolAbstractBounded w ba bb (tightUBounds b))
 
 ror :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-ror w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.ror w sa sb) (B.rorAbstract w ba bb)
+ror w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.ror w sa sb) (B.rorAbstractBounded w ba bb (tightUBounds b))
 
 rorRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-rorRaw w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.rorRaw w sa sb) (B.rorAbstract w ba bb)
+rorRaw w (Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.rorRaw w sa sb) (B.rorAbstractBounded w ba bb (tightUBounds b))
 
 -- ------------------------------------------------------------------
 -- * Lattice operations
@@ -763,7 +824,7 @@ pseudoMeetPrecise ::
   NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
 pseudoMeetPrecise w (Domain sa ba) (Domain sb bb) = do
   sm <- S.pseudoMeetPrecise w sa sb
-  tryMkReduced w sm (B.meet ba bb)
+  tryMkReducedPrecise w sm (B.meet ba bb)
 
 -- ------------------------------------------------------------------
 -- ** Joins
@@ -778,7 +839,7 @@ pseudoJoinPrecise ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Domain w
 pseudoJoinPrecise w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.pseudoJoinPrecise w sa sb) (B.join ba bb)
+  mkReducedPrecise w (S.pseudoJoinPrecise w sa sb) (B.join ba bb)
 
 -- ------------------------------------------------------------------
 -- * Branch-condition assumptions
@@ -839,9 +900,15 @@ assumeSgePrecise = liftAssume S.assumeSgePrecise B.assumeSge
 
 -- | Shared driver for the lifted assume operations. Runs the strides
 -- assume (which returns 'Maybe', signalling empty) and the bitwise
--- assume (which returns a possibly-bottom 'B.Domain'), then reduces.
--- 'Nothing' if either component is empty, or if 'tryMkReduced' concludes
--- the joint is empty.
+-- assume (which returns a possibly-bottom 'B.Domain'), then reduces with
+-- single-pass 'tryMkReduced'. 'Nothing' if either component is empty, or if the
+-- reduction concludes the joint is empty.
+--
+-- The @*Precise@ assume operations differ only in their /strides/ assume
+-- (e.g.\ 'S.assumeSltPrecise'); they reduce single-pass through this same
+-- driver. (Routing them through 'tryMkReducedPrecise' would break their
+-- set-idempotence: the precise reduction's representation is not stable under
+-- re-assume.)
 liftAssume ::
   (1 <= w) =>
   (NatRepr w -> S.Domain w -> S.Domain w -> Maybe (S.Domain w)) ->
