@@ -779,6 +779,10 @@ tests = TT.testGroup "Strides"
       do SW n <- genWidth
          S.correct_assumeSgePrecise n <$> S.genDomain n <*> genNatBV n
                                       <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_assumeNe" $
+      do SW n <- genWidth
+         S.correct_assumeNe n <$> S.genDomain n <*> genNatBV n
+                              <*> S.genDomain n <*> genNatBV n
   , genTest "assumeUltShrinks" $
       do SW n <- genWidth
          S.assumeUltShrinks n <$> S.genDomain n <*> S.genDomain n
@@ -815,6 +819,9 @@ tests = TT.testGroup "Strides"
   , genTest "assumeSgePreciseShrinks" $
       do SW n <- genWidth
          S.assumeSgePreciseShrinks n <$> S.genDomain n <*> S.genDomain n
+  , genTest "assumeNeShrinks" $
+      do SW n <- genWidth
+         S.assumeNeShrinks n <$> S.genDomain n <*> S.genDomain n
   , genTest "assumeSltPreciseIdempotent" $
       do SW n <- genWidth
          S.assumeSltPreciseIdempotent n <$> S.genDomain n <*> S.genDomain n

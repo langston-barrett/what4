@@ -1705,6 +1705,24 @@ assumeSge = assumeSgeBy leq
 assumeSgePrecise : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
 assumeSgePrecise = assumeSgeBy leqExact
 
+// Refine `a` by the assumption `x != y`, `x` in `γ(a)`, `y` in `γ(b)`.
+//
+// A value can be excluded from `a` only when `b = {c}` is a singleton (the one
+// value no member of `b` differs from). A progression can drop `c` exactly only
+// at an orbit endpoint (shrinking `n` by one); an interior `c` is left in place
+// (still sound, since `a` over-approximates `{x in γ(a) | x != c}`). `Nothing`
+// only when `a = b = {c}`.
+assumeNe : {n} (fin n, n >= 2) => Domain n -> Domain n -> Maybe (Domain n)
+assumeNe a b =
+  if size b != 1          then Just a
+   else if ~ (member a c) then Just a
+   else if size a == 1    then Nothing
+   else if c == a.start   then Just (mk (a.start + a.stride) a.stride (a.n - 1))
+   else if c == end a     then Just (mk a.start a.stride (a.n - 1))
+   else Just a
+  where
+    c = b.start
+
 assumeSgeBy :
   {n} (fin n, n >= 2) =>
   (Domain n -> Domain n -> Bit) -> Domain n -> Domain n -> Maybe (Domain n)
@@ -3969,6 +3987,15 @@ correct_assumeSgePrecise a x b y =
       Just c -> member c x
       Nothing -> False
 
+correct_assumeNe :
+  {n} (fin n, n >= 2) =>
+  Domain n -> [n] -> Domain n -> [n] -> Property
+correct_assumeNe a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x != y ==>
+    case assumeNe a b of
+      Just c -> member c x
+      Nothing -> False
+
 // The `assume*Shrinks` properties assert cardinality refinement,
 // unconditionally: `size (assumeOp a b) <= size a`. This is guaranteed
 // by construction (`assumeUnsignedRange` and the signed driver fall back
@@ -4070,6 +4097,14 @@ assumeSgePreciseShrinks :
 assumeSgePreciseShrinks a b =
   proper a ==> proper b ==>
     case assumeSgePrecise a b of
+      Nothing -> True
+      Just c  -> size c <= size a
+
+assumeNeShrinks :
+  {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+assumeNeShrinks a b =
+  proper a ==> proper b ==>
+    case assumeNe a b of
       Nothing -> True
       Just c  -> size c <= size a
 
@@ -4182,6 +4217,7 @@ property p_reduceConflictMeansEmpty           = reduceConflictMeansEmpty`{4}
 // property p_correct_assumeSlePrecise = correct_assumeSlePrecise`{4}
 // property p_correct_assumeSgtPrecise = correct_assumeSgtPrecise`{4}
 // property p_correct_assumeSgePrecise = correct_assumeSgePrecise`{4}
+// property p_correct_assumeNe         = correct_assumeNe`{4}
 // property p_assumeUltShrinks         = assumeUltShrinks`{4}
 // property p_assumeUleShrinks         = assumeUleShrinks`{4}
 // property p_assumeUgtShrinks         = assumeUgtShrinks`{4}
@@ -4194,6 +4230,7 @@ property p_reduceConflictMeansEmpty           = reduceConflictMeansEmpty`{4}
 // property p_assumeSlePreciseShrinks  = assumeSlePreciseShrinks`{4}
 // property p_assumeSgtPreciseShrinks  = assumeSgtPreciseShrinks`{4}
 // property p_assumeSgePreciseShrinks  = assumeSgePreciseShrinks`{4}
+// property p_assumeNeShrinks          = assumeNeShrinks`{4}
 // property p_assumeSltPreciseIdempot  = assumeSltPreciseIdempotent`{4}
 // property p_assumeSlePreciseIdempot  = assumeSlePreciseIdempotent`{4}
 // property p_assumeSgtPreciseIdempot  = assumeSgtPreciseIdempotent`{4}

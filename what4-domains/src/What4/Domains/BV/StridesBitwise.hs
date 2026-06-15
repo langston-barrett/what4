@@ -115,6 +115,8 @@ module What4.Domains.BV.StridesBitwise
   , assumeSgtPrecise
   , assumeSge
   , assumeSgePrecise
+  , assumeEq
+  , assumeNe
   -- * Generators
   , genDomain
   , genElement
@@ -229,6 +231,8 @@ module What4.Domains.BV.StridesBitwise
   , correct_assumeSlePrecise
   , correct_assumeSgtPrecise
   , correct_assumeSgePrecise
+  , correct_assumeEq
+  , correct_assumeNe
   , assumeUltShrinks
   , assumeUleShrinks
   , assumeUgtShrinks
@@ -241,6 +245,7 @@ module What4.Domains.BV.StridesBitwise
   , assumeSlePreciseShrinks
   , assumeSgtPreciseShrinks
   , assumeSgePreciseShrinks
+  , assumeNeShrinks
   , assumeSltPreciseIdempotent
   , assumeSlePreciseIdempotent
   , assumeSgtPreciseIdempotent
@@ -257,6 +262,7 @@ import qualified Prelude
 
 import qualified Data.Bits as Bits
 import qualified Data.List as List
+import qualified Data.Set as Set
 
 import           Data.Parameterized.NatRepr (NatRepr, LeqProof(..), knownNat)
 import qualified Data.Parameterized.NatRepr as NR
@@ -612,6 +618,52 @@ tightUBounds (Domain s b) =
       (bl, bh) = B.bitbounds b
   in UnsignedBounds (max sl bl) (min sh bh)
 
+-- | /O(w · A(w))/. The reachable shift\/rotate amounts of an amount
+-- operand, when its strides orbit is small enough to enumerate cheaply. Each
+-- orbit element @v@ that is also a member of the bitwise component is mapped
+-- through @reduceAmt@ to its effective amount index (the clamp @min v w@ for
+-- shifts, the residue @v \`mod\` w@ for rotates), then deduplicated and sorted.
+--
+-- Returns 'Nothing' (\"too large, fall back to the bounded fold\") when the
+-- orbit has more than @w@ elements. The gate caps the cost at /O(w)/ orbit steps
+-- and captures exactly the case the known-bits skip in 'B.foldShiftsBounded'
+-- cannot: a small or non-power-of-two strided amount set (e.g.\
+-- @{0,6,12,18,24,30}@), whose genuinely reachable amounts are far sparser than
+-- its bit-pattern range. Large orbits with a power-of-two stride (e.g.\ all even
+-- amounts) already fold tightly via the bounded path's @memberMask@ skip, so
+-- falling back loses nothing.
+--
+-- Both components are consulted: the orbit comes from the strides component, but
+-- each element is filtered through the bitwise component's 'B.member' before it
+-- counts. This is where the reduced product pays off; 'S.reduce' cannot drop an
+-- individual bitwise-excluded orbit element (a progression can't represent
+-- \"all of these but that one\"), yet enumerating the small orbit lets us skip
+-- it here. The result is therefore a sound, and typically strict, subset of
+-- what either component alone would admit ('B.member' is an /O(A(w))/
+-- bit-pattern bounds check, applied once per orbit element).
+reachableAmounts :: NatRepr w -> (Natural -> Int) -> Domain w -> Maybe [Int]
+reachableAmounts w reduceAmt (Domain s b)
+  | S.size s > NR.natValue w = Nothing
+  | otherwise =
+      Just (Set.toAscList (Set.fromList
+              [ reduceAmt v | v <- orbit, B.member b (toInteger v) ]))
+  where
+    st    = S.stride s
+    m     = S.mask s
+    orbit = take (fromIntegral (S.n s) + 1)
+                 (iterate (\v -> (v + st) Bits..&. m) (S.start s))
+
+-- | Reduce an orbit element to a shift amount: amounts at or above the width
+-- all saturate, so they collapse to the single sentinel @w@ (matching the
+-- bounded fold's @op w@ tail). See 'reachableAmounts'.
+clampShift :: NatRepr w -> Natural -> Int
+clampShift w v = fromIntegral (min v (NR.natValue w))
+
+-- | Reduce an orbit element to a rotate amount: the residue mod @w@. See
+-- 'reachableAmounts'.
+rotAmt :: NatRepr w -> Natural -> Int
+rotAmt w v = fromIntegral (v `mod` NR.natValue w)
+
 -- ------------------------------------------------------------------
 -- * Arithmetic
 
@@ -668,12 +720,14 @@ srem w (Domain sa ba) (Domain sb bb) =
 -- ** Arithmetic (SMT-LIB div-by-zero semantics)
 
 udivSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-udivSmtlib w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.udivSmtlib w sa sb) (B.udivSmtlib ba bb)
+udivSmtlib w a@(Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.udivSmtlib w sa sb)
+    (B.udivSmtlibBounded ba (tightUBounds a) bb (tightUBounds b))
 
 uremSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
-uremSmtlib w (Domain sa ba) (Domain sb bb) =
-  mkReduced w (S.uremSmtlib w sa sb) (B.uremSmtlib ba bb)
+uremSmtlib w a@(Domain sa ba) b@(Domain sb bb) =
+  mkReduced w (S.uremSmtlib w sa sb)
+    (B.uremSmtlibBounded ba (tightUBounds a) bb (tightUBounds b))
 
 sdivSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 sdivSmtlib w (Domain sa ba) (Domain sb bb) =
@@ -761,50 +815,83 @@ select i n w (Domain s b) =
 -- ------------------------------------------------------------------
 -- * Shifts and rotations
 
--- For shifts and rotates the second operand is the amount; its 'tightUBounds'
--- (the strides view's numeric range, intersected with the bitwise bounds) bound
--- how many shift\/rotate amounts the bitwise transfer function must consider,
--- which both speeds it up and tightens the result.
+-- For shifts and rotates the second operand is the amount. When its strides
+-- component has a small orbit ('reachableAmounts'), the bitwise result is folded
+-- over that exact set of reachable amounts ('B.shlAbstractOver' \&c.), which is
+-- tighter than the bounded fold for sparse or non-power-of-two amount sets (the
+-- known-bits skip cannot see those). Otherwise we fall back to the bounded fold
+-- driven by the amount's 'tightUBounds' (its strides numeric range intersected
+-- with the bitwise bounds), which both speeds it up and tightens the result.
 
 shl :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 shl w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.shl w sa sb) (B.shlAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.shl w sa sb) $
+    case reachableAmounts w (clampShift w) b of
+      Just amts -> B.shlAbstractOver w ba amts
+      Nothing   -> B.shlAbstractBounded w ba bb (tightUBounds b)
 
 shlRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 shlRaw w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.shlRaw w sa sb) (B.shlAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.shlRaw w sa sb) $
+    case reachableAmounts w (clampShift w) b of
+      Just amts -> B.shlAbstractOver w ba amts
+      Nothing   -> B.shlAbstractBounded w ba bb (tightUBounds b)
 
 lshr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 lshr w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.lshr w sa sb) (B.lshrAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.lshr w sa sb) $
+    case reachableAmounts w (clampShift w) b of
+      Just amts -> B.lshrAbstractOver w ba amts
+      Nothing   -> B.lshrAbstractBounded w ba bb (tightUBounds b)
 
 lshrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 lshrRaw w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.lshrRaw w sa sb) (B.lshrAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.lshrRaw w sa sb) $
+    case reachableAmounts w (clampShift w) b of
+      Just amts -> B.lshrAbstractOver w ba amts
+      Nothing   -> B.lshrAbstractBounded w ba bb (tightUBounds b)
 
 ashr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 ashr w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.ashr w sa sb) (B.ashrAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.ashr w sa sb) $
+    case reachableAmounts w (clampShift w) b of
+      Just amts -> B.ashrAbstractOver w ba amts
+      Nothing   -> B.ashrAbstractBounded w ba bb (tightUBounds b)
 
 ashrRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 ashrRaw w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.ashrRaw w sa sb) (B.ashrAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.ashrRaw w sa sb) $
+    case reachableAmounts w (clampShift w) b of
+      Just amts -> B.ashrAbstractOver w ba amts
+      Nothing   -> B.ashrAbstractBounded w ba bb (tightUBounds b)
 
 rol :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rol w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.rol w sa sb) (B.rolAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.rol w sa sb) $
+    case reachableAmounts w (rotAmt w) b of
+      Just amts -> B.rolAbstractOver w ba amts
+      Nothing   -> B.rolAbstractBounded w ba bb (tightUBounds b)
 
 rolRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rolRaw w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.rolRaw w sa sb) (B.rolAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.rolRaw w sa sb) $
+    case reachableAmounts w (rotAmt w) b of
+      Just amts -> B.rolAbstractOver w ba amts
+      Nothing   -> B.rolAbstractBounded w ba bb (tightUBounds b)
 
 ror :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 ror w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.ror w sa sb) (B.rorAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.ror w sa sb) $
+    case reachableAmounts w (rotAmt w) b of
+      Just amts -> B.rorAbstractOver w ba amts
+      Nothing   -> B.rorAbstractBounded w ba bb (tightUBounds b)
 
 rorRaw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 rorRaw w (Domain sa ba) b@(Domain sb bb) =
-  mkReduced w (S.rorRaw w sa sb) (B.rorAbstractBounded w ba bb (tightUBounds b))
+  mkReduced w (S.rorRaw w sa sb) $
+    case reachableAmounts w (rotAmt w) b of
+      Just amts -> B.rorAbstractOver w ba amts
+      Nothing   -> B.rorAbstractBounded w ba bb (tightUBounds b)
 
 -- ------------------------------------------------------------------
 -- * Lattice operations
@@ -856,17 +943,22 @@ pseudoJoinPrecise w (Domain sa ba) (Domain sb bb) =
 -- propagates whenever either component concludes the branch is
 -- infeasible.
 
+-- The unsigned assumes refine @a@ by the comparison operand @b@'s value range.
+-- 'liftAssumeBounded' feeds @b@'s 'tightUBounds' (strides arc intersected with
+-- bit-pattern bounds) to the bitwise @*Bounded@ assume, so the bitwise component
+-- is refined against a range the bit-pattern bound alone can't express.
+
 assumeUlt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-assumeUlt = liftAssume S.assumeUlt B.assumeUlt
+assumeUlt = liftAssumeBounded S.assumeUlt B.assumeUltBounded
 
 assumeUle :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-assumeUle = liftAssume S.assumeUle B.assumeUle
+assumeUle = liftAssumeBounded S.assumeUle B.assumeUleBounded
 
 assumeUgt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-assumeUgt = liftAssume S.assumeUgt B.assumeUgt
+assumeUgt = liftAssumeBounded S.assumeUgt B.assumeUgtBounded
 
 assumeUge :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-assumeUge = liftAssume S.assumeUge B.assumeUge
+assumeUge = liftAssumeBounded S.assumeUge B.assumeUgeBounded
 
 assumeSlt :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
 assumeSlt = liftAssume S.assumeSlt B.assumeSlt
@@ -898,6 +990,21 @@ assumeSge = liftAssume S.assumeSge B.assumeSge
 assumeSgePrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
 assumeSgePrecise = liftAssume S.assumeSgePrecise B.assumeSge
 
+-- | Refine @a@ by the assumption @x == y@, @x ∈ γ(a)@, @y ∈ γ(b)@. Equality is
+-- exactly the joint meet, so this is 'pseudoMeet': it intersects both
+-- components and reduces. 'Nothing' when the branch is infeasible.
+assumeEq :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeEq = pseudoMeet
+
+-- | Refine @a@ by the assumption @x /= y@, @x ∈ γ(a)@, @y ∈ γ(b)@. Lifts the
+-- per-component 'S.assumeNe' / 'B.assumeNe'. Because a /proper/ joint singleton
+-- forces both components to be singletons (the bitwise component pins every bit,
+-- so 'S.reduce' collapses the strides orbit to a point), the standard lift
+-- recovers the joint-singleton exclusion that neither component sees on its own.
+-- 'Nothing' when the branch is infeasible.
+assumeNe :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeNe = liftAssume S.assumeNe B.assumeNe
+
 -- | Shared driver for the lifted assume operations. Runs the strides
 -- assume (which returns 'Maybe', signalling empty) and the bitwise
 -- assume (which returns a possibly-bottom 'B.Domain'), then reduces with
@@ -917,6 +1024,21 @@ liftAssume ::
 liftAssume sOp bOp w (Domain sa ba) (Domain sb bb) = do
   sm <- sOp w sa sb
   let bm = bOp w ba bb
+  if B.isBottom bm then Nothing else tryMkReduced w sm bm
+
+-- | Like 'liftAssume', but for the unsigned assumes, whose bitwise transfer
+-- function refines @a@ from the comparison operand @b@'s value range. Feeds
+-- @b@'s 'tightUBounds' to the bitwise @*Bounded@ assume so it sees the
+-- strides-tightened range rather than @b@'s looser bit-pattern bounds. Reduces
+-- single-pass; 'Nothing' if either component is empty.
+liftAssumeBounded ::
+  (1 <= w) =>
+  (NatRepr w -> S.Domain w -> S.Domain w -> Maybe (S.Domain w)) ->
+  (NatRepr w -> B.Domain w -> UnsignedBounds -> B.Domain w) ->
+  NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+liftAssumeBounded sOp bOp w (Domain sa ba) b@(Domain sb _) = do
+  sm <- sOp w sa sb
+  let bm = bOp w ba (tightUBounds b)
   if B.isBottom bm then Nothing else tryMkReduced w sm bm
 
 -- ------------------------------------------------------------------
@@ -1794,6 +1916,24 @@ correct_assumeSgePrecise w a x b y =
     signedOf w x >= signedOf w y ==>
       maybeMemberOrFail (assumeSgePrecise w a b) x
 
+-- | 'assumeEq' is sound: every value @x ∈ a@ that equals some @y ∈ b@ remains
+-- in the result.
+correct_assumeEq ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeEq w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x == y ==>
+    maybeMemberOrFail (assumeEq w a b) x
+
+-- | 'assumeNe' is sound: every value @x ∈ a@ that differs from some @y ∈ b@
+-- remains in the result.
+correct_assumeNe ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeNe w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==> x /= y ==>
+    maybeMemberOrFail (assumeNe w a b) x
+
 -- $assumeShrinks
 --
 -- The @assume*Shrinks@ properties bundle two laws, under the same
@@ -1878,6 +2018,12 @@ assumeSgtPreciseShrinks w a b =
 assumeSgePreciseShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
 assumeSgePreciseShrinks w a b =
   proper a ==> proper b ==> property (stridesShrinks (assumeSgePrecise w) a b)
+
+-- | 'assumeNe' shrinks the strides orbit by cardinality (unconditionally):
+-- 'S.assumeNe' only ever drops an endpoint, and 'S.reduce' shrinks further.
+assumeNeShrinks :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+assumeNeShrinks w a b =
+  proper a ==> proper b ==> property (stridesShrinks (assumeNe w) a b)
 
 -- | Shared body of the @assume*Shrinks@ properties: the result's strides
 -- orbit is no larger than @a@'s. Uses the /O(1)/ 'S.size' of the strides

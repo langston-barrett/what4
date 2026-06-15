@@ -364,6 +364,10 @@ checkOpOrderMirrorsStrides = do
         -- Reduced-product-only 'size' properties (no strides counterpart).
         , "sizeAtMostComponents", "sizeExactCorrect", "windowMarginalCount"
         , "uniformWindowBalanced", "pinsConflictEmpty"
+        -- Equality-branch assume: the strides domain has no 'assumeEq' (the
+        -- product routes it through 'pseudoMeet'), so these names are
+        -- product-only.
+        , "assumeEq", "correct_assumeEq"
         ]
       mismatches = [ (sec, bad)
                    | (sec, sNames, wNames) <- shared
