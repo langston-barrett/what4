@@ -607,6 +607,12 @@ bitwiseDomainTests =
   , genTest "correct_assumeSge" $
       do SW n <- genWidth
          B.correct_assumeSge n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeEq" $
+      do SW n <- genWidth
+         B.correct_assumeEq n <$> B.genPair n <*> B.genPair n
+  , genTest "correct_assumeNe" $
+      do SW n <- genWidth
+         B.correct_assumeNe n <$> B.genPair n <*> B.genPair n
   , genTest "assumeUltShrinks" $
       do SW n <- genWidth
          B.assumeUltShrinks n <$> B.genDomain n <*> B.genDomain n
@@ -631,6 +637,12 @@ bitwiseDomainTests =
   , genTest "assumeSgeShrinks" $
       do SW n <- genWidth
          B.assumeSgeShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeEqShrinks" $
+      do SW n <- genWidth
+         B.assumeEqShrinks n <$> B.genDomain n <*> B.genDomain n
+  , genTest "assumeNeShrinks" $
+      do SW n <- genWidth
+         B.assumeNeShrinks n <$> B.genDomain n <*> B.genDomain n
   ]
 
 overallDomainTests :: TestTree

@@ -66,6 +66,11 @@ module What4.Domains.BV.Bitwise
   , ashrAbstractBounded
   , rolAbstractBounded
   , rorAbstractBounded
+  , shlAbstractOver
+  , lshrAbstractOver
+  , ashrAbstractOver
+  , rolAbstractOver
+  , rorAbstractOver
   , shlAbstractSpec
   , lshrAbstractSpec
   , ashrAbstractSpec
@@ -98,6 +103,8 @@ module What4.Domains.BV.Bitwise
   , uremSmtlib
   , sdivSmtlib
   , sremSmtlib
+  , udivSmtlibBounded
+  , uremSmtlibBounded
   -- ** bitwise logical
   , and
   , or
@@ -108,10 +115,16 @@ module What4.Domains.BV.Bitwise
   , assumeUle
   , assumeUgt
   , assumeUge
+  , assumeUltBounded
+  , assumeUleBounded
+  , assumeUgtBounded
+  , assumeUgeBounded
   , assumeSlt
   , assumeSle
   , assumeSgt
   , assumeSge
+  , assumeEq
+  , assumeNe
 
   -- * Correctness properties
   , genDomain
@@ -197,6 +210,8 @@ module What4.Domains.BV.Bitwise
   , correct_assumeSle
   , correct_assumeSgt
   , correct_assumeSge
+  , correct_assumeEq
+  , correct_assumeNe
   , assumeUltShrinks
   , assumeUleShrinks
   , assumeUgtShrinks
@@ -205,6 +220,8 @@ module What4.Domains.BV.Bitwise
   , assumeSleShrinks
   , assumeSgtShrinks
   , assumeSgeShrinks
+  , assumeEqShrinks
+  , assumeNeShrinks
   ) where
 
 import           Data.Bits hiding (testBit, xor)
@@ -596,6 +613,35 @@ foldShiftsBounded w b (UnsignedBounds bl bh) op = collapse (go bl (conflict mask
     | isConflict d = BVBitInterval mask 0 0
     | otherwise    = d
 
+-- | Union @op s@ over an explicit list of reachable amounts @amts@.
+--
+-- Unlike 'foldShiftsBounded' and 'foldRotatesBounded', which iterate a numeric
+-- range and skip amounts inconsistent with the amount domain's known bits, this
+-- folds directly over a caller-supplied amount set. A partner domain (e.g.\ the
+-- strides component of a reduced product) can hand over the exact reachable
+-- amounts when its orbit is small; this is both tighter (only genuinely
+-- reachable amounts contribute, even for non-power-of-two strides that the
+-- known-bits skip cannot capture) and cheaper than scanning the range.
+--
+-- Soundness obligation on the caller: @amts@ must be a superset of the amounts
+-- any member of the amount domain can produce, after the same normalization the
+-- per-amount transfer expects. For shifts that means amounts @>= w@ are
+-- presented as the single sentinel @w@ (every such shift yields the same
+-- saturated result); for rotates the entries are residues mod @w@.
+{-# INLINE foldAmountsOver #-}
+foldAmountsOver :: Integer -> [Int] -> (Int -> Domain w) -> Domain w
+foldAmountsOver mask amts op = collapse (go amts (conflict mask))
+  where
+  go ss !acc
+    | isAny acc = acc
+    | otherwise = case ss of
+        []         -> acc
+        (s : rest) -> go rest (union acc (op s))
+
+  collapse d
+    | isConflict d = BVBitInterval mask 0 0
+    | otherwise    = d
+
 -- | /O(w²)/. Shift left by an amount drawn from the domain @b@. See
 -- 'foldShiftsBounded' for the algorithm.
 --
@@ -618,6 +664,16 @@ shlAbstractBounded w a@(BVBitInterval mask aLo aHi) b bnds@(UnsignedBounds bl _)
           lowZeros = bit k - 1
       in BVBitInterval mask 0 (mask .&. complement lowZeros)
   | otherwise = foldShiftsBounded w b bnds shiftBy
+  where
+  shiftBy s = BVBitInterval mask ((aLo `shiftL` s) .&. mask)
+                                 ((aHi `shiftL` s) .&. mask)
+
+-- | Like 'shlAbstractBounded', but folds over an explicit set of reachable
+-- shift amounts (see 'foldAmountsOver') rather than a numeric range. Amounts
+-- @>= w@ must already be collapsed to the sentinel @w@ by the caller.
+{-# INLINE shlAbstractOver #-}
+shlAbstractOver :: NatRepr w -> Domain w -> [Int] -> Domain w
+shlAbstractOver _ (BVBitInterval mask aLo aHi) amts = foldAmountsOver mask amts shiftBy
   where
   shiftBy s = BVBitInterval mask ((aLo `shiftL` s) .&. mask)
                                  ((aHi `shiftL` s) .&. mask)
@@ -646,6 +702,15 @@ lshrAbstractBounded w a@(BVBitInterval mask aLo aHi) b bnds@(UnsignedBounds bl _
   where
   shiftBy s = BVBitInterval mask (aLo `shiftR` s) (aHi `shiftR` s)
 
+-- | Like 'lshrAbstractBounded', but folds over an explicit set of reachable
+-- shift amounts (see 'foldAmountsOver') rather than a numeric range. Amounts
+-- @>= w@ must already be collapsed to the sentinel @w@ by the caller.
+{-# INLINE lshrAbstractOver #-}
+lshrAbstractOver :: NatRepr w -> Domain w -> [Int] -> Domain w
+lshrAbstractOver _ (BVBitInterval mask aLo aHi) amts = foldAmountsOver mask amts shiftBy
+  where
+  shiftBy s = BVBitInterval mask (aLo `shiftR` s) (aHi `shiftR` s)
+
 -- | /O(w²)/. Arithmetic (sign-extending) shift right by an amount drawn
 -- from the domain @b@. See 'foldShiftsBounded' for the algorithm.
 --
@@ -665,6 +730,17 @@ ashrAbstractBounded w (BVBitInterval mask aLo aHi) b bnds =
   -- Sign-extending shift on the @lo@ and @hi@ bounds independently is
   -- sound: if every member of @a@ has a known-1 at position @i >= sign@,
   -- so does every member's @ashr s@; same for known-0.
+  shiftBy s = BVBitInterval mask
+                ((toSigned w aLo `shiftR` s) .&. mask)
+                ((toSigned w aHi `shiftR` s) .&. mask)
+
+-- | Like 'ashrAbstractBounded', but folds over an explicit set of reachable
+-- shift amounts (see 'foldAmountsOver') rather than a numeric range. Amounts
+-- @>= w@ must already be collapsed to the sentinel @w@ by the caller.
+{-# INLINE ashrAbstractOver #-}
+ashrAbstractOver :: (1 <= w) => NatRepr w -> Domain w -> [Int] -> Domain w
+ashrAbstractOver w (BVBitInterval mask aLo aHi) amts = foldAmountsOver mask amts shiftBy
+  where
   shiftBy s = BVBitInterval mask
                 ((toSigned w aLo `shiftR` s) .&. mask)
                 ((toSigned w aHi `shiftR` s) .&. mask)
@@ -694,6 +770,17 @@ rolAbstractBounded w (BVBitInterval mask aLo aHi) b bnds = foldRotatesBounded w 
               (Arith.rotateLeft w aLo (toInteger s))
               (Arith.rotateLeft w aHi (toInteger s))
 
+-- | Like 'rolAbstractBounded', but folds over an explicit set of reachable
+-- rotate amounts (see 'foldAmountsOver') rather than a residue range. The
+-- entries must already be residues mod @w@.
+{-# INLINE rolAbstractOver #-}
+rolAbstractOver :: NatRepr w -> Domain w -> [Int] -> Domain w
+rolAbstractOver w (BVBitInterval mask aLo aHi) amts = foldAmountsOver mask amts rotBy
+  where
+  rotBy s = BVBitInterval mask
+              (Arith.rotateLeft w aLo (toInteger s))
+              (Arith.rotateLeft w aHi (toInteger s))
+
 -- | /O(w²)/. Rotate right by an amount drawn from the domain @b@.
 -- Mirrors 'rolAbstract'.
 --
@@ -710,6 +797,17 @@ rorAbstractBounded :: NatRepr w -> Domain w -> Domain w -> UnsignedBounds -> Dom
 rorAbstractBounded w (BVBitInterval mask aLo aHi) b bnds = foldRotatesBounded w b bnds rotBy fullDom
   where
   fullDom = fullCoverage mask aLo aHi
+  rotBy s = BVBitInterval mask
+              (Arith.rotateRight w aLo (toInteger s))
+              (Arith.rotateRight w aHi (toInteger s))
+
+-- | Like 'rorAbstractBounded', but folds over an explicit set of reachable
+-- rotate amounts (see 'foldAmountsOver') rather than a residue range. The
+-- entries must already be residues mod @w@.
+{-# INLINE rorAbstractOver #-}
+rorAbstractOver :: NatRepr w -> Domain w -> [Int] -> Domain w
+rorAbstractOver w (BVBitInterval mask aLo aHi) amts = foldAmountsOver mask amts rotBy
+  where
   rotBy s = BVBitInterval mask
               (Arith.rotateRight w aLo (toInteger s))
               (Arith.rotateRight w aHi (toInteger s))
@@ -949,34 +1047,58 @@ slt w a b
 -- | /O(w)/. Refine @a@ by the assumption @x < y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUlt :: NatRepr w -> Domain w -> Domain w -> Domain w
-assumeUlt w a b
-  | bhi == 0  = bottom w  -- x < 0 is impossible
-  | otherwise = assumeUnsignedRange w a 0 (bhi - 1)
-  where
-  (_blo, bhi) = ubounds b
+assumeUlt w a b = assumeUltBounded w a (unsignedBounds b)
 
 -- | /O(w)/. Refine @a@ by the assumption @x <= y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUle :: NatRepr w -> Domain w -> Domain w -> Domain w
-assumeUle w a b = assumeUnsignedRange w a 0 bhi
-  where
-  (_blo, bhi) = ubounds b
+assumeUle w a b = assumeUleBounded w a (unsignedBounds b)
 
 -- | /O(w)/. Refine @a@ by the assumption @x > y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUgt :: NatRepr w -> Domain w -> Domain w -> Domain w
-assumeUgt w a b
-  | blo == bvdMask a = bottom w  -- x > 2^w - 1 is impossible
-  | otherwise        = assumeUnsignedRange w a (blo + 1) (bvdMask a)
-  where
-  (blo, _bhi) = ubounds b
+assumeUgt w a b = assumeUgtBounded w a (unsignedBounds b)
 
 -- | /O(w)/. Refine @a@ by the assumption @x >= y@ (unsigned),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
 assumeUge :: NatRepr w -> Domain w -> Domain w -> Domain w
-assumeUge w a b = assumeUnsignedRange w a blo (bvdMask a)
-  where
-  (blo, _bhi) = ubounds b
+assumeUge w a b = assumeUgeBounded w a (unsignedBounds b)
+
+-- $assumeBounded
+--
+-- The unsigned assumes refine @a@ by meeting it with a hull derived from the
+-- /comparison operand/ @y@'s bounds. These @*Bounded@ variants take those
+-- bounds directly, so a caller (the reduced product
+-- "What4.Domains.BV.StridesBitwise") can supply a range strictly tighter than
+-- @y@'s own bit-pattern bounds — tightening the hull, which forces leading bits
+-- the bit-pattern bound cannot (e.g.\ a strides bound @y <= 100@ forces the
+-- high bit to 0 where the bit-pattern bound @y <= 200@ does not). The supplied
+-- bounds must be sound for @y@'s (nonempty) value set. Each result refines the
+-- corresponding unbounded assume.
+
+-- | /O(w)/. 'assumeUlt' with caller-supplied bounds for @y@ (see
+-- @$assumeBounded@). Only @y@'s upper bound matters: @x < y@ ⟹ @x <= ubHigh-1@.
+assumeUltBounded :: NatRepr w -> Domain w -> UnsignedBounds -> Domain w
+assumeUltBounded w a (UnsignedBounds _blo bhi)
+  | bhi == 0  = bottom w  -- x < 0 is impossible
+  | otherwise = assumeUnsignedRange w a 0 (bhi - 1)
+
+-- | /O(w)/. 'assumeUle' with caller-supplied bounds for @y@ (see
+-- @$assumeBounded@). Only @y@'s upper bound matters.
+assumeUleBounded :: NatRepr w -> Domain w -> UnsignedBounds -> Domain w
+assumeUleBounded w a (UnsignedBounds _blo bhi) = assumeUnsignedRange w a 0 bhi
+
+-- | /O(w)/. 'assumeUgt' with caller-supplied bounds for @y@ (see
+-- @$assumeBounded@). Only @y@'s lower bound matters: @x > y@ ⟹ @x >= ubLow+1@.
+assumeUgtBounded :: NatRepr w -> Domain w -> UnsignedBounds -> Domain w
+assumeUgtBounded w a (UnsignedBounds blo _bhi)
+  | blo == bvdMask a = bottom w  -- x > 2^w - 1 is impossible
+  | otherwise        = assumeUnsignedRange w a (blo + 1) (bvdMask a)
+
+-- | /O(w)/. 'assumeUge' with caller-supplied bounds for @y@ (see
+-- @$assumeBounded@). Only @y@'s lower bound matters.
+assumeUgeBounded :: NatRepr w -> Domain w -> UnsignedBounds -> Domain w
+assumeUgeBounded w a (UnsignedBounds blo _bhi) = assumeUnsignedRange w a blo (bvdMask a)
 
 -- | /O(w)/. Refine @a@ by the assumption @x < y@ (signed),
 -- @x ∈ γ(a)@, @y ∈ γ(b)@. See the section header for semantics.
@@ -1072,6 +1194,25 @@ assumeSignedBy w perPair a b =
       | (sa, a') <- splitSign w a
       , (sb, b') <- splitSign w b
       ]
+
+-- | /O(w)/. Refine @a@ by the assumption @x == y@, @x ∈ γ(a)@, @y ∈ γ(b)@.
+-- Equality forces @x@ to agree with @y@ bit for bit, which is exactly the
+-- lattice 'meet'. The result is 'bottom' when @a@ and @b@ share no value (the
+-- branch is infeasible).
+assumeEq :: NatRepr w -> Domain w -> Domain w -> Domain w
+assumeEq _ a b = meet a b
+
+-- | /O(w)/. Refine @a@ by the assumption @x /= y@, @x ∈ γ(a)@, @y ∈ γ(b)@.
+-- A bit-pattern domain cannot drop a single interior value, so the only
+-- refinement available is detecting the infeasible branch: when @a@ and @b@ are
+-- the same singleton @{c}@, every @x ∈ γ(a)@ equals every @y ∈ γ(b)@, so the
+-- constraint is unsatisfiable and the result is 'bottom'. Otherwise @a@ is
+-- returned unchanged (a sound over-approximation).
+assumeNe :: NatRepr w -> Domain w -> Domain w -> Domain w
+assumeNe w a b =
+  case (asSingleton a, asSingleton b) of
+    (Just ca, Just cb) | ca == cb -> bottom w
+    _                             -> a
 
 ---------------------------------------------------------------------------------------
 -- Arithmetic
@@ -1357,21 +1498,13 @@ splitSign w d@(BVBitInterval mask lo hi) =
 -- div-by-zero semantics: @bvudiv s 0@ is the all-ones bitvector. See @Note
 -- [SMT-LIB division]@ in "What4.Interface" for the design rationale.
 udivSmtlib :: (1 <= w) => Domain w -> Domain w -> Domain w
-udivSmtlib a b
-  | Just 0 <- asSingleton b = mkSingleton mask mask
-  | member b 0              = union (udiv a b) (mkSingleton mask mask)
-  | otherwise               = udiv a b
-  where
-  mask = bvdMask a
+udivSmtlib a b = udivSmtlibBounded a (unsignedBounds a) b (unsignedBounds b)
 
 -- | /O(w)/. Like 'urem', but using the SMT-LIB @FixedSizeBitVectors@ theory's
 -- div-by-zero semantics: @bvurem s 0@ is the dividend itself (@s@). See @Note
 -- [SMT-LIB division]@ in "What4.Interface" for the design rationale.
 uremSmtlib :: (1 <= w) => Domain w -> Domain w -> Domain w
-uremSmtlib a b
-  | Just 0 <- asSingleton b = a
-  | member b 0              = union (urem a b) a
-  | otherwise               = urem a b
+uremSmtlib a b = uremSmtlibBounded a (unsignedBounds a) b (unsignedBounds b)
 
 -- | /O(w)/. Like 'sdiv', but using the SMT-LIB QF_BV logic's div-by-zero
 -- convention: @bvsdiv s 0@ is all-ones when @s@ is non-negative and @1@ when
@@ -1402,6 +1535,32 @@ sremSmtlib w a b
   | Just 0 <- asSingleton b = a
   | member b 0              = union (srem w a b) a
   | otherwise               = srem w a b
+
+-- | /O(w)/. 'udivSmtlib' with caller-supplied operand bounds (see the
+-- @$bounds@ note): the bounds feed the underlying 'udivBounded'; the div-by-zero
+-- fixup is unaffected.
+udivSmtlibBounded ::
+  (1 <= w) =>
+  Domain w -> UnsignedBounds -> Domain w -> UnsignedBounds -> Domain w
+udivSmtlibBounded a ba b bb
+  | Just 0 <- asSingleton b = mkSingleton mask mask
+  | member b 0              = union (udivBounded a ba b bb) (mkSingleton mask mask)
+  | otherwise               = udivBounded a ba b bb
+  where
+  mask = bvdMask a
+{-# INLINE udivSmtlibBounded #-}
+
+-- | /O(w)/. 'uremSmtlib' with caller-supplied operand bounds (see the
+-- @$bounds@ note): the bounds feed the underlying 'uremBounded'; the div-by-zero
+-- fixup is unaffected.
+uremSmtlibBounded ::
+  (1 <= w) =>
+  Domain w -> UnsignedBounds -> Domain w -> UnsignedBounds -> Domain w
+uremSmtlibBounded a ba b bb
+  | Just 0 <- asSingleton b = a
+  | member b 0              = union (uremBounded a ba b bb) a
+  | otherwise               = uremBounded a ba b bb
+{-# INLINE uremSmtlibBounded #-}
 
 
 ---------------------------------------------------------------------------------------
@@ -1848,6 +2007,20 @@ correct_assumeSge n (a,x) (b,y) =
   member a x ==> member b y ==> toSigned n x >= toSigned n y ==>
     property (member (assumeSge n a b) x)
 
+-- | 'assumeEq' is sound: every value @x ∈ a@ that equals some @y ∈ b@ remains
+-- in the result.
+correct_assumeEq :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeEq n (a,x) (b,y) =
+  member a x ==> member b y ==> toUnsigned n x == toUnsigned n y ==>
+    property (member (assumeEq n a b) x)
+
+-- | 'assumeNe' is sound: every value @x ∈ a@ that differs from some @y ∈ b@
+-- remains in the result.
+correct_assumeNe :: (1 <= n) => NatRepr n -> (Domain n, Integer) -> (Domain n, Integer) -> Property
+correct_assumeNe n (a,x) (b,y) =
+  member a x ==> member b y ==> toUnsigned n x /= toUnsigned n y ==>
+    property (member (assumeNe n a b) x)
+
 -- $assumeShrinks
 --
 -- The @assume*Shrinks@ properties bundle two laws that 'meet' makes
@@ -1895,6 +2068,14 @@ assumeSgtShrinks n a b = property (shrinksAndIdempotent (assumeSgt n) a b)
 -- | 'assumeSge' shrinks and is idempotent.
 assumeSgeShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
 assumeSgeShrinks n a b = property (shrinksAndIdempotent (assumeSge n) a b)
+
+-- | 'assumeEq' shrinks and is idempotent.
+assumeEqShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeEqShrinks n a b = property (shrinksAndIdempotent (assumeEq n) a b)
+
+-- | 'assumeNe' shrinks and is idempotent.
+assumeNeShrinks :: (1 <= n) => NatRepr n -> Domain n -> Domain n -> Property
+assumeNeShrinks n a b = property (shrinksAndIdempotent (assumeNe n) a b)
 
 -- | Shared body of the @assume*Shrinks@ properties: @assumeOp a b@ is
 -- contained in @a@ (shrinking) and applying @assumeOp _ b@ again denotes

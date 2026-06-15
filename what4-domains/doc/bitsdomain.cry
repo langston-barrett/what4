@@ -640,6 +640,21 @@ assumeSignedBy perPair a b =
     (aPos, aNeg) = splitSign a
     (bPos, bNeg) = splitSign b
 
+// Refine `a` by `x == y`: equality forces `x` to agree with `y` bit for bit,
+// which is exactly the lattice `meet`. `bottom` when they share no value.
+assumeEq : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeEq a b = meet a b
+
+// Refine `a` by `x != y`. A bit-pattern domain cannot drop a single interior
+// value, so the only refinement is the infeasible-branch case: when `a` and `b`
+// are the same singleton `{c}`, the constraint is unsatisfiable (`bottom`).
+// Otherwise `a` is returned unchanged (sound over-approximation).
+assumeNe : {n} (fin n, n >= 1) => Dom n -> Dom n -> Dom n
+assumeNe a b =
+  if isSingleton a /\ isSingleton b /\ a.lomask == b.lomask
+    then bottom
+    else a
+
 ////////////////////////////////////////////////////////////
 // Soundness properties
 
@@ -917,6 +932,14 @@ correct_assumeSge : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Prope
 correct_assumeSge a x b y =
   mem a x ==> mem b y ==> x >=$ y ==> mem (assumeSge a b) x
 
+correct_assumeEq : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeEq a x b y =
+  mem a x ==> mem b y ==> x == y ==> mem (assumeEq a b) x
+
+correct_assumeNe : {n} (fin n, n >= 1) => Dom n -> [n] -> Dom n -> [n] -> Property
+correct_assumeNe a x b y =
+  mem a x ==> mem b y ==> x != y ==> mem (assumeNe a b) x
+
 // Branch-condition assumptions: each operation shrinks (result <= a)
 // and is idempotent (re-applying with the same b denotes the same set).
 // `meet` makes both laws unconditional for the bitwise domain.
@@ -951,6 +974,12 @@ assumeSgtShrinks a b = assumeShrinksAndIdempotent assumeSgt a b
 
 assumeSgeShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
 assumeSgeShrinks a b = assumeShrinksAndIdempotent assumeSge a b
+
+assumeEqShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeEqShrinks a b = assumeShrinksAndIdempotent assumeEq a b
+
+assumeNeShrinks : {n} (fin n, n >= 1) => Dom n -> Dom n -> Property
+assumeNeShrinks a b = assumeShrinksAndIdempotent assumeNe a b
 
 property b1 = correct_any`{16}
 property b2 = correct_singleton`{16}
@@ -1014,6 +1043,10 @@ property as13 = assumeSltShrinks`{8}
 property as14 = assumeSleShrinks`{8}
 property as15 = assumeSgtShrinks`{8}
 property as16 = assumeSgeShrinks`{8}
+property as17 = correct_assumeEq`{8}
+property as18 = correct_assumeNe`{8}
+property as19 = assumeEqShrinks`{8}
+property as20 = assumeNeShrinks`{8}
 
 property lat1  = correct_join`{8}
 property lat2  = correct_meet`{8}

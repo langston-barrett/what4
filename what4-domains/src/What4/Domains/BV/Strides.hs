@@ -522,6 +522,7 @@ module What4.Domains.BV.Strides
   , assumeSgtPrecise
   , assumeSge
   , assumeSgePrecise
+  , assumeNe
   -- * Reduced product with bitwise
   -- $reduced
   , refineByBits
@@ -766,6 +767,7 @@ module What4.Domains.BV.Strides
   , correct_assumeSlePrecise
   , correct_assumeSgtPrecise
   , correct_assumeSgePrecise
+  , correct_assumeNe
   , assumeUltShrinks
   , assumeUleShrinks
   , assumeUgtShrinks
@@ -778,6 +780,7 @@ module What4.Domains.BV.Strides
   , assumeSlePreciseShrinks
   , assumeSgtPreciseShrinks
   , assumeSgePreciseShrinks
+  , assumeNeShrinks
   , assumeSltPreciseIdempotent
   , assumeSlePreciseIdempotent
   , assumeSgtPreciseIdempotent
@@ -5633,6 +5636,42 @@ combinePieceContribs  leqOp  w  ai  (c:cs) =
   let joined = List.foldl' (pseudoJoin w) c cs
   in Just (if leqOp joined ai then joined else ai)
 
+-- | /O(M(w) log w)/. Refine @a@ by the assumption @x ≠ y@, @x ∈ γ(a)@,
+-- @y ∈ γ(b)@. See the section header for semantics.
+--
+-- Unlike the ordering assumes, @≠@ can exclude a value from @a@ only when @b@
+-- pins it down completely: when @b = {c}@ is a singleton, @c@ is the one value
+-- that no member of @b@ differs from, so it can be dropped from @a@. A
+-- progression can drop @c@ exactly only when it sits at an endpoint of @a@'s
+-- orbit (dropping it shrinks @n@ by one); an interior @c@ cannot be removed
+-- without leaving a non-progression, so @a@ is returned unchanged (still a
+-- sound over-approximation, since @a ⊇ {x ∈ γ(a) | x ≠ c}@). Returns 'Nothing'
+-- only when the branch is infeasible, i.e.\ @a = b = {c}@.
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'member' (Hensel inverse): /O(M(w) log w)/
+-- * 'mk' re-canonicalization: /O(A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(log w)/
+-- 2. /O(w^2 log w)/
+-- 3. /Õ(w)/
+assumeNe ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+assumeNe w a b
+  | size b /= 1      = Just a   -- @b@ is not a point: nothing is forced unequal
+  | Prelude.not (member a c) = Just a   -- @c@ already absent from @a@
+  | size a == 1      = Nothing  -- @a = {c}@: branch infeasible
+  | c == start a     = Just (mk w ((start a + stride a) .&. mask a) (stride a) (n a - 1))
+  | c == end a       = Just (mk w (start a) (stride a) (n a - 1))
+  | otherwise        = Just a   -- interior point: cannot be dropped exactly
+  where
+    c = start b
+
 -- ------------------------------------------------------------------
 -- * Reduced product with bitwise
 
@@ -8748,6 +8787,18 @@ correct_assumeSgePrecise w a x b y =
         Just c  -> property (member c x)
         Nothing -> property False
 
+-- | 'assumeNe' is sound: every value @x ∈ a@ that differs from some @y ∈ b@
+-- remains in the result.
+correct_assumeNe ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_assumeNe w a x b y =
+  proper a ==> proper b ==> mask a == mask b ==>
+    member a x ==> member b y ==> x /= y ==>
+      case assumeNe w a b of
+        Just c  -> property (member c x)
+        Nothing -> property False
+
 -- $assumeShrinks
 --
 -- The @assume*Shrinks@ properties assert that each assume refines its
@@ -8879,6 +8930,16 @@ assumeSgePreciseShrinks ::
 assumeSgePreciseShrinks w a b =
   proper a ==> proper b ==> mask a == mask b ==>
     case assumeSgePrecise w a b of
+      Nothing -> property True
+      Just c  -> property (size c <= size a)
+
+-- | 'assumeNe' shrinks by cardinality (unconditionally).
+assumeNeShrinks ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+assumeNeShrinks w a b =
+  proper a ==> proper b ==> mask a == mask b ==>
+    case assumeNe w a b of
       Nothing -> property True
       Just c  -> property (size c <= size a)
 

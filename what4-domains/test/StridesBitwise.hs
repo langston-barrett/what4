@@ -412,6 +412,16 @@ tests = TT.testGroup "StridesBitwise"
          (a, x) <- SB.genPair n
          (b, y) <- SB.genPair n
          pure (SB.correct_assumeSgePrecise n a x b y)
+  , genTest "correct_assumeEq" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeEq n a x b y)
+  , genTest "correct_assumeNe" $
+      do SW n <- genWidth
+         (a, x) <- SB.genPair n
+         (b, y) <- SB.genPair n
+         pure (SB.correct_assumeNe n a x b y)
   , genTest "assumeUltShrinks" $
       do SW n <- genWidth
          SB.assumeUltShrinks n <$> SB.genDomain n <*> SB.genDomain n
@@ -448,6 +458,9 @@ tests = TT.testGroup "StridesBitwise"
   , genTest "assumeSgePreciseShrinks" $
       do SW n <- genWidth
          SB.assumeSgePreciseShrinks n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "assumeNeShrinks" $
+      do SW n <- genWidth
+         SB.assumeNeShrinks n <$> SB.genDomain n <*> SB.genDomain n
   , genTest "assumeSltPreciseIdempotent" $
       do SW n <- genWidth
          SB.assumeSltPreciseIdempotent n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
