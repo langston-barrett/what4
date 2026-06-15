@@ -52,6 +52,7 @@ data HsModule = HsModule
   }
 
 arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod :: HsModule
+geoStridesMod, geometricMod :: HsModule
 arithMod          = HsModule "src/What4/Domains/BV/Arith.hs"           "A"  "test/BVDomTests.hs"
 bitwiseMod        = HsModule "src/What4/Domains/BV/Bitwise.hs"         "B"  "test/BVDomTests.hs"
 xorMod            = HsModule "src/What4/Domains/BV/XOR.hs"             "X"  "test/BVDomTests.hs"
@@ -59,13 +60,16 @@ overallMod        = HsModule "src/What4/Domains/BV.hs"                 "O"  "tes
 stridesMod        = HsModule "src/What4/Domains/BV/Strides.hs"         "S"  "test/Strides.hs"
 stridesBitwiseMod = HsModule "src/What4/Domains/BV/StridesBitwise.hs"  "SB" "test/StridesBitwise.hs"
 stridedMod        = HsModule "src/What4/Domains/BV/StridedInterval.hs" "S"  "test/StridedInterval.hs"
+geoStridesMod     = HsModule "src/What4/Domains/BV/GeoStrides.hs"      "G"  "test/GeoStrides.hs"
+geometricMod      = HsModule "src/What4/Domains/BV/Geometric.hs"       "Geo" "test/Geometric.hs"
 
 -- | All Haskell-side modules whose properties are exercised by the
 -- property-test driver. The invocation check runs against every module
 -- in this list.
 allHsModules :: [HsModule]
 allHsModules =
-  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod]
+  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod
+  , geoStridesMod, geometricMod]
 
 -- | Modules backed by a Cryptol model (in @doc/*.cry@). The
 -- Cryptol-correspondence checks run only against these.
@@ -74,7 +78,7 @@ allHsModules =
 -- Haskell-only properties have no Cryptol counterpart.
 cryptolBackedModules :: [HsModule]
 cryptolBackedModules =
-  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridedMod]
+  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridedMod, geoStridesMod]
 
 -- | Additional source files that define Haskell @Property@ predicates but
 -- aren't themselves checked for invocation. Currently used to satisfy the
@@ -93,6 +97,7 @@ cryptolFiles =
   , "doc/bvdomain.cry"
   , "doc/strides.cry"
   , "doc/strideddomain.cry"
+  , "doc/geostrides.cry"
   ]
 
 main :: IO ()
@@ -248,6 +253,26 @@ haskellOnly = Set.fromList
   , "correct_exactMeet"
   , "exactMeetCommutative", "exactMeetIdempotent", "exactMeetLowerBound"
   , "exactMeetTopIdentity", "exactMeetAssociative"
+  -- 'What4.Domains.BV.GeoStrides' (the geometric kernel): the Cryptol model
+  -- @doc/geostrides.cry@ covers @correct_neg@\/@correct_mul@\/@correct_square@\/
+  -- @correct_pseudoJoin@. The following are Haskell-only.
+  --
+  -- The 2-adic discrete-log round-trips and 'pow5' multiplicativity are
+  -- low-level number-theory lemmas about the helpers, not abstract-domain
+  -- soundness; the Cryptol 'pow5' is used declaratively inside 'member'.
+  , "dlog5Pow5RoundTrip", "pow5Dlog5RoundTrip"
+  , "decomposeRecomposeRoundTrip", "pow5Multiplicative"
+  -- 'correct_pow' (variable exponent) and 'correct_shl' (variable shift) range
+  -- over a parametric exponent\/shift that is awkward to fix in the
+  -- width-indexed Cryptol model; 'correct_mul'\/'correct_square' already pin
+  -- down the multiplicative coordinate algebra.
+  , "correct_pow"
+  -- 'correct_pseudoMeet' is the sound /over-approximating/ meet (exact on the
+  -- valuation axis, widened on the odd-part axes); the Cryptol model specifies
+  -- only the join side of the lattice.
+  , "correct_pseudoMeet"
+  -- 'OddClass' lattice laws: small finite-lattice checks with no Cryptol mirror.
+  , "oddClassJoinAssoc", "oddClassMeetAssoc"
   ]
 
 cryptolCorrespondenceTests :: TT.TestTree
