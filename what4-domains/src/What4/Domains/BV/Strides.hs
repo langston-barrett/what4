@@ -6130,12 +6130,37 @@ pieceSign w c
 assumeUnsignedRange ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Integer -> Integer -> Maybe (Domain w)
-assumeUnsignedRange w a lo hi =
-  case fromArith w (A.range w lo hi) of
-    Nothing -> Nothing
-    Just r  -> case pseudoMeet w a r of
-      Nothing -> Nothing
-      Just c  -> Just (if size c <= size a then c else a)
+-- A non-wrapping @a@ (stride positive, @start + n·stride <= mask@) is monotone
+-- in value, so @{x ∈ γ(a) | lo <= x <= hi}@ is the contiguous sub-arc of @a@
+-- between the first index reaching @lo@ and the last at or below @hi@ (itself a
+-- progression: same stride, fewer steps). We read it off with two divisions by
+-- the stride: this is the @O(M(w))@ branch and avoids the gcd-based 'pseudoMeet'
+-- on the common non-wrapping path. It yields exactly what 'pseudoMeet' already
+-- produced here (verified precision-neutral); only the worst-case wrapping
+-- branch, where the orbit is not monotone and members in @[lo, hi]@ need not be
+-- contiguous, still meets (so the headline @O(G(w))@ is unchanged). Clamping the
+-- target to @[start, end]@ keeps every subtraction non-negative.
+assumeUnsignedRange w a lo hi
+  | Prelude.not (wrapsU a) =
+      let !s     = start a
+          !t     = stride a
+          !endA  = s + n a * t                          -- <= mask (no wrap)
+          !effLo = Prelude.max (integerToNatural lo) s
+          !effHi = Prelude.min (integerToNatural hi) endA
+      in if effLo > effHi
+           then Nothing                                 -- target misses [start, end]
+           else
+             let !iLo = (effLo - s + t - 1) `Prelude.div` t  -- ceil((effLo - s) / t)
+                 !iHi = (effHi - s) `Prelude.div` t          -- floor((effHi - s) / t)
+             in if iLo > iHi
+                  then Nothing                          -- no coset member in [lo, hi]
+                  else Just (mk w (s + iLo * t) t (iHi - iLo))
+  | otherwise =
+      case fromArith w (A.range w lo hi) of
+        Nothing -> Nothing
+        Just r  -> case pseudoMeet w a r of
+          Nothing -> Nothing
+          Just c  -> Just (if size c <= size a then c else a)
 
 -- | Shared driver for 'assumeSlt', 'assumeSle', 'assumeSgt', 'assumeSge' (and
 -- their @*Precise@ variants). Splits both operands at the sign boundary with

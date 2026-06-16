@@ -1990,15 +1990,36 @@ assumeUge a b =
 // Refine `a` by intersecting with the unsigned range `[lo, hi]`.
 //
 // The refined set is a subset of `γ(a)`, so `a` itself is always a sound
-// result; when `pseudoMeet` (sound but not a lower bound on wrapping
-// operands) overshoots `a` by cardinality, keep `a` instead.
+// result. A non-wrapping `a` is monotone in value, so the refined set is the
+// contiguous sub-arc between the first index reaching `lo` and the last at or
+// below `hi`, read off exactly with two divisions by the stride (the indices
+// are computed in a wide type to avoid wrap; every value stays <= mask, so the
+// truncations back to [n]/[n+1] are exact). This avoids the gcd-based
+// `pseudoMeet` on the common non-wrapping path. A wrapping `a` is not monotone,
+// so it falls back to `pseudoMeet`; when that (sound but not a lower bound on
+// wrapping operands) overshoots `a` by cardinality, keep `a` instead.
 assumeUnsignedRange :
   {n} (fin n, n >= 2) =>
   Domain n -> [n] -> [n] -> Maybe (Domain n)
 assumeUnsignedRange a lo hi =
-  case pseudoMeet a (fromArith (Arith::range lo hi)) of
-    Nothing -> Nothing
-    Just c  -> Just (if size c <= size a then c else a)
+  if ~ (wrapsU a) then
+    if effLo > effHi \/ iLo > iHi then Nothing
+     else Just (mk (drop`{n + 1} (startW + iLo * strideW)) a.stride
+                   (drop`{n} (iHi - iLo)))
+  else
+    case pseudoMeet a (fromArith (Arith::range lo hi)) of
+      Nothing -> Nothing
+      Just c  -> Just (if size c <= size a then c else a)
+  where
+    // Compute indices in a wide type to avoid wrap (mirrors `wrapsU`); every
+    // value stays <= mask, so the truncations back to [n]/[n+1] are exact.
+    startW  = zext a.start  : [2 * n + 1]
+    strideW = zext a.stride : [2 * n + 1]
+    endA    = startW + zext a.n * strideW       // <= mask (no wrap)
+    effLo   = max (zext lo) startW
+    effHi   = min (zext hi) endA
+    iLo     = (effLo - startW + strideW - 1) / strideW   // ceil
+    iHi     = (effHi - startW) / strideW                 // floor
 
 // Sign of a sign-coherent piece (a piece of `signPieces`).
 enum Sign = Pos | Neg
