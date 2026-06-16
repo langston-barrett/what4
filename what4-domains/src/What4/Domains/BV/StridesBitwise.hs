@@ -69,6 +69,23 @@ module What4.Domains.BV.StridesBitwise
   , uremSmtlib
   , sdivSmtlib
   , sremSmtlib
+  -- ** Arithmetic (LLVM overflow flags)
+  , addNuw
+  , addNsw
+  , addNswNuw
+  , subNuw
+  , subNsw
+  , subNswNuw
+  , mulNuw
+  , mulNsw
+  , mulNswNuw
+  , shlNuw
+  , shlNsw
+  , shlNswNuw
+  , udivExact
+  , sdivExact
+  , lshrExact
+  , ashrExact
   -- * Bitwise operations
   , not
   , andFast
@@ -176,6 +193,23 @@ module What4.Domains.BV.StridesBitwise
   , correct_uremSmtlib
   , correct_sdivSmtlib
   , correct_sremSmtlib
+  -- *** Arithmetic (LLVM overflow flags)
+  , correct_addNuw
+  , correct_addNsw
+  , correct_addNswNuw
+  , correct_subNuw
+  , correct_subNsw
+  , correct_subNswNuw
+  , correct_mulNuw
+  , correct_mulNsw
+  , correct_mulNswNuw
+  , correct_shlNuw
+  , correct_shlNsw
+  , correct_shlNswNuw
+  , correct_udivExact
+  , correct_sdivExact
+  , correct_lshrExact
+  , correct_ashrExact
   -- ** Bitwise operations
   , correct_not
   , correct_and
@@ -736,6 +770,111 @@ sdivSmtlib w (Domain sa ba) (Domain sb bb) =
 sremSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 sremSmtlib w (Domain sa ba) (Domain sb bb) =
   mkReduced w (S.sremSmtlib w sa sb) (B.sremSmtlib w ba bb)
+
+-- ------------------------------------------------------------------
+-- ** Arithmetic (LLVM overflow flags)
+--
+-- Reduced-product variants of the LLVM-flagged transfer functions. Each
+-- combines @S.<op>Nsw@\/@<op>Nuw@\/@<op>Exact@ with the unflagged bitwise
+-- transfer (the bitwise domain has no native flag-aware ops, but its
+-- unflagged result is sound for the no-overflow subset since
+-- no-overflow ⊆ full). 'Nothing' propagates: if the strides component
+-- decides the joint is unreachable under the flag, the reduced product
+-- is too.
+
+addNuw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+addNuw w (Domain sa ba) (Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.add ba bb)) (S.addNuw w sa sb)
+
+addNsw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+addNsw w (Domain sa ba) (Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.add ba bb)) (S.addNsw w sa sb)
+
+addNswNuw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+addNswNuw w (Domain sa ba) (Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.add ba bb)) (S.addNswNuw w sa sb)
+
+subNuw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+subNuw w (Domain sa ba) (Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.sub ba bb)) (S.subNuw w sa sb)
+
+subNsw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+subNsw w (Domain sa ba) (Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.sub ba bb)) (S.subNsw w sa sb)
+
+subNswNuw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+subNswNuw w (Domain sa ba) (Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.sub ba bb)) (S.subNswNuw w sa sb)
+
+mulNuw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+mulNuw w a@(Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.mulBounded ba (tightUBounds a) bb (tightUBounds b)))
+       (S.mulNuw w sa sb)
+
+mulNsw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+mulNsw w a@(Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.mulBounded ba (tightUBounds a) bb (tightUBounds b)))
+       (S.mulNsw w sa sb)
+
+mulNswNuw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+mulNswNuw w a@(Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.mulBounded ba (tightUBounds a) bb (tightUBounds b)))
+       (S.mulNswNuw w sa sb)
+
+shlNuw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+shlNuw w (Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (shlBitwise w ba b sb bb)) (S.shlNuw w sa sb)
+
+shlNsw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+shlNsw w (Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (shlBitwise w ba b sb bb)) (S.shlNsw w sa sb)
+
+shlNswNuw :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+shlNswNuw w (Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (shlBitwise w ba b sb bb)) (S.shlNswNuw w sa sb)
+
+udivExact :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+udivExact w a@(Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.udivBounded ba (tightUBounds a) bb (tightUBounds b)))
+       (S.udivExact w sa sb)
+
+sdivExact :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+sdivExact w (Domain sa ba) (Domain sb bb) =
+  fmap (\s -> mkReduced w s (B.sdiv w ba bb)) (S.sdivExact w sa sb)
+
+lshrExact :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+lshrExact w (Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (lshrBitwise w ba b sb bb)) (S.lshrExact w sa sb)
+
+ashrExact :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+ashrExact w (Domain sa ba) b@(Domain sb bb) =
+  fmap (\s -> mkReduced w s (ashrBitwise w ba b sb bb)) (S.ashrExact w sa sb)
+
+-- | Shared bitwise shl logic from 'shl': use the reachable-amounts fold
+-- when the strides component is small, otherwise the bounded fold.
+shlBitwise ::
+  (1 <= w) =>
+  NatRepr w -> B.Domain w -> Domain w -> S.Domain w -> B.Domain w -> B.Domain w
+shlBitwise w ba b _sb bb =
+  case reachableAmounts w (clampShift w) b of
+    Just amts -> B.shlAbstractOver w ba amts
+    Nothing   -> B.shlAbstractBounded w ba bb (tightUBounds b)
+
+lshrBitwise ::
+  (1 <= w) =>
+  NatRepr w -> B.Domain w -> Domain w -> S.Domain w -> B.Domain w -> B.Domain w
+lshrBitwise w ba b _sb bb =
+  case reachableAmounts w (clampShift w) b of
+    Just amts -> B.lshrAbstractOver w ba amts
+    Nothing   -> B.lshrAbstractBounded w ba bb (tightUBounds b)
+
+ashrBitwise ::
+  (1 <= w) =>
+  NatRepr w -> B.Domain w -> Domain w -> S.Domain w -> B.Domain w -> B.Domain w
+ashrBitwise w ba b _sb bb =
+  case reachableAmounts w (clampShift w) b of
+    Just amts -> B.ashrAbstractOver w ba amts
+    Nothing   -> B.ashrAbstractBounded w ba bb (tightUBounds b)
 
 -- ------------------------------------------------------------------
 -- * Bitwise operations
@@ -1466,6 +1605,221 @@ correct_sremSmtlib w a x b y =
         result | ys == 0 = xs
                | otherwise = xs `Prelude.rem` ys
     in property (member (sremSmtlib w a b) (asN w result))
+
+-- ------------------------------------------------------------------
+-- *** Arithmetic (LLVM overflow flags)
+
+-- Helper: a flagged op result @r@ must contain @z@ when the constraint
+-- holds; if @r@ is @Nothing@, the constraint must have been violated.
+flaggedSoundRP ::
+  Maybe (Domain w) -> Bool -> Natural -> Bool
+flaggedSoundRP r constraintHolds z = case r of
+  Nothing -> Prelude.not constraintHolds
+  Just d  -> Prelude.not constraintHolds || member d z
+
+correct_addNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_addNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (addNuw w a b) noOverflow z)
+  where
+    sumI = toInteger x + toInteger y
+    noOverflow = sumI <= NR.maxUnsigned w
+    z = asN w sumI
+
+correct_addNsw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_addNsw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (addNsw w a b) noOverflow z)
+  where
+    xs = signedOf w x
+    ys = signedOf w y
+    sumS = xs + ys
+    noOverflow = NR.minSigned w <= sumS && sumS <= NR.maxSigned w
+    z = asN w sumS
+
+correct_addNswNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_addNswNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (addNswNuw w a b) noOverflow z)
+  where
+    sumI = toInteger x + toInteger y
+    sumS = signedOf w x + signedOf w y
+    nuw = sumI <= NR.maxUnsigned w
+    nsw = NR.minSigned w <= sumS && sumS <= NR.maxSigned w
+    noOverflow = nuw && nsw
+    z = asN w sumI
+
+correct_subNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_subNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (subNuw w a b) noOverflow z)
+  where
+    diffI = toInteger x - toInteger y
+    noOverflow = diffI >= 0
+    z = asN w diffI
+
+correct_subNsw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_subNsw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (subNsw w a b) noOverflow z)
+  where
+    xs = signedOf w x
+    ys = signedOf w y
+    diffS = xs - ys
+    noOverflow = NR.minSigned w <= diffS && diffS <= NR.maxSigned w
+    z = asN w diffS
+
+correct_subNswNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_subNswNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (subNswNuw w a b) noOverflow z)
+  where
+    diffI = toInteger x - toInteger y
+    diffS = signedOf w x - signedOf w y
+    nuw = diffI >= 0
+    nsw = NR.minSigned w <= diffS && diffS <= NR.maxSigned w
+    noOverflow = nuw && nsw
+    z = asN w diffI
+
+correct_mulNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_mulNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (mulNuw w a b) noOverflow z)
+  where
+    prodI = toInteger x * toInteger y
+    noOverflow = prodI <= NR.maxUnsigned w
+    z = asN w prodI
+
+correct_mulNsw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_mulNsw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (mulNsw w a b) noOverflow z)
+  where
+    xs = signedOf w x
+    ys = signedOf w y
+    prodS = xs * ys
+    noOverflow = NR.minSigned w <= prodS && prodS <= NR.maxSigned w
+    z = asN w prodS
+
+correct_mulNswNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_mulNswNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (mulNswNuw w a b) noOverflow z)
+  where
+    prodI = toInteger x * toInteger y
+    prodS = signedOf w x * signedOf w y
+    nuw = prodI <= NR.maxUnsigned w
+    nsw = NR.minSigned w <= prodS && prodS <= NR.maxSigned w
+    noOverflow = nuw && nsw
+    z = asN w prodI
+
+correct_shlNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_shlNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (shlNuw w a b) noOverflow z)
+  where
+    yI = toInteger y
+    shifted = toInteger x * (1 `Bits.shiftL` fromInteger yI)
+    noOverflow = yI < NR.intValue w && shifted <= NR.maxUnsigned w
+    z = asN w shifted
+
+correct_shlNsw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_shlNsw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (shlNsw w a b) noOverflow z)
+  where
+    yI = toInteger y
+    xs = signedOf w x
+    shiftedS = xs * (1 `Bits.shiftL` fromInteger yI)
+    noOverflow = yI < NR.intValue w
+              && NR.minSigned w <= shiftedS
+              && shiftedS <= NR.maxSigned w
+    z = asN w shiftedS
+
+correct_shlNswNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_shlNswNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (shlNswNuw w a b) noOverflow z)
+  where
+    yI = toInteger y
+    xs = signedOf w x
+    shifted = toInteger x * (1 `Bits.shiftL` fromInteger yI)
+    shiftedS = xs * (1 `Bits.shiftL` fromInteger yI)
+    nuw = yI < NR.intValue w && shifted <= NR.maxUnsigned w
+    nsw = yI < NR.intValue w
+       && NR.minSigned w <= shiftedS
+       && shiftedS <= NR.maxSigned w
+    noOverflow = nuw && nsw
+    z = asN w shifted
+
+correct_udivExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_udivExact w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (udivExact w a b) constraintHolds z)
+  where
+    constraintHolds = y /= 0 && x `Prelude.rem` y == 0
+    z = if y == 0 then 0 else x `Prelude.quot` y
+
+correct_sdivExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_sdivExact w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (sdivExact w a b) constraintHolds z)
+  where
+    xs = signedOf w x
+    ys = signedOf w y
+    constraintHolds = ys /= 0 && xs `Prelude.rem` ys == 0
+    z = if ys == 0 then 0 else asN w (xs `Prelude.quot` ys)
+
+correct_lshrExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_lshrExact w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (lshrExact w a b) constraintHolds z)
+  where
+    yI = fromInteger (min (toInteger y) (NR.intValue w)) :: Int
+    constraintHolds = x Bits..&. ((1 `Bits.shiftL` yI) - 1) == 0
+    z = x `Bits.shiftR` yI
+
+correct_ashrExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_ashrExact w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSoundRP (ashrExact w a b) constraintHolds z)
+  where
+    yI = fromInteger (min (toInteger y) (NR.intValue w)) :: Int
+    constraintHolds = x Bits..&. ((1 `Bits.shiftL` yI) - 1) == 0
+    xs = signedOf w x
+    z = asN w (xs `Bits.shiftR` yI)
 
 -- ------------------------------------------------------------------
 -- ** Bitwise operations
