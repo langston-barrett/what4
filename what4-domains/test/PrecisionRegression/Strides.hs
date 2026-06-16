@@ -50,6 +50,7 @@ results =
   , binaryResult stridesEnum "xor" (S.xor w4) cXor
   , binaryResult stridesEnum "shl"  (S.shl  w4) cShl
   , binaryResult stridesEnum "lshr" (S.lshr w4) cLshr
+  , binaryResult stridesEnum "lshrPrecise" (S.lshrPrecise w4) cLshr
   , binaryResult stridesEnum "ashr" (S.ashr w4) cAshr
   , binaryResult stridesEnum "rol"  (S.rol  w4) cRol
   , binaryResult stridesEnum "rolPrecise" (S.rolPrecise w4) cRol

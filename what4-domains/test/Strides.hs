@@ -508,6 +508,9 @@ tests = TT.testGroup "Strides"
   , genTest "correct_lshr" $
       do SW n <- genWidth
          S.correct_lshr n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_lshrPrecise" $
+      do SW n <- genWidth
+         S.correct_lshrPrecise n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
   , genTest "correct_ashr" $
       do SW n <- genWidth
          S.correct_ashr n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n

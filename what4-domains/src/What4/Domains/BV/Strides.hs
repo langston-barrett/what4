@@ -486,6 +486,7 @@ module What4.Domains.BV.Strides
   , shlRaw
   , lshr
   , lshrRaw
+  , lshrPrecise
   , ashr
   , ashrRaw
   , rol
@@ -681,6 +682,7 @@ module What4.Domains.BV.Strides
   -- ** Shifts and rotations
   , correct_shl
   , correct_lshr
+  , correct_lshrPrecise
   , correct_ashr
   , correct_rol
   , correct_rolPrecise
@@ -3898,6 +3900,62 @@ lshrRaw w a b
     lo = fromInteger (l_a `Bits.shiftR` u_b')
     hi = fromInteger (u_a `Bits.shiftR` l_b')
 
+-- | /O(w · A(w))/. Logical right shift, refined by the bits that are forced
+-- across the whole range of shift amounts. At least as tight as 'lshr' on
+-- every input (it returns whichever of 'lshr' and the forced-bits candidate is
+-- smaller by cardinality).
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * 'lshr': /O(M(w))/
+-- * 'forcedBits' plus the @w@-step forced-bit fold feeding 'fromForcedBits': /O(w · A(w))/
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(w^2)/
+lshrPrecise :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+-- For a singleton shift, 'lshr' already folds in @a@'s forced bits; the win is
+-- for a /non-singleton/ shift @b@, where 'lshr' falls back to a stride-1 arc.
+-- Writing @m = 2^w - 1@ and @[klo, khi]@ for the (capped) shift-amount range, a
+-- result bit @p@ is forced to a constant exactly when every shift @k ∈ [klo,
+-- khi]@ maps it to a forced source bit (or, for @0@, off the top of the word):
+-- bit @p@ is forced @0@ unless some in-range @notZa >> k@ exposes a
+-- not-forced-@0@ source bit, and forced @1@ only when every in-range @oa >> k@
+-- (whose top @k@ bits are @0@) exposes a forced-@1@ source bit. Intersecting
+-- those facts across the range and feeding them, with the Table 3.2 arc @[lo,
+-- hi]@, to 'fromForcedBits' can pin a coset that the stride-1 arc (and the
+-- 'psplit' pseudo-join inside 'lshr') miss, e.g. @lshr {8} {0,1} = {4,8}@ rather
+-- than @{4,6,8}@. The fold runs over the fixed range @[0, w]@ gated by
+-- membership in @[klo, khi]@, so it stays @O(w · A(w))@. The candidate is sound
+-- on every input (each @x >> k@ agrees with the intersected bits and lies on
+-- the arc), so the cardinality-min with 'lshr' never worsens the result.
+lshrPrecise w a b = if size c < size r then c else r
+  where
+    !r = lshr w a b
+    c | klo >= wInt = mk w 0 1 0            -- every shift clears the word
+      | otherwise   = fromForcedBits w (zeros', ones') (lo, hi)
+    wInt = NR.intValue w
+    m    = mask a
+    (l_a, u_a) = A.ubounds (toArith a)
+    (l_b, u_b) = A.ubounds (toArith b)
+    klo  = Prelude.min l_b wInt
+    khi  = Prelude.min u_b wInt
+    lo   = fromInteger (l_a `Bits.shiftR` fromInteger khi)
+    hi   = fromInteger (u_a `Bits.shiftR` fromInteger klo)
+    (za, oa) = forcedBits a
+    notZa = m `Bits.xor` za
+    inRange j = klo <= j && j <= khi
+    notForcedZ =
+      List.foldl' (\acc j -> if inRange j then acc Bits..|. (notZa `Bits.shiftR` fromInteger j) else acc) 0 [0 .. wInt]
+    allOne =
+      List.foldl' (\acc j -> if inRange j then acc Bits..&. (oa `Bits.shiftR` fromInteger j) else acc) m [0 .. wInt]
+    zeros' = m `Bits.xor` (notForcedZ Bits..&. m)
+    ones'  = allOne Bits..&. m
+
 -- | /O(M(w))/. Arithmetic right shift.
 ashr :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 ashr w = psplitOp2R w (ashrRaw w)
@@ -5566,12 +5624,37 @@ pieceSign w c
 assumeUnsignedRange ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Integer -> Integer -> Maybe (Domain w)
-assumeUnsignedRange w a lo hi =
-  case fromArith w (A.range w lo hi) of
-    Nothing -> Nothing
-    Just r  -> case pseudoMeet w a r of
-      Nothing -> Nothing
-      Just c  -> Just (if size c <= size a then c else a)
+-- A non-wrapping @a@ (stride positive, @start + n·stride <= mask@) is monotone
+-- in value, so @{x ∈ γ(a) | lo <= x <= hi}@ is the contiguous sub-arc of @a@
+-- between the first index reaching @lo@ and the last at or below @hi@ (itself a
+-- progression: same stride, fewer steps). We read it off with two divisions by
+-- the stride: this is the @O(M(w))@ branch and avoids the gcd-based 'pseudoMeet'
+-- on the common non-wrapping path. It yields exactly what 'pseudoMeet' already
+-- produced here (verified precision-neutral); only the worst-case wrapping
+-- branch, where the orbit is not monotone and members in @[lo, hi]@ need not be
+-- contiguous, still meets (so the headline @O(G(w))@ is unchanged). Clamping the
+-- target to @[start, end]@ keeps every subtraction non-negative.
+assumeUnsignedRange w a lo hi
+  | Prelude.not (wrapsU a) =
+      let !s     = start a
+          !t     = stride a
+          !endA  = s + n a * t                          -- <= mask (no wrap)
+          !effLo = Prelude.max (integerToNatural lo) s
+          !effHi = Prelude.min (integerToNatural hi) endA
+      in if effLo > effHi
+           then Nothing                                 -- target misses [start, end]
+           else
+             let !iLo = (effLo - s + t - 1) `Prelude.div` t  -- ceil((effLo - s) / t)
+                 !iHi = (effHi - s) `Prelude.div` t          -- floor((effHi - s) / t)
+             in if iLo > iHi
+                  then Nothing                          -- no coset member in [lo, hi]
+                  else Just (mk w (s + iLo * t) t (iHi - iLo))
+  | otherwise =
+      case fromArith w (A.range w lo hi) of
+        Nothing -> Nothing
+        Just r  -> case pseudoMeet w a r of
+          Nothing -> Nothing
+          Just c  -> Just (if size c <= size a then c else a)
 
 -- | Shared driver for 'assumeSlt', 'assumeSle', 'assumeSgt', 'assumeSge' (and
 -- their @*Precise@ variants). Splits both operands at the sign boundary with
@@ -7809,6 +7892,16 @@ correct_lshr ::
 correct_lshr w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (lshr w a b) z)
+  where
+    s = fromInteger (min (NR.intValue w) (toInteger y))
+    z = fromInteger (toInteger x `Bits.shiftR` s)
+
+correct_lshrPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_lshrPrecise w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (lshrPrecise w a b) z)
   where
     s = fromInteger (min (NR.intValue w) (toInteger y))
     z = fromInteger (toInteger x `Bits.shiftR` s)
