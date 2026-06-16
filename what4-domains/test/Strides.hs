@@ -426,6 +426,132 @@ tests = TT.testGroup "Strides"
       do SW n <- genWidth
          S.correct_sremSmtlib n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
 
+  -- Arithmetic (LLVM overflow flags) - soundness
+  , genTest "correct_addNuw" $
+      do SW n <- genWidth
+         S.correct_addNuw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_addNsw" $
+      do SW n <- genWidth
+         S.correct_addNsw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_addNswNuw" $
+      do SW n <- genWidth
+         S.correct_addNswNuw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_subNuw" $
+      do SW n <- genWidth
+         S.correct_subNuw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_subNsw" $
+      do SW n <- genWidth
+         S.correct_subNsw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_subNswNuw" $
+      do SW n <- genWidth
+         S.correct_subNswNuw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_mulNuw" $
+      do SW n <- genWidth
+         S.correct_mulNuw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_mulNsw" $
+      do SW n <- genWidth
+         S.correct_mulNsw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_mulNswNuw" $
+      do SW n <- genWidth
+         S.correct_mulNswNuw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_shlNuw" $
+      do SW n <- genWidth
+         S.correct_shlNuw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_shlNsw" $
+      do SW n <- genWidth
+         S.correct_shlNsw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_shlNswNuw" $
+      do SW n <- genWidth
+         S.correct_shlNswNuw n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_udivExact" $
+      do SW n <- genWidth
+         S.correct_udivExact n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_sdivExact" $
+      do SW n <- genWidth
+         S.correct_sdivExact n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_lshrExact" $
+      do SW n <- genWidth
+         S.correct_lshrExact n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "correct_ashrExact" $
+      do SW n <- genWidth
+         S.correct_ashrExact n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+
+  -- Arithmetic (LLVM overflow flags) - dominance over unflagged op
+  , genTest "addNuwDominatesAdd" $
+      do SW n <- genWidth
+         S.addNuwDominatesAdd n <$> S.genDomain n <*> S.genDomain n
+  , genTest "addNswDominatesAdd" $
+      do SW n <- genWidth
+         S.addNswDominatesAdd n <$> S.genDomain n <*> S.genDomain n
+  , genTest "addNswNuwDominatesAdd" $
+      do SW n <- genWidth
+         S.addNswNuwDominatesAdd n <$> S.genDomain n <*> S.genDomain n
+  , genTest "subNuwDominatesSub" $
+      do SW n <- genWidth
+         S.subNuwDominatesSub n <$> S.genDomain n <*> S.genDomain n
+  , genTest "subNswDominatesSub" $
+      do SW n <- genWidth
+         S.subNswDominatesSub n <$> S.genDomain n <*> S.genDomain n
+  , genTest "subNswNuwDominatesSub" $
+      do SW n <- genWidth
+         S.subNswNuwDominatesSub n <$> S.genDomain n <*> S.genDomain n
+  , genTest "mulNuwDominatesMul" $
+      do SW n <- genWidth
+         S.mulNuwDominatesMul n <$> S.genDomain n <*> S.genDomain n
+  , genTest "mulNswDominatesMul" $
+      do SW n <- genWidth
+         S.mulNswDominatesMul n <$> S.genDomain n <*> S.genDomain n
+  , genTest "mulNswNuwDominatesMul" $
+      do SW n <- genWidth
+         S.mulNswNuwDominatesMul n <$> S.genDomain n <*> S.genDomain n
+  , genTest "shlNuwDominatesShl" $
+      do SW n <- genWidth
+         S.shlNuwDominatesShl n <$> S.genDomain n <*> S.genDomain n
+  , genTest "shlNswDominatesShl" $
+      do SW n <- genWidth
+         S.shlNswDominatesShl n <$> S.genDomain n <*> S.genDomain n
+  , genTest "shlNswNuwDominatesShl" $
+      do SW n <- genWidth
+         S.shlNswNuwDominatesShl n <$> S.genDomain n <*> S.genDomain n
+  , genTest "udivExactDominatesUdiv" $
+      do SW n <- genWidth
+         S.udivExactDominatesUdiv n <$> S.genDomain n <*> S.genDomain n
+  , genTest "sdivExactDominatesSdiv" $
+      do SW n <- genWidth
+         S.sdivExactDominatesSdiv n <$> S.genDomain n <*> S.genDomain n
+  , genTest "lshrExactDominatesLshr" $
+      do SW n <- genWidth
+         S.lshrExactDominatesLshr n <$> S.genDomain n <*> S.genDomain n
+  , genTest "ashrExactDominatesAshr" $
+      do SW n <- genWidth
+         S.ashrExactDominatesAshr n <$> S.genDomain n <*> S.genDomain n
+
+  -- Arithmetic (LLVM overflow flags) - combined nsw+nuw refines each single flag
+  , genTest "addNswNuwRefinesNsw" $
+      do SW n <- genWidth
+         S.addNswNuwRefinesNsw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "addNswNuwRefinesNuw" $
+      do SW n <- genWidth
+         S.addNswNuwRefinesNuw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "subNswNuwRefinesNsw" $
+      do SW n <- genWidth
+         S.subNswNuwRefinesNsw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "subNswNuwRefinesNuw" $
+      do SW n <- genWidth
+         S.subNswNuwRefinesNuw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "mulNswNuwRefinesNsw" $
+      do SW n <- genWidth
+         S.mulNswNuwRefinesNsw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "mulNswNuwRefinesNuw" $
+      do SW n <- genWidth
+         S.mulNswNuwRefinesNuw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "shlNswNuwRefinesNsw" $
+      do SW n <- genWidth
+         S.shlNswNuwRefinesNsw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "shlNswNuwRefinesNuw" $
+      do SW n <- genWidth
+         S.shlNswNuwRefinesNuw n <$> S.genDomain n <*> S.genDomain n
+
   -- Bitwise
   , genTest "correct_not" $
       do SW n <- genWidth

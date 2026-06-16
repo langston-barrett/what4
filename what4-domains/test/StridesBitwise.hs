@@ -201,6 +201,55 @@ tests = TT.testGroup "StridesBitwise"
   , genTest "correct_sremSmtlib" $
       do SW n <- genWidth
          SB.correct_sremSmtlib n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  -- ** Arithmetic (LLVM overflow flags)
+  , genTest "correct_addNuw" $
+      do SW n <- genWidth
+         SB.correct_addNuw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_addNsw" $
+      do SW n <- genWidth
+         SB.correct_addNsw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_addNswNuw" $
+      do SW n <- genWidth
+         SB.correct_addNswNuw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_subNuw" $
+      do SW n <- genWidth
+         SB.correct_subNuw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_subNsw" $
+      do SW n <- genWidth
+         SB.correct_subNsw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_subNswNuw" $
+      do SW n <- genWidth
+         SB.correct_subNswNuw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_mulNuw" $
+      do SW n <- genWidth
+         SB.correct_mulNuw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_mulNsw" $
+      do SW n <- genWidth
+         SB.correct_mulNsw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_mulNswNuw" $
+      do SW n <- genWidth
+         SB.correct_mulNswNuw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_shlNuw" $
+      do SW n <- genWidth
+         SB.correct_shlNuw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_shlNsw" $
+      do SW n <- genWidth
+         SB.correct_shlNsw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_shlNswNuw" $
+      do SW n <- genWidth
+         SB.correct_shlNswNuw n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_udivExact" $
+      do SW n <- genWidth
+         SB.correct_udivExact n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_sdivExact" $
+      do SW n <- genWidth
+         SB.correct_sdivExact n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_lshrExact" $
+      do SW n <- genWidth
+         SB.correct_lshrExact n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
+  , genTest "correct_ashrExact" $
+      do SW n <- genWidth
+         SB.correct_ashrExact n <$> SB.genDomain n <*> genNatBV n <*> SB.genDomain n <*> genNatBV n
   -- ** Bitwise operations
   , genTest "correct_not" $
       do SW n <- genWidth

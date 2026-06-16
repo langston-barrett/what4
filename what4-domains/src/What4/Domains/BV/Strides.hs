@@ -466,6 +466,24 @@ module What4.Domains.BV.Strides
   , uremSmtlib
   , sdivSmtlib
   , sremSmtlib
+  -- ** Arithmetic (LLVM overflow flags)
+  -- $llvmFlags
+  , addNuw
+  , addNsw
+  , addNswNuw
+  , subNuw
+  , subNsw
+  , subNswNuw
+  , mulNuw
+  , mulNsw
+  , mulNswNuw
+  , shlNuw
+  , shlNsw
+  , shlNswNuw
+  , udivExact
+  , sdivExact
+  , lshrExact
+  , ashrExact
   -- * Bitwise operations
   , not
   , andFast
@@ -661,6 +679,47 @@ module What4.Domains.BV.Strides
   , correct_uremSmtlib
   , correct_sdivSmtlib
   , correct_sremSmtlib
+  -- *** Arithmetic (LLVM overflow flags)
+  , correct_addNuw
+  , correct_addNsw
+  , correct_addNswNuw
+  , correct_subNuw
+  , correct_subNsw
+  , correct_subNswNuw
+  , correct_mulNuw
+  , correct_mulNsw
+  , correct_mulNswNuw
+  , correct_shlNuw
+  , correct_shlNsw
+  , correct_shlNswNuw
+  , correct_udivExact
+  , correct_sdivExact
+  , correct_lshrExact
+  , correct_ashrExact
+  , addNuwDominatesAdd
+  , addNswDominatesAdd
+  , addNswNuwDominatesAdd
+  , subNuwDominatesSub
+  , subNswDominatesSub
+  , subNswNuwDominatesSub
+  , mulNuwDominatesMul
+  , mulNswDominatesMul
+  , mulNswNuwDominatesMul
+  , shlNuwDominatesShl
+  , shlNswDominatesShl
+  , shlNswNuwDominatesShl
+  , udivExactDominatesUdiv
+  , sdivExactDominatesSdiv
+  , lshrExactDominatesLshr
+  , ashrExactDominatesAshr
+  , addNswNuwRefinesNsw
+  , addNswNuwRefinesNuw
+  , subNswNuwRefinesNsw
+  , subNswNuwRefinesNuw
+  , mulNswNuwRefinesNsw
+  , mulNswNuwRefinesNuw
+  , shlNswNuwRefinesNsw
+  , shlNswNuwRefinesNuw
   -- ** Bitwise operations
   , correct_not
   , correct_and
@@ -3215,6 +3274,511 @@ sdivByZeroStrides w a =
 
 sremSmtlib :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 sremSmtlib w = liftArith2 w (A.sremSmtlib w)
+
+-- ------------------------------------------------------------------
+-- ** Arithmetic (LLVM overflow flags)
+
+-- $llvmFlags
+--
+-- Variants of the arithmetic operations that incorporate LLVM's overflow flags
+-- (@nsw@\/@nuw@) and exactness flag (@exact@). Under LLVM semantics, an
+-- operation tagged with one of these flags produces @poison@ on every operand
+-- pair that would violate the corresponding constraint:
+--
+--   * @nuw@ on @add@\/@sub@\/@mul@\/@shl@: result is @poison@ when the
+--     /unsigned/ infinite-precision result is outside @[0, 2^w)@.
+--   * @nsw@ on the same ops: @poison@ when the /signed/ infinite-precision
+--     result is outside @[-2^(w-1), 2^(w-1))@.
+--   * @exact@ on @udiv@\/@sdiv@: @poison@ when the dividend is not an exact
+--     multiple of the divisor.
+--   * @exact@ on @lshr@\/@ashr@: @poison@ when any non-zero bit is shifted
+--     out.
+--
+-- Following LLVM's own value-range analyses ('ConstantRange::addWithNoWrap',
+-- 'KnownBits::computeForAddSub', etc.), our transfer functions /refine/ using
+-- the flag: the result abstracts only those concrete pairs that satisfy the
+-- constraint, treating violating pairs as unreachable (poison ⇒ undefined
+-- behaviour ⇒ dead path). Concretely, for each function below:
+--
+-- @
+-- gamma(opFlag a b) ⊇ { a `op` b mod 2^w | a ∈ gamma(a), b ∈ gamma(b), constraint(a,b) }
+-- @
+--
+-- This is strictly tighter than the unflagged transfer function: every
+-- flagged variant 'leq's the unflagged one (see the corresponding
+-- @<op>FlagDominates<op>@ properties).
+--
+-- Each function returns a 'Maybe': 'Nothing' indicates that /every/ concrete
+-- operand pair would violate the constraint, so the program point is
+-- unreachable (the abstract result is bottom). Callers can propagate this
+-- as dead-code information; passing it to e.g. 'pseudoMeet' achieves the
+-- same effect lattice-theoretically.
+
+-- | The integer step-arc obtained by intersecting the integer arc
+-- @{lo + k·d | 0 ≤ k ≤ (hi - lo)\/d}@ with the integer interval
+-- @[rangeLo, rangeHi]@. Returns @Just (lo', hi')@ with @lo' ≤ hi'@ and
+-- @d | (hi' - lo')@, or @Nothing@ if no element of the original arc lies
+-- in the interval.
+--
+-- Precondition: @d > 0@ and @d@ divides @hi - lo@. (When the arc is a
+-- singleton, @lo = hi@; we set @d = 1@ and either accept or reject.)
+restrictArc ::
+  Integer {- ^ arc lo -} -> Integer {- ^ arc hi -} ->
+  Integer {- ^ stride d > 0 -} ->
+  Integer {- ^ rangeLo -} -> Integer {- ^ rangeHi -} ->
+  Maybe (Integer, Integer)
+restrictArc lo hi d rangeLo rangeHi =
+  assert (d > 0) $
+  assert (lo <= hi) $
+  assert ((hi - lo) `mod` d == 0) $
+  let kMin = max 0 (((rangeLo - lo) + d - 1) `Prelude.div` d)  -- ceil
+      kMax = min ((hi - lo) `Prelude.div` d) ((rangeHi - lo) `Prelude.div` d)
+  in if kMin > kMax
+       then Nothing
+       else Just (lo + kMin * d, lo + kMax * d)
+
+-- | Build a strides progression from a non-wrapping integer arc
+-- @[lo, hi]@ with positive integer step @d@. The arc is required to fit
+-- entirely within an unsigned @w@-bit window — i.e. @hi - lo < 2^w@.
+-- Negative @lo@ is fine; values are reduced via 'asN'. When @lo = hi@
+-- (a singleton arc) the @d@ argument is ignored, since 'mk' canonicalizes
+-- singletons to stride 1.
+fromIntArc ::
+  (1 <= w) =>
+  NatRepr w -> Integer -> Integer -> Integer -> Domain w
+fromIntArc w lo hi d =
+  assert (d > 0) $
+  assert (lo <= hi) $
+  assert ((hi - lo) `mod` d == 0) $
+  let !m = integerToNatural (maxUnsigned w)
+  in assert (toInteger m >= hi - lo) $
+     if lo == hi
+       then mk w (asN w lo) 1 0  -- singleton: stride irrelevant
+       else assert (toInteger m >= d) $
+            mk w (asN w lo) (fromInteger d) (fromInteger ((hi - lo) `Prelude.div` d))
+
+-- | Combine a list of refined arcs into a single 'Maybe (Domain w)' by
+-- pseudo-joining; @Nothing@ if the list is empty.
+joinArcs :: (1 <= w) => NatRepr w -> [Domain w] -> Maybe (Domain w)
+joinArcs w = \case
+  []     -> Nothing
+  (c:cs) -> Just (Prelude.foldr (pseudoJoin w) c cs)
+
+-- | The bounds @(lo, hi)@ of the unsigned-non-wrap range @[0, 2^w - 1]@,
+-- as integers.
+unsignedRange :: NatRepr w -> (Integer, Integer)
+unsignedRange w = (0, maxUnsigned w)
+
+-- | The bounds @(lo, hi)@ of the signed range @[-2^(w-1), 2^(w-1) - 1]@,
+-- as integers.
+signedRange :: (1 <= w) => NatRepr w -> (Integer, Integer)
+signedRange w = (NR.minSigned w, NR.maxSigned w)
+
+-- | Restrict each non-wrap-mod-@2^w@ piece of @a × b@ to the integer range
+-- @[rLo, rHi]@ via 'restrictArc', combining sub-results with 'pseudoJoin'.
+--
+-- @arcOf@ extracts the integer endpoints of each piece (e.g. 'arcUBounds'
+-- for @nuw@; signed endpoints for @nsw@).
+--
+-- @pieceStride@ is the integer step @d@ of the resulting arc, computed from
+-- the two operand pieces. It must be positive on each call where
+-- @lo < hi@; for singletons (@lo = hi@) it can be @0@ and we treat the
+-- piece as a single point.
+addSubRefined ::
+  (1 <= w) =>
+  NatRepr w ->
+  -- | Per-piece pair: @(arcLo, arcHi, stride)@ for the integer-arithmetic
+  -- result of pairing one ssplit/nsplit piece of @a@ with one of @b@.
+  [(Integer, Integer, Integer)] ->
+  -- | Legal output range
+  (Integer, Integer) ->
+  Maybe (Domain w)
+addSubRefined w pieces (rLo, rHi) =
+  joinArcs w
+    [ fromIntArc w lo' hi' (max d 1)
+    | (lo, hi, d) <- pieces
+    , (lo', hi') <- maybe [] (:[]) (restrictArc lo hi (max d 1) rLo rHi)
+    ]
+
+-- | Per-piece (lo, hi, d) for 'add': for non-wrap pieces @ai, bj@ the
+-- integer-arithmetic sum spans @[start ai + start bj, end ai + end bj]@
+-- with step @gcd(stride ai, stride bj)@ (singletons skipped).
+--
+-- @splitOp@ is the splitter ('ssplit' for nuw — pieces don't wrap
+-- unsigned; 'signPieces' for nsw — pieces are also sign-coherent so the
+-- signed arc has @lo ≤ hi@). @arcOf@ is the integer-arc representative
+-- ('arcUBoundsI' or 'arcSBounds w'), matched to the splitter.
+addPieces :: (1 <= w) => Domain w -> Domain w ->
+  (Domain w -> [Domain w]) ->
+  (Domain w -> (Integer, Integer)) ->
+  [(Integer, Integer, Integer)]
+addPieces a b splitOp arcOf =
+  [ (alo + blo, ahi + bhi, d)
+  | ai <- splitOp a
+  , bj <- splitOp b
+  , let (alo, ahi) = arcOf ai
+        (blo, bhi) = arcOf bj
+        d = case (n ai, n bj) of
+              (0, 0) -> 0  -- both singletons
+              (0, _) -> toInteger (stride bj)
+              (_, 0) -> toInteger (stride ai)
+              _      -> Prelude.gcd (toInteger (stride ai)) (toInteger (stride bj))
+  ]
+
+-- | Per-piece (lo, hi, d) for 'sub': mirrors 'addPieces' but with the
+-- difference @[alo - bhi, ahi - blo]@.
+subPieces :: (1 <= w) => Domain w -> Domain w ->
+  (Domain w -> [Domain w]) ->
+  (Domain w -> (Integer, Integer)) ->
+  [(Integer, Integer, Integer)]
+subPieces a b splitOp arcOf =
+  [ (alo - bhi, ahi - blo, d)
+  | ai <- splitOp a
+  , bj <- splitOp b
+  , let (alo, ahi) = arcOf ai
+        (blo, bhi) = arcOf bj
+        d = case (n ai, n bj) of
+              (0, 0) -> 0
+              (0, _) -> toInteger (stride bj)
+              (_, 0) -> toInteger (stride ai)
+              _      -> Prelude.gcd (toInteger (stride ai)) (toInteger (stride bj))
+  ]
+
+-- | The unsigned arc @[start, end]@ of a non-wrap-mod-@2^w@ piece, as
+-- integers.
+arcUBoundsI :: Domain w -> (Integer, Integer)
+arcUBoundsI c =
+  let (lo, hi) = arcUBounds c
+  in (toInteger lo, toInteger hi)
+
+-- | The signed arc of a non-wrap-mod-@2^w@, sign-coherent piece, as
+-- integers. Pieces in the upper bitvector half are shifted to their
+-- negative-signed representation.
+arcSBounds :: (1 <= w) => NatRepr w -> Domain w -> (Integer, Integer)
+arcSBounds w c =
+  let (lo, hi) = arcUBounds c
+  in (toSigned w (toInteger lo), toSigned w (toInteger hi))
+
+-- | Per-piece (lo, hi, d) for 'mul': for non-wrap pieces @ai, bj@ the
+-- integer product spans the corner arc with step
+-- 'cornerProductStride'. Singletons fold their contribution into the
+-- non-singleton stride.
+mulPieces ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w ->
+  -- | Splitting strategy ('ssplit' for nuw, 'signPieces' for nsw).
+  (Domain w -> [Domain w]) ->
+  -- | Integer-arc representative ('arcUBoundsI' or 'arcSBounds w').
+  (Domain w -> (Integer, Integer)) ->
+  [(Integer, Integer, Integer)]
+mulPieces _w a b splitOp arcOf =
+  [ (lo, hi, dInt)
+  | ai <- splitOp a
+  , bj <- splitOp b
+  , let (al, ah) = arcOf ai
+        (bl, bh) = arcOf bj
+        (lo, hi) = cornerArc al ah bl bh
+        dInt     = cornerProductStride ai bj al bl
+  ]
+
+-- | Combine the arc-refined flagged result @r@ with the unflagged transfer
+-- @u@ to ensure the final answer is at least as tight as the unflagged
+-- op. Both @r@ and @u@ are sound abstractions of the no-overflow concrete
+-- result set (since no-overflow ⊆ full, every sound abstraction of the
+-- full set is also sound for the no-overflow subset). 'pseudoMeet' gives
+-- the most precise combination; when it isn't a true lower bound (the
+-- wrapping case where it's sound but not contained in either operand),
+-- we fall back to whichever of @r@\/@u@ already 'leq's the other —
+-- guaranteeing dominance over the unflagged op by construction.
+meetUnflagged ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Maybe (Domain w) -> Maybe (Domain w)
+meetUnflagged _ _ Nothing  = Nothing
+meetUnflagged w u (Just r) =
+  case pseudoMeet w u r of
+    Just m | leq m u && leq m r -> Just m  -- true lower bound
+    _ -> Just (if leq r u then r else u)   -- dominance fallback
+
+-- | Combine two flagged results @r1@, @r2@ (both @Maybe@). 'Nothing'
+-- propagates (any flag's constraint failing rules out the entire pair).
+-- Otherwise: 'pseudoMeet' is preferred when it is a true lower bound (the
+-- non-wrap regime); otherwise we pick the smaller-cardinality of the two
+-- (or 'pseudoMeet' if it is itself smaller and sound).
+combineFlags ::
+  (1 <= w) =>
+  NatRepr w -> Maybe (Domain w) -> Maybe (Domain w) -> Maybe (Domain w)
+combineFlags _ Nothing  _        = Nothing
+combineFlags _ _        Nothing  = Nothing
+combineFlags w (Just r1) (Just r2) =
+  case pseudoMeet w r1 r2 of
+    Just m | leq m r1 && leq m r2 -> Just m
+    Just m -> Just (smallestBySize m r1 r2)
+    Nothing -> Just (if size r1 <= size r2 then r1 else r2)
+  where
+    smallestBySize x y z =
+      if size x <= size y && size x <= size z then x
+      else if size y <= size z then y
+      else z
+
+-- | /O(M(w))/. Unsigned addition with the @nuw@ flag: the result abstracts
+-- only those operand pairs whose sum fits in @[0, 2^w)@. Returns @Nothing@
+-- when every concrete pair overflows.
+addNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+addNuw w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (add w a b) $
+    addSubRefined w (addPieces a b (ssplit w) arcUBoundsI) (unsignedRange w)
+
+-- | /O(M(w))/. Signed addition with the @nsw@ flag: the result abstracts
+-- only those operand pairs whose signed sum fits in
+-- @[-2^(w-1), 2^(w-1))@. Returns @Nothing@ when every concrete pair
+-- overflows.
+addNsw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+addNsw w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (add w a b) $
+    addSubRefined w (addPieces a b (signPieces w) (arcSBounds w)) (signedRange w)
+
+-- | /O(M(w))/. Addition with both @nsw@ and @nuw@ — the result abstracts
+-- only pairs whose signed and unsigned sums both fit in range.
+addNswNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+addNswNuw w a b = combineFlags w (addNsw w a b) (addNuw w a b)
+
+-- | /O(M(w))/. Subtraction with the @nuw@ flag.
+subNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+subNuw w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (sub w a b) $
+    addSubRefined w (subPieces a b (ssplit w) arcUBoundsI) (unsignedRange w)
+
+-- | /O(M(w))/. Subtraction with the @nsw@ flag.
+subNsw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+subNsw w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (sub w a b) $
+    addSubRefined w (subPieces a b (signPieces w) (arcSBounds w)) (signedRange w)
+
+-- | /O(M(w))/. Subtraction with both @nsw@ and @nuw@.
+subNswNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+subNswNuw w a b = combineFlags w (subNsw w a b) (subNuw w a b)
+
+-- | /O(G(w))/. Multiplication with the @nuw@ flag.
+mulNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+mulNuw w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (mul w a b) $
+    addSubRefined w (mulPieces w a b (ssplit w) arcUBoundsI) (unsignedRange w)
+
+-- | /O(G(w))/. Multiplication with the @nsw@ flag.
+mulNsw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+mulNsw w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (mul w a b) $
+    addSubRefined w (mulPieces w a b (signPieces w) (arcSBounds w)) (signedRange w)
+
+-- | /O(G(w))/. Multiplication with both @nsw@ and @nuw@.
+mulNswNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+mulNswNuw w a b = combineFlags w (mulNsw w a b) (mulNuw w a b)
+
+-- | /O(M(w))/. Logical shift-left with the @nuw@ flag: the result abstracts
+-- only those operand pairs @(x, k)@ for which @x << k@ fits in @[0, 2^w)@
+-- as an unsigned integer (equivalently, the top @k@ bits of @x@ are zero).
+--
+-- Implementation: shl is multiplication by a power of two, so reduce to
+-- 'mulNuw' on @a × {2^k | k ∈ b}@. Like 'shlRaw', shift counts at or above
+-- @w@ would force every result to zero (or overflow), but here we instead
+-- consult the unsigned range directly. The result is pseudo-meet'd with
+-- 'shl' so the flagged variant is at least as tight as the unflagged op.
+shlNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+shlNuw w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (shl w a b) $
+    case shlPow2Operand w b of
+      Nothing -> Nothing  -- every shift count is >= w
+      Just c  -> mulNuw w a c
+
+-- | /O(M(w))/. Shift-left with the @nsw@ flag: the result abstracts only
+-- those pairs for which the signed shift result fits in
+-- @[-2^(w-1), 2^(w-1))@ — equivalently, the top @k+1@ bits of @x@ are
+-- all the same.
+--
+-- Implementation note: unlike 'shlNuw' (which composes cleanly with
+-- 'mulNuw' since @2^y@ has the same value unsigned and as a positive
+-- integer), 'shlNsw' cannot delegate to 'mulNsw': for @y = w-1@ the
+-- multiplier @2^(w-1)@ has the sign bit set, so its bitvector signed
+-- interpretation is @-2^(w-1)@ rather than @+2^(w-1)@, and the constraint
+-- @x_s * c_s in nsw range@ disagrees with the actual @x_s * 2^y in nsw
+-- range@. We therefore iterate over each shift count separately, restricting
+-- @a@'s signed arc to the surviving values for that count, and union.
+shlNsw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+shlNsw w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (shl w a b) (shlNswArcRefine w a b)
+
+-- | Direct arc-based refinement for 'shlNsw': for each shift count @y@ in
+-- @b@'s range and each sign-coherent piece of @a@, compute the integer
+-- shifted arc, restrict to the signed range, and union the results.
+shlNswArcRefine ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+shlNswArcRefine w a b =
+  let (l_b, u_b) = A.ubounds (toArith b)
+      wInt = NR.intValue w
+      lY  = l_b
+      uY  = min u_b (wInt - 1)
+      ys  = [lY .. uY]
+      pieces =
+        [ fromIntArc w lo' hi' (max d 1)
+        | y <- ys
+        , let mult = 1 `Bits.shiftL` fromInteger y :: Integer
+        , ai <- signPieces w a
+        , let (alo, ahi) = arcSBounds w ai
+              sa         = toInteger (stride ai)
+              shiftedLo  = alo * mult
+              shiftedHi  = ahi * mult
+              d          = if n ai == 0 then 0 else sa * mult
+              (rLo, rHi) = signedRange w
+        , (lo', hi') <- maybe [] (:[]) (restrictArc shiftedLo shiftedHi (max d 1) rLo rHi)
+        ]
+      tooHigh =
+        if l_b >= wInt && member a 0
+          then [mk w 0 1 0]  -- shift counts ≥ w with x = 0 give 0 (no overflow)
+          else []
+  in joinArcs w (pieces ++ tooHigh)
+
+-- | /O(M(w))/. Shift-left with both @nsw@ and @nuw@.
+shlNswNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+shlNswNuw w a b = combineFlags w (shlNsw w a b) (shlNuw w a b)
+
+-- | The progression @{2^k | k ∈ b, k < w}@, used to reduce 'shl' to 'mul'.
+-- Returns @Nothing@ when /every/ shift count is at least @w@ (the result
+-- would overflow under any flag, modulo the all-zero special case which
+-- the unsigned range catches).
+shlPow2Operand :: (1 <= w) => NatRepr w -> Domain w -> Maybe (Domain w)
+shlPow2Operand w b =
+  let wInt = NR.intValue w
+      (l_b, u_b) = A.ubounds (toArith b)
+  in if l_b >= wInt
+       then Nothing
+       else
+         let !u_b' = min u_b (wInt - 1)
+             !cStride = (1 :: Natural) `shiftL` fromInteger l_b
+             !cN      = ((1 :: Natural) `shiftL` fromInteger (u_b' - l_b)) - 1
+         in Just (mk w cStride cStride cN)
+
+-- | /O(M(w))/. Unsigned division with the @exact@ flag: the result abstracts
+-- only those pairs @(x, y)@ with @y \/= 0@ for which @x@ is an exact
+-- multiple of @y@ (i.e. @x \`rem\` y = 0@). Returns @Nothing@ when no
+-- concrete pair satisfies the constraint (e.g. when @b = {0}@).
+udivExact ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+udivExact w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (udiv w a b) $
+    case nonZero b of
+      Nothing -> Nothing  -- divisor is exactly {0}
+      Just b' -> Just (udiv w a b')
+
+-- | /O(M(w))/. Signed division with the @exact@ flag.
+sdivExact ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+sdivExact w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (sdiv w a b) $
+    case nonZero b of
+      Nothing -> Nothing
+      Just b' -> Just (sdiv w a b')
+
+-- | The divisor with the value @0@ removed, or @Nothing@ if @b = {0}@.
+-- For non-singleton @b@ that contains @0@ (only possible when stride
+-- divides @start@), we conservatively keep the operand as-is; the
+-- @exact@ flag promises only that the chosen non-zero divisor satisfies
+-- the constraint, so the abstract output is sound.
+nonZero :: Domain w -> Maybe (Domain w)
+nonZero b
+  | isSingletonZero b = Nothing
+  | otherwise         = Just b
+
+-- | /O(M(w))/. Logical right shift with the @exact@ flag: the result
+-- abstracts only those pairs @(x, k)@ for which the bottom @k@ bits of
+-- @x@ are all zero.
+--
+-- We implement this as a refinement of 'lshr': any concrete @lshr-exact@
+-- pair has the same numerical result as @lshr@, so 'lshr' is sound; the
+-- additional precision comes from observing that the result must be a
+-- multiple of @1@ (it is, trivially), but the operand pair is restricted.
+-- Using the relation @x = (x >> k) << k@ when exact, we know @x@ is a
+-- multiple of @2^k@; for a known-shift @k@, we can compute @a \/ 2^k@
+-- exactly. We restrict to the singleton-shift fast path here; for
+-- non-singleton shift counts, we fall back to plain 'lshr'.
+lshrExact ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+lshrExact w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (lshr w a b) $
+    case asConstantShift w b of
+      Nothing -> Just (lshr w a b)  -- conservative fallback
+      Just k
+        | k == 0 -> Just a
+        | k >= NR.intValue w ->
+            -- Every x in [0, 2^w) shifts to 0; exact iff x = 0.
+            if member a 0 then Just (mk w 0 1 0) else Nothing
+        | otherwise ->
+            -- Refine a to its multiples of 2^k, then shift.
+            case restrictMultiplesOfPow2 w a (fromInteger k) of
+              Nothing -> Nothing
+              Just a' -> Just (lshr w a' (mk w (fromInteger k) 1 0))
+
+-- | /O(M(w))/. Arithmetic right shift with the @exact@ flag.
+ashrExact ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+ashrExact w a b =
+  assert (proper a) $ assert (proper b) $
+  meetUnflagged w (ashr w a b) $
+    case asConstantShift w b of
+      Nothing -> Just (ashr w a b)
+      Just k
+        | k == 0 -> Just a
+        | k >= NR.intValue w ->
+            -- Every x in [0, 2^w) ashr-shifts to 0 or -1 depending on sign,
+            -- but for exact shift we require x = 0 (or x = -1 with k > 0
+            -- gives -1 → -1, which is also exact since the top bit is the
+            -- shifted-out value matching the sign). We accept x = 0 only;
+            -- this is conservative-sound.
+            if member a 0 then Just (mk w 0 1 0) else Nothing
+        | otherwise ->
+            case restrictMultiplesOfPow2 w a (fromInteger k) of
+              Nothing -> Nothing
+              Just a' -> Just (ashr w a' (mk w (fromInteger k) 1 0))
+
+-- | Extract a constant shift amount from @b@ when it is a singleton, as
+-- an 'Integer'.
+asConstantShift :: NatRepr w -> Domain w -> Maybe Integer
+asConstantShift _w b
+  | n b == 0 = Just (toInteger (start b))
+  | otherwise = Nothing
+
+-- | Restrict @a@ to those of its members that are multiples of @2^k@,
+-- as a strides progression. Returns @Nothing@ when no member satisfies
+-- the constraint.
+restrictMultiplesOfPow2 ::
+  (1 <= w) => NatRepr w -> Domain w -> Int -> Maybe (Domain w)
+restrictMultiplesOfPow2 w a k =
+  let !pow2k = (1 :: Natural) `shiftL` k
+      !m     = mask a
+      !orbitN = orbitLenOf m pow2k - 1
+  in pseudoMeet w a (mk w 0 pow2k orbitN)
 
 -- | The progression whose elements are exactly those of @arith@ that lie in the
 -- @g@-coset of @start'@, where @g = lowestSetBit d@. Strictly tighter than
@@ -7635,6 +8199,406 @@ correct_sremSmtlib w a x b y =
     xs = toSigned w (toInteger x)
     ys = toSigned w (toInteger y)
     z  = if ys == 0 then xs else xs `rem` ys
+
+-- ------------------------------------------------------------------
+-- *** Arithmetic (LLVM overflow flags)
+
+-- | Helper: a flagged-op result must contain the concrete result @z@ when it
+-- is @Just@; if it is @Nothing@, the flag's constraint must have been
+-- violated by the concrete pair (else soundness fails).
+flaggedSound ::
+  Maybe (Domain w) -> Bool -> Natural -> Bool
+flaggedSound r constraintHolds z = case r of
+  Nothing -> Prelude.not constraintHolds
+  Just d  -> Prelude.not constraintHolds || member d z
+
+-- | Soundness of 'addNuw': for any @x ∈ a@, @y ∈ b@ whose unsigned sum
+-- doesn't overflow, the unsigned sum is in the abstract result.
+correct_addNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_addNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (addNuw w a b) noOverflow z)
+  where
+    sumI = toInteger x + toInteger y
+    noOverflow = sumI <= maxUnsigned w
+    z = asN w sumI
+
+-- | Soundness of 'addNsw': for any @x ∈ a@, @y ∈ b@ whose signed sum
+-- doesn't overflow, the result is in the abstract result.
+correct_addNsw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_addNsw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (addNsw w a b) noOverflow z)
+  where
+    xs = toSigned w (toInteger x)
+    ys = toSigned w (toInteger y)
+    sumS = xs + ys
+    noOverflow = NR.minSigned w <= sumS && sumS <= NR.maxSigned w
+    z = asN w sumS
+
+-- | Soundness of 'addNswNuw'.
+correct_addNswNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_addNswNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (addNswNuw w a b) noOverflow z)
+  where
+    xs = toSigned w (toInteger x)
+    ys = toSigned w (toInteger y)
+    sumI = toInteger x + toInteger y
+    sumS = xs + ys
+    nuw = sumI <= maxUnsigned w
+    nsw = NR.minSigned w <= sumS && sumS <= NR.maxSigned w
+    noOverflow = nuw && nsw
+    z = asN w sumI
+
+correct_subNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_subNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (subNuw w a b) noOverflow z)
+  where
+    diffI = toInteger x - toInteger y
+    noOverflow = diffI >= 0
+    z = asN w diffI
+
+correct_subNsw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_subNsw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (subNsw w a b) noOverflow z)
+  where
+    xs = toSigned w (toInteger x)
+    ys = toSigned w (toInteger y)
+    diffS = xs - ys
+    noOverflow = NR.minSigned w <= diffS && diffS <= NR.maxSigned w
+    z = asN w diffS
+
+correct_subNswNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_subNswNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (subNswNuw w a b) noOverflow z)
+  where
+    xs = toSigned w (toInteger x)
+    ys = toSigned w (toInteger y)
+    diffI = toInteger x - toInteger y
+    diffS = xs - ys
+    nuw = diffI >= 0
+    nsw = NR.minSigned w <= diffS && diffS <= NR.maxSigned w
+    noOverflow = nuw && nsw
+    z = asN w diffI
+
+correct_mulNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_mulNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (mulNuw w a b) noOverflow z)
+  where
+    prodI = toInteger x * toInteger y
+    noOverflow = prodI <= maxUnsigned w
+    z = asN w prodI
+
+correct_mulNsw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_mulNsw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (mulNsw w a b) noOverflow z)
+  where
+    xs = toSigned w (toInteger x)
+    ys = toSigned w (toInteger y)
+    prodS = xs * ys
+    noOverflow = NR.minSigned w <= prodS && prodS <= NR.maxSigned w
+    z = asN w prodS
+
+correct_mulNswNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_mulNswNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (mulNswNuw w a b) noOverflow z)
+  where
+    xs = toSigned w (toInteger x)
+    ys = toSigned w (toInteger y)
+    prodI = toInteger x * toInteger y
+    prodS = xs * ys
+    nuw = prodI <= maxUnsigned w
+    nsw = NR.minSigned w <= prodS && prodS <= NR.maxSigned w
+    noOverflow = nuw && nsw
+    z = asN w prodI
+
+correct_shlNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_shlNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (shlNuw w a b) noOverflow z)
+  where
+    yI = toInteger y
+    shifted = toInteger x * (1 `Bits.shiftL` fromInteger yI)
+    noOverflow = yI < NR.intValue w && shifted <= maxUnsigned w
+    z = asN w shifted
+
+correct_shlNsw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_shlNsw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (shlNsw w a b) noOverflow z)
+  where
+    yI = toInteger y
+    xs = toSigned w (toInteger x)
+    shiftedS = xs * (1 `Bits.shiftL` fromInteger yI)
+    noOverflow = yI < NR.intValue w
+              && NR.minSigned w <= shiftedS
+              && shiftedS <= NR.maxSigned w
+    z = asN w shiftedS
+
+correct_shlNswNuw ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_shlNswNuw w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (shlNswNuw w a b) noOverflow z)
+  where
+    yI = toInteger y
+    xs = toSigned w (toInteger x)
+    shifted = toInteger x * (1 `Bits.shiftL` fromInteger yI)
+    shiftedS = xs * (1 `Bits.shiftL` fromInteger yI)
+    nuw = yI < NR.intValue w && shifted <= maxUnsigned w
+    nsw = yI < NR.intValue w
+       && NR.minSigned w <= shiftedS
+       && shiftedS <= NR.maxSigned w
+    noOverflow = nuw && nsw
+    z = asN w shifted
+
+correct_udivExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_udivExact w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (udivExact w a b) constraintHolds z)
+  where
+    constraintHolds = y /= 0 && x `rem` y == 0
+    z = if y == 0 then 0 else x `quot` y
+
+correct_sdivExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_sdivExact w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (sdivExact w a b) constraintHolds z)
+  where
+    xs = toSigned w (toInteger x)
+    ys = toSigned w (toInteger y)
+    constraintHolds = ys /= 0 && xs `rem` ys == 0
+    z = if ys == 0 then 0 else asN w (xs `quot` ys)
+
+correct_lshrExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_lshrExact w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (lshrExact w a b) constraintHolds z)
+  where
+    yI = fromInteger (min (toInteger y) (NR.intValue w)) :: Int
+    -- Exact constraint: bottom yI bits of x are zero (so no 1 shifted out).
+    constraintHolds = x Bits..&. ((1 `Bits.shiftL` yI) - 1) == 0
+    z = x `Bits.shiftR` yI
+
+correct_ashrExact ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_ashrExact w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (flaggedSound (ashrExact w a b) constraintHolds z)
+  where
+    yI = fromInteger (min (toInteger y) (NR.intValue w)) :: Int
+    constraintHolds = x Bits..&. ((1 `Bits.shiftL` yI) - 1) == 0
+    xs = toSigned w (toInteger x)
+    z = asN w (xs `Bits.shiftR` yI)
+
+-- *** Dominance: flagged variants are at least as precise as the unflagged op.
+
+-- | Helper: a flagged variant returning @Just r@ implies @r@ is @leq@ the
+-- unflagged result (i.e. abstracts no more values).
+dominates :: (1 <= w) => Maybe (Domain w) -> Domain w -> Bool
+dominates Nothing  _ = True
+dominates (Just r) u = leq r u
+
+-- | Helper: like 'dominates' but uses cardinality. Used for the combined
+-- @nsw+nuw@ dominance properties, where 'pseudoMeet' (the building block
+-- in 'combineFlags') is sound but not always a true lower bound on
+-- wrapping operands; size-dominance still holds because we pick the
+-- size-min of meet and operand candidates.
+dominatesBySize :: (1 <= w) => Maybe (Domain w) -> Domain w -> Bool
+dominatesBySize Nothing  _ = True
+dominatesBySize (Just r) u = size r <= size u
+
+addNuwDominatesAdd ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addNuwDominatesAdd w a b =
+  proper a ==> proper b ==>
+    property (dominates (addNuw w a b) (add w a b))
+
+addNswDominatesAdd ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addNswDominatesAdd w a b =
+  proper a ==> proper b ==>
+    property (dominates (addNsw w a b) (add w a b))
+
+addNswNuwDominatesAdd ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addNswNuwDominatesAdd w a b =
+  proper a ==> proper b ==>
+    property (dominatesBySize (addNswNuw w a b) (add w a b))
+
+subNuwDominatesSub ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+subNuwDominatesSub w a b =
+  proper a ==> proper b ==>
+    property (dominates (subNuw w a b) (sub w a b))
+
+subNswDominatesSub ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+subNswDominatesSub w a b =
+  proper a ==> proper b ==>
+    property (dominates (subNsw w a b) (sub w a b))
+
+subNswNuwDominatesSub ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+subNswNuwDominatesSub w a b =
+  proper a ==> proper b ==>
+    property (dominatesBySize (subNswNuw w a b) (sub w a b))
+
+mulNuwDominatesMul ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+mulNuwDominatesMul w a b =
+  proper a ==> proper b ==>
+    property (dominates (mulNuw w a b) (mul w a b))
+
+mulNswDominatesMul ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+mulNswDominatesMul w a b =
+  proper a ==> proper b ==>
+    property (dominates (mulNsw w a b) (mul w a b))
+
+mulNswNuwDominatesMul ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+mulNswNuwDominatesMul w a b =
+  proper a ==> proper b ==>
+    property (dominatesBySize (mulNswNuw w a b) (mul w a b))
+
+shlNuwDominatesShl ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+shlNuwDominatesShl w a b =
+  proper a ==> proper b ==>
+    property (dominates (shlNuw w a b) (shl w a b))
+
+shlNswDominatesShl ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+shlNswDominatesShl w a b =
+  proper a ==> proper b ==>
+    property (dominates (shlNsw w a b) (shl w a b))
+
+shlNswNuwDominatesShl ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+shlNswNuwDominatesShl w a b =
+  proper a ==> proper b ==>
+    property (dominatesBySize (shlNswNuw w a b) (shl w a b))
+
+udivExactDominatesUdiv ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+udivExactDominatesUdiv w a b =
+  proper a ==> proper b ==>
+    property (dominates (udivExact w a b) (udiv w a b))
+
+sdivExactDominatesSdiv ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+sdivExactDominatesSdiv w a b =
+  proper a ==> proper b ==>
+    property (dominates (sdivExact w a b) (sdiv w a b))
+
+lshrExactDominatesLshr ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+lshrExactDominatesLshr w a b =
+  proper a ==> proper b ==>
+    property (dominates (lshrExact w a b) (lshr w a b))
+
+ashrExactDominatesAshr ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+ashrExactDominatesAshr w a b =
+  proper a ==> proper b ==>
+    property (dominates (ashrExact w a b) (ashr w a b))
+
+-- | Helper: a combined nsw+nuw result, when @Just@, is no larger by
+-- cardinality than the corresponding single-flag result. We use
+-- size-dominance rather than 'leq' here because the underlying
+-- 'pseudoMeet' is sound but not always a true lower bound when operands
+-- wrap mod @2^w@; on those inputs the combined and single-flag results
+-- can be incomparable under 'leq' yet still satisfy size-dominance.
+refines :: (1 <= w) => Maybe (Domain w) -> Maybe (Domain w) -> Bool
+refines Nothing  _        = True   -- combined says the path is dead; fine
+refines (Just _) Nothing  = False  -- combined claims live; single-flag claims dead — contradiction
+refines (Just r) (Just s) = size r <= size s
+
+addNswNuwRefinesNsw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addNswNuwRefinesNsw w a b =
+  proper a ==> proper b ==>
+    property (refines (addNswNuw w a b) (addNsw w a b))
+
+addNswNuwRefinesNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+addNswNuwRefinesNuw w a b =
+  proper a ==> proper b ==>
+    property (refines (addNswNuw w a b) (addNuw w a b))
+
+subNswNuwRefinesNsw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+subNswNuwRefinesNsw w a b =
+  proper a ==> proper b ==>
+    property (refines (subNswNuw w a b) (subNsw w a b))
+
+subNswNuwRefinesNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+subNswNuwRefinesNuw w a b =
+  proper a ==> proper b ==>
+    property (refines (subNswNuw w a b) (subNuw w a b))
+
+mulNswNuwRefinesNsw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+mulNswNuwRefinesNsw w a b =
+  proper a ==> proper b ==>
+    property (refines (mulNswNuw w a b) (mulNsw w a b))
+
+mulNswNuwRefinesNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+mulNswNuwRefinesNuw w a b =
+  proper a ==> proper b ==>
+    property (refines (mulNswNuw w a b) (mulNuw w a b))
+
+shlNswNuwRefinesNsw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+shlNswNuwRefinesNsw w a b =
+  proper a ==> proper b ==>
+    property (refines (shlNswNuw w a b) (shlNsw w a b))
+
+shlNswNuwRefinesNuw ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+shlNswNuwRefinesNuw w a b =
+  proper a ==> proper b ==>
+    property (refines (shlNswNuw w a b) (shlNuw w a b))
 
 -- ------------------------------------------------------------------
 -- ** Bitwise operations
