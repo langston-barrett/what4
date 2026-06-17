@@ -632,10 +632,62 @@ zboundsArc c =
     hi = lo + sz
     m = toInteger (~ 0 : [n])
 
+// Allocation-free reformulation (mirrors the C++ port and the production
+// Haskell 'mulFromCorners'): the step-count bounds and start anchor are derived
+// from the three clpStepBound summands (p, q, r) and the signs of the low
+// corners, never forming the corner products al·bl … ah·bh or the extent
+// hi - lo (which need ~2·(2n) bits and force a heap APInt at n = 64). Each
+// corner product is c1 + dInt·off with off in {0, sa·p, sb·q, sa·p+sb·q+r}
+// (sa = signum al, sb = signum bl), so clpN = p+q+r, arcN = maxOff - minOff,
+// and lo = c1 + dInt·minOff. Proven equal to 'mulFromCornersSpec' by
+// 'mulFromCornersAgreesSpec'.
 mulFromCorners : {n} (fin n, n >= 2) =>
   Domain n -> Domain n ->
   Integer -> Integer -> Integer -> Integer -> Domain n
 mulFromCorners a b al ah bl bh =
+  if dMod == 0 then mk startV 1 0
+  else mk startV dMod (clampToOrbit dMod nRaw)
+  where
+    c1 = al * bl
+    t1 = toInteger a.stride
+    t2 = toInteger b.stride
+    na = toInteger a.n
+    nb = toInteger b.n
+    d12i = if a.n == 0 then 0 else t1 * sIntegerAbs bl
+    d21i = if b.n == 0 then 0 else t2 * sIntegerAbs al
+    d22i = if a.n == 0 \/ b.n == 0 then 0 else t1 * t2
+    dIntI = sIntegerGcd d12i (sIntegerGcd d21i d22i)
+    dMod = if dIntI == 0 then 0 else fromInteger dIntI
+    p = nb * (sIntegerQuot d21i dIntI)            // |c2 - c1| / dInt
+    q = na * (sIntegerQuot d12i dIntI)            // |c3 - c1| / dInt
+    r = na * nb * (sIntegerQuot d22i dIntI)
+    sa = iSignum al
+    sb = iSignum bl
+    o1 = sa * p
+    o2 = sb * q
+    o3 = sa * p + sb * q + r                      // corner offsets from c1 / dInt
+    minOff = min (min 0 o1) (min o2 o3)
+    maxOff = max (max 0 o1) (max o2 o3)
+    clpN = p + q + r
+    arcN = maxOff - minOff
+    loV = if dIntI == 0 then c1 else c1 + dIntI * minOff
+    startV = fromInteger (modI loV (toInteger (~ 0 : [n]) + 1))
+    // Cap before narrowing the [2*n+1]-bit step count, since clpN/arcN
+    // are unbounded Integers; 'clampToOrbit' refines further.
+    nCapped = min (min clpN arcN) (2 ^^ (`n : Integer))
+    nRaw = fromInteger nCapped : [2 * n + 1]
+
+// signum for Integer (Cryptol has no built-in).
+iSignum : Integer -> Integer
+iSignum x = if x > 0 then 1 else if x < 0 then -1 else 0
+
+// Reference specification for 'mulFromCorners': directly from the four corner
+// products. Readable form; the production 'mulFromCorners' is the bounded
+// decomposition proven equal by 'mulFromCornersAgreesSpec'.
+mulFromCornersSpec : {n} (fin n, n >= 2) =>
+  Domain n -> Domain n ->
+  Integer -> Integer -> Integer -> Integer -> Domain n
+mulFromCornersSpec a b al ah bl bh =
   if dMod == 0 then mk startV 1 0
   else mk startV dMod (clampToOrbit dMod nRaw)
   where
@@ -657,8 +709,6 @@ mulFromCorners a b al ah bl bh =
          + toInteger b.n * (sIntegerQuot d21i dIntI)
          + toInteger a.n * toInteger b.n * (sIntegerQuot d22i dIntI)
     arcN = sIntegerQuot (hi - lo) dIntI
-    // Cap before narrowing the [2*n+1]-bit step count, since clpN/arcN
-    // are unbounded Integers; 'clampToOrbit' refines further.
     nCapped = min (min clpN arcN) (2 ^^ (`n : Integer))
     nRaw = fromInteger nCapped : [2 * n + 1]
 
@@ -2972,6 +3022,25 @@ correct_mulCorners a b x y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     member (mulCorners a b) (x * y)
 
+// The production 'mulFromCorners' (bounded decomposition) equals its reference
+// 'mulFromCornersSpec' (product-based) on every corner pair 'mulCorners' uses.
+// Validates the decomposition that lets the C++ port stay in unsigned __int128
+// at n = 64 without precision loss.
+mulFromCornersAgreesSpec : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
+mulFromCornersAgreesSpec a b =
+  proper a ==> proper b ==>
+    agrees uAl uAh uBl uBh /\
+    agrees uAl uAh zBl zBh /\
+    agrees zAl zAh uBl uBh /\
+    agrees zAl zAh zBl zBh
+  where
+    (uAl, uAh) = unsignedArc a
+    (zAl, zAh) = zboundsArc a
+    (uBl, uBh) = unsignedArc b
+    (zBl, zBh) = zboundsArc b
+    agrees al ah bl bh =
+      mulFromCorners a b al ah bl bh == mulFromCornersSpec a b al ah bl bh
+
 // Each cut-piece pair's unsigned product contains every concrete pairwise
 // product of members of those pieces.
 correct_mulNoStraddleU :
@@ -3683,6 +3752,11 @@ property p_subRobustDominatesRaw = subRobustDominatesRaw`{4}
 // causes solver timeouts. The Haskell @correct_mul@ Hedgehog property
 // covers soundness empirically.
 // property p_correct_mul = correct_mul`{4}
+// Like @p_correct_mul@, @mulFromCornersAgreesSpec@ uses 'Integer' arithmetic
+// and iterated 'sIntegerGcd', which causes solver timeouts. The Haskell
+// @mulFromCornersAgreesSpec@ Hedgehog property covers the decomposition
+// equivalence empirically.
+// property p_mulFromCornersAgreesSpec = mulFromCornersAgreesSpec`{4}
 property p_correct_udiv = correct_udiv`{4}
 property p_correct_urem = correct_urem`{4}
 property p_correct_sdiv = correct_sdiv`{4}

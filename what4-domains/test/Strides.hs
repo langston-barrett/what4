@@ -350,6 +350,9 @@ tests = TT.testGroup "Strides"
   , genTest "correct_mulCorners" $
       do SW n <- genWidth
          S.correct_mulCorners n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "mulFromCornersAgreesSpec" $
+      do SW n <- genWidth
+         S.mulFromCornersAgreesSpec n <$> S.genDomain n <*> S.genDomain n
   , genTest "correct_mulNoStraddleU" $
       do SW n <- genWidth
          S.correct_mulNoStraddleU n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n

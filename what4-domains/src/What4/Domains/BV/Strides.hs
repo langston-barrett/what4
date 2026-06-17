@@ -653,6 +653,7 @@ module What4.Domains.BV.Strides
   , subRobustDominatesRaw
   , mulRobustDominatesRaw
   , correct_mulCorners
+  , mulFromCornersAgreesSpec
   , correct_mulNoStraddleU
   , correct_mulNoStraddleS
   , correct_scaleSingleton
@@ -2996,14 +2997,17 @@ zboundsArc c =
        then (lo - (m + 1), hi - (m + 1))
        else (lo, hi)
 
--- | Compute the coset progression for the integer-arc product @[al, ah] ×
--- [bl, bh]@, given operand strides from @a@ and @b@. Anchors at the integer
--- arc's lo corner.
-mulFromCorners ::
+-- | Reference specification for 'mulFromCorners': computes the coset
+-- progression for the integer-arc product @[al, ah] × [bl, bh]@ directly from
+-- the four corner products @al·bl@, …, @ah·bh@ (via 'cornerArc' /
+-- 'arcStepBound'). This is the readable form; the production 'mulFromCorners'
+-- is the allocation-free decomposition proven equal to it by
+-- 'mulFromCornersAgreesSpec'.
+mulFromCornersSpec ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w ->
   Integer -> Integer -> Integer -> Integer -> Domain w
-mulFromCorners w a b al ah bl bh =
+mulFromCornersSpec w a b al ah bl bh =
   let !(lo, hi) = cornerArc al ah bl bh
       !dIntI = cornerProductStride a b al bl
       !dMod = if dIntI == 0 then 0 else modMask a (fromInteger dIntI)
@@ -3086,6 +3090,78 @@ clpStepBound a b al bl d =
 -- @(hi − lo)/d@ stride-d steps from @lo@.
 arcStepBound :: Integer -> Integer -> Integer -> Integer
 arcStepBound lo hi d = if d == 0 then 0 else (hi - lo) `Prelude.div` d
+
+-- | Compute the coset progression for the integer-arc product @[al, ah] ×
+-- [bl, bh]@, given operand strides from @a@ and @b@. Anchors at the integer
+-- arc's lo corner.
+--
+-- This computes the step-count bounds and the start anchor /without/ forming
+-- the corner products @al·bl@, …, @ah·bh@ or the extent @hi − lo@ (which need
+-- @~2·(2w)@ bits and force a heap @APInt@ at @w = 64@ in the C++ port). The
+-- product-based form is kept as 'mulFromCornersSpec' and proven equal by
+-- 'mulFromCornersAgreesSpec'.
+--
+-- Key identity. With @al ≤ ah@, @bl ≤ bh@ and the arc widths
+-- @ah − al = n_a·t1@, @bh − bl = n_b·t2@ (true for both 'unsignedArc' and
+-- 'zboundsArc', which only shift by @2^w@), every corner product is
+--
+--   @c_ij = c1 + dInt · off@,   @c1 = al·bl@,
+--
+-- where the offset @off@ ranges over
+--
+--   @{ 0, signum al · p, signum bl · q, signum al · p + signum bl · q + r }@,
+--
+-- and @(p, q, r)@ are exactly the three 'clpStepBound' summands
+-- @p = n_b·(d21/dInt)@, @q = n_a·(d12/dInt)@, @r = n_a·n_b·(d22/dInt)@.
+-- Hence, with @lo@/@hi@ the min/max corner products,
+--
+--   * @clpStepBound = p + q + r@,
+--   * @arcStepBound = (hi − lo)/dInt = maxOff − minOff@,
+--   * @lo = c1 + dInt · minOff@,  so  @startNat = lo mod 2^w@.
+--
+-- Every quantity above is bounded by @≈ 2^w@ once min'd with the orbit cap
+-- (which 'clampToOrbit' applies anyway), so the C++ port runs entirely in
+-- @unsigned __int128@ for @w ≤ 64@ with no heap allocation and no precision
+-- loss. (In Haskell, on unbounded 'Integer', this is an algebraic restatement
+-- of 'mulFromCornersSpec'; the value is in the bounded carrier it enables.)
+mulFromCorners ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w ->
+  Integer -> Integer -> Integer -> Integer -> Domain w
+mulFromCorners w a b al ah bl bh =
+  -- Precondition (met by 'unsignedArc' \/ 'zboundsArc'): the corner widths are
+  -- exactly the operand spans, @ah − al = n_a·t1@, @bh − bl = n_b·t2@. The
+  -- decomposition reconstructs the upper corners from this, so @ah@/@bh@ are
+  -- only read in this assertion.
+  assert (ah - al == na * t1 && bh - bl == nb * t2) $
+  if dMod == 0
+    then mk w (asN w c1) 1 0
+    else
+      let !p = nb * (d21 `Prelude.div` dIntI)        -- abs(c2 - c1) / dInt
+          !q = na * (d12 `Prelude.div` dIntI)        -- abs(c3 - c1) / dInt
+          !r = na * nb * (d22 `Prelude.div` dIntI)
+          !sa = signum al
+          !sb = signum bl
+          -- corner offsets from c1, in units of dInt
+          !offs = [ 0, sa * p, sb * q, sa * p + sb * q + r ]
+          !minOff = minimum offs
+          !maxOff = maximum offs
+          !clpN = p + q + r
+          !arcN = maxOff - minOff
+          !nRaw = Prelude.min clpN arcN
+          !startNat = asN w (c1 + dIntI * minOff)
+      in mk w startNat dMod (clampToOrbit (mask a) dMod (fromInteger nRaw))
+  where
+    !t1 = toInteger (stride a)
+    !t2 = toInteger (stride b)
+    !na = toInteger (n a)
+    !nb = toInteger (n b)
+    !d12 = if n a == 0 then 0 else t1 * Prelude.abs bl
+    !d21 = if n b == 0 then 0 else t2 * Prelude.abs al
+    !d22 = if n a == 0 || n b == 0 then 0 else t1 * t2
+    !dIntI = Prelude.gcd d12 (Prelude.gcd d21 d22)
+    !dMod = if dIntI == 0 then 0 else modMask a (fromInteger dIntI)
+    !c1 = al * bl
 
 -- @{k} × (s, t, n) = (k·s, k·t, n) mod 2^w@: stride-preserving exact product.
 -- The orbit length of the result can be smaller than @c@'s when @k·t mod 2^w@
@@ -7857,6 +7933,30 @@ correct_mulCorners ::
 correct_mulCorners w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (mulCorners w a b) (asN w (toInteger x * toInteger y)))
+
+-- | The production 'mulFromCorners' (allocation-free decomposition) is /equal/
+-- to its reference 'mulFromCornersSpec' (product-based) on every corner pair
+-- 'mulCorners' uses (the 'unsignedArc' \/ 'zboundsArc' combinations). This
+-- validates the bilinear-corner decomposition that lets the C++ port stay in
+-- @unsigned __int128@ at @w = 64@ without precision loss.
+mulFromCornersAgreesSpec ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Property
+mulFromCornersAgreesSpec w a b =
+  proper a ==> proper b ==>
+    let (uAl, uAh) = unsignedArc a
+        (uBl, uBh) = unsignedArc b
+        (zAl, zAh) = zboundsArc a
+        (zBl, zBh) = zboundsArc b
+        agrees al ah bl bh =
+          mulFromCorners w a b al ah bl bh
+            == mulFromCornersSpec w a b al ah bl bh
+    in property (Prelude.and
+         [ agrees uAl uAh uBl uBh
+         , agrees uAl uAh zBl zBh
+         , agrees zAl zAh uBl uBh
+         , agrees zAl zAh zBl zBh
+         ])
 
 -- | 'mulNoStraddleU' is sound on inputs that don't straddle the unsigned
 -- boundary (its precondition, met by 'cut' pieces): every concrete product
