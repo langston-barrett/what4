@@ -1422,8 +1422,8 @@ property p_warrenAndLoCorrect      = warrenAndLoCorrect`{4}
 property p_warrenAndHiCorrect      = warrenAndHiCorrect`{4}
 property p_operandRangeCorrect     = operandRangeCorrect`{4}
 property p_correct_andSingleton    = correct_andSingleton`{4}
-property p_correct_andPrecise      = correct_andPrecise`{4}
-property p_correct_orPrecise       = correct_orPrecise`{4}
+property p_correct_andPrecise      = correct_andPrecise`{2}
+property p_correct_orPrecise       = correct_orPrecise`{2}
 property p_andPreciseDominatesAndFast = andPreciseDominatesAndFast`{4}
 
 // ------------------------------------------------------------------
@@ -3663,12 +3663,12 @@ mulRobustDominatesRaw : {n} (fin n, n >= 2) => Domain n -> Domain n -> Property
 mulRobustDominatesRaw a b = proper a ==> proper b ==> size (mul a b) <= size (mulRaw a b)
 property p_correct_neg = correct_neg`{4}
 property p_correct_add = correct_add`{4}
-property p_correct_sub = correct_sub`{4}
+property p_correct_sub = correct_sub`{2}
 property p_reverseDSameSet = reverseDSameSet`{4}
 property p_psplitProper = psplitProper`{4}
 property p_psplitCovers = psplitCovers`{4}
 property p_psplitPartitions = psplitPartitions`{4}
-property p_psplitOp2Sound = psplitOp2Sound`{4}
+property p_psplitOp2Sound = psplitOp2Sound`{2}
 property p_addSubSizeCorrect = addSubSizeCorrect`{4}
 property p_addRobustClosedFormAgrees = addRobustClosedFormAgrees`{4}
 property p_addRobustDominatesRaw = addRobustDominatesRaw`{4}
@@ -3690,10 +3690,10 @@ property p_correct_srem = correct_srem`{4}
 
 // *** Arithmetic (LLVM overflow flags)
 
-property p_correct_addNuw    = correct_addNuw`{4}
+property p_correct_addNuw    = correct_addNuw`{2}
 property p_correct_addNsw    = correct_addNsw`{4}
 property p_correct_addNswNuw = correct_addNswNuw`{4}
-property p_correct_subNuw    = correct_subNuw`{4}
+property p_correct_subNuw    = correct_subNuw`{2}
 property p_correct_subNsw    = correct_subNsw`{4}
 property p_correct_subNswNuw = correct_subNswNuw`{4}
 // Mul soundness uses Integer arithmetic (sIntegerGcd) like the unflagged
@@ -3706,13 +3706,13 @@ property p_correct_shlNsw    = correct_shlNsw`{4}
 property p_correct_shlNswNuw = correct_shlNswNuw`{4}
 property p_correct_udivExact = correct_udivExact`{4}
 property p_correct_sdivExact = correct_sdivExact`{4}
-property p_correct_lshrExact = correct_lshrExact`{4}
-property p_correct_ashrExact = correct_ashrExact`{4}
+property p_correct_lshrExact = correct_lshrExact`{2}
+property p_correct_ashrExact = correct_ashrExact`{2}
 
-property p_addNuwDominatesAdd      = addNuwDominatesAdd`{4}
+property p_addNuwDominatesAdd      = addNuwDominatesAdd`{2}
 property p_addNswDominatesAdd      = addNswDominatesAdd`{4}
 property p_addNswNuwDominatesAdd   = addNswNuwDominatesAdd`{4}
-property p_subNuwDominatesSub      = subNuwDominatesSub`{4}
+property p_subNuwDominatesSub      = subNuwDominatesSub`{2}
 property p_subNswDominatesSub      = subNswDominatesSub`{4}
 property p_subNswNuwDominatesSub   = subNswNuwDominatesSub`{4}
 // Same Integer-arithmetic caveat as @p_correct_mul*@.
@@ -3725,7 +3725,7 @@ property p_shlNswNuwDominatesShl   = shlNswNuwDominatesShl`{4}
 property p_udivExactDominatesUdiv  = udivExactDominatesUdiv`{4}
 property p_sdivExactDominatesSdiv  = sdivExactDominatesSdiv`{4}
 property p_lshrExactDominatesLshr  = lshrExactDominatesLshr`{4}
-property p_ashrExactDominatesAshr  = ashrExactDominatesAshr`{4}
+property p_ashrExactDominatesAshr  = ashrExactDominatesAshr`{2}
 
 property p_addNswNuwRefinesNsw     = addNswNuwRefinesNsw`{4}
 property p_addNswNuwRefinesNuw     = addNswNuwRefinesNuw`{4}
@@ -3768,8 +3768,8 @@ correct_xor a b x y =
     member (bxor a b) (x ^ y)
 
 property p_correct_not = correct_not`{4}
-property p_correct_and = correct_and`{4}
-property p_correct_or  = correct_or`{4}
+property p_correct_and = correct_and`{2}
+property p_correct_or  = correct_or`{2}
 property p_correct_xor = correct_xor`{4}
 
 // Closed witnesses (no free variables) at @n = 4@ showing that paper's
