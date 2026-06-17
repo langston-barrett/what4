@@ -175,6 +175,7 @@ library
     What4.Domains.BV.Strides
     What4.Domains.BV.Strides.Internal
     What4.Domains.BV.StridesBitwise
+    What4.Domains.BV.OddStridesBitwise
     What4.Domains.BV.StridedInterval
     What4.Domains.BV.XOR
     What4.Domains.Internal
@@ -202,6 +203,8 @@ test-suite bvdomain_tests
     Strides.Internal
     Strides.Precision
     StridesBitwise
+    OddStridesBitwise
+    OddStridesBitwiseEquiv
     StridedInterval
     StridedInterval.Precision
     VerifyBindings
@@ -221,6 +224,8 @@ test-suite bvdomain_tests_hh
     Strides.Internal
     Strides.Precision
     StridesBitwise
+    OddStridesBitwise
+    OddStridesBitwiseEquiv
     StridedInterval
     StridedInterval.Precision
     VerifyBindings

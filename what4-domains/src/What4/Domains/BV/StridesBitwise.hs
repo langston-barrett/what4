@@ -30,6 +30,7 @@ module What4.Domains.BV.StridesBitwise
   , bitwise
   , proper
   -- * Construction
+  , mkReduced
   , mk
   , top
   , fromAscEltList

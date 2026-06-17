@@ -44,6 +44,8 @@ import qualified What4.Domains.Arithmetic.Internal as ArithOpt
 #ifndef USE_HEDGEHOG
 import qualified CLP
 #endif
+import qualified OddStridesBitwise
+import qualified OddStridesBitwiseEquiv
 import qualified Strides
 import qualified StridesBitwise
 import qualified StridedInterval
@@ -72,6 +74,8 @@ main = defaultMain $
 #endif
     , Strides.tests
     , StridesBitwise.tests
+    , OddStridesBitwise.tests
+    , OddStridesBitwiseEquiv.tests
     , StridedInterval.tests
     ]
 

@@ -51,21 +51,22 @@ data HsModule = HsModule
   , hsModTestFile :: FilePath
   }
 
-arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod :: HsModule
-arithMod          = HsModule "src/What4/Domains/BV/Arith.hs"           "A"  "test/BVDomTests.hs"
-bitwiseMod        = HsModule "src/What4/Domains/BV/Bitwise.hs"         "B"  "test/BVDomTests.hs"
-xorMod            = HsModule "src/What4/Domains/BV/XOR.hs"             "X"  "test/BVDomTests.hs"
-overallMod        = HsModule "src/What4/Domains/BV.hs"                 "O"  "test/BVDomTests.hs"
-stridesMod        = HsModule "src/What4/Domains/BV/Strides.hs"         "S"  "test/Strides.hs"
-stridesBitwiseMod = HsModule "src/What4/Domains/BV/StridesBitwise.hs"  "SB" "test/StridesBitwise.hs"
-stridedMod        = HsModule "src/What4/Domains/BV/StridedInterval.hs" "S"  "test/StridedInterval.hs"
+arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, oddStridesBitwiseMod, stridedMod :: HsModule
+arithMod             = HsModule "src/What4/Domains/BV/Arith.hs"              "A"   "test/BVDomTests.hs"
+bitwiseMod           = HsModule "src/What4/Domains/BV/Bitwise.hs"            "B"   "test/BVDomTests.hs"
+xorMod               = HsModule "src/What4/Domains/BV/XOR.hs"                "X"   "test/BVDomTests.hs"
+overallMod           = HsModule "src/What4/Domains/BV.hs"                    "O"   "test/BVDomTests.hs"
+stridesMod           = HsModule "src/What4/Domains/BV/Strides.hs"            "S"   "test/Strides.hs"
+stridesBitwiseMod    = HsModule "src/What4/Domains/BV/StridesBitwise.hs"     "SB"  "test/StridesBitwise.hs"
+oddStridesBitwiseMod = HsModule "src/What4/Domains/BV/OddStridesBitwise.hs"  "OSB" "test/OddStridesBitwise.hs"
+stridedMod           = HsModule "src/What4/Domains/BV/StridedInterval.hs"    "S"   "test/StridedInterval.hs"
 
 -- | All Haskell-side modules whose properties are exercised by the
 -- property-test driver. The invocation check runs against every module
 -- in this list.
 allHsModules :: [HsModule]
 allHsModules =
-  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod]
+  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, oddStridesBitwiseMod, stridedMod]
 
 -- | Modules backed by a Cryptol model (in @doc/*.cry@). The
 -- Cryptol-correspondence checks run only against these.
@@ -309,10 +310,16 @@ exportOrderTests = TT.testGroup "Export order matches definition order"
       checkExportOrderFor "src/What4/Domains/BV/Strides.hs"
   , testCase "src/What4/Domains/BV/StridesBitwise.hs" $
       checkExportOrderFor "src/What4/Domains/BV/StridesBitwise.hs"
+  , testCase "src/What4/Domains/BV/OddStridesBitwise.hs" $
+      checkExportOrderFor "src/What4/Domains/BV/OddStridesBitwise.hs"
   , testCase "StridesBitwise mirrors Strides section order" $
-      checkSectionsMirrorStrides
+      checkSectionsMirrorStrides "src/What4/Domains/BV/StridesBitwise.hs"
   , testCase "StridesBitwise mirrors Strides operation order within sections" $
-      checkOpOrderMirrorsStrides
+      checkOpOrderMirrorsStrides "src/What4/Domains/BV/StridesBitwise.hs"
+  , testCase "OddStridesBitwise mirrors Strides section order" $
+      checkSectionsMirrorStrides "src/What4/Domains/BV/OddStridesBitwise.hs"
+  , testCase "OddStridesBitwise mirrors Strides operation order within sections" $
+      checkOpOrderMirrorsStrides "src/What4/Domains/BV/OddStridesBitwise.hs"
   ]
 
 -- | Run all the per-file export-order checks on a single file.
@@ -324,30 +331,39 @@ checkExportOrderFor f = do
   checkSectionNesting      f src
   checkPropertiesMatchOps  f src
 
--- | Section header sequence in StridesBitwise's export list must be a
+-- | Section header sequence in a wrapper's export list must be a
 -- subsequence of Strides' (the wrapper omits some sections like
 -- "Reduced product with bitwise" or "Internal helpers" but never
 -- reorders).
-checkSectionsMirrorStrides :: Assertion
-checkSectionsMirrorStrides = do
+checkSectionsMirrorStrides :: FilePath -> Assertion
+checkSectionsMirrorStrides wrapperFile = do
   stridesSrc  <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
-  wrapperSrc  <- TIO.readFile "src/What4/Domains/BV/StridesBitwise.hs"
+  wrapperSrc  <- TIO.readFile wrapperFile
   let stridesSecs = extractExportSections stridesSrc
-      wrapperSecs = extractExportSections wrapperSrc
+      -- Sections a wrapper legitimately introduces that Strides lacks:
+      -- 'OddStridesBitwise' groups its power-of-two fast-path correctness
+      -- properties under their own subsection (the 2-adic representation
+      -- gives these ops a closed form the plain 'Strides' module has no
+      -- counterpart for).
+      newWrapperSections = Set.fromList
+        [ "-- *** Power-of-2 fast paths" ]
+      wrapperSecs = filter (`Set.notMember` newWrapperSections)
+                           (extractExportSections wrapperSrc)
   case firstNotInSubsequence wrapperSecs stridesSecs of
     Nothing -> pure ()
     Just bad -> assertFailure $ T.unpack $
-      "Section header in StridesBitwise.hs not a subsequence of Strides.hs at: '"
+      "Section header in " <> T.pack wrapperFile
+      <> " not a subsequence of Strides.hs at: '"
       <> bad <> "'"
 
--- | For each section header that appears in both Strides and
--- StridesBitwise export lists, the exported names in StridesBitwise
--- under that section must be a subsequence of Strides' names under the
--- same section, in order.
-checkOpOrderMirrorsStrides :: Assertion
-checkOpOrderMirrorsStrides = do
+-- | For each section header that appears in both Strides and the
+-- wrapper's export lists, the exported names in the wrapper under that
+-- section must be a subsequence of Strides' names under the same
+-- section, in order.
+checkOpOrderMirrorsStrides :: FilePath -> Assertion
+checkOpOrderMirrorsStrides wrapperFile = do
   stridesSrc <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
-  wrapperSrc <- TIO.readFile "src/What4/Domains/BV/StridesBitwise.hs"
+  wrapperSrc <- TIO.readFile wrapperFile
   let stridesSecs = exportListSectioned stridesSrc
       wrapperSecs = exportListSectioned wrapperSrc
       shared = [ (sec, sNames, wNames)
@@ -359,7 +375,11 @@ checkOpOrderMirrorsStrides = do
       -- Strides doesn't: variants present in Bitwise that wrap-induce
       -- in the reduced product.
       newWrapperNames = Set.fromList
-        [ "mulPrecise", "udivPrecise", "uremPrecise"
+        [ -- 'mkReduced' is the reduced-product constructor (build a 'Domain'
+          -- from a strides + bitwise component); the plain 'Strides' module
+          -- has no such pairing constructor.
+          "mkReduced"
+        , "mulPrecise", "udivPrecise", "uremPrecise"
         , "correct_mulPrecise", "correct_udivPrecise", "correct_uremPrecise"
         -- Reduced-product-only 'size' properties (no strides counterpart).
         , "sizeAtMostComponents", "sizeExactCorrect", "windowMarginalCount"
@@ -368,6 +388,12 @@ checkOpOrderMirrorsStrides = do
         -- product routes it through 'pseudoMeet'), so these names are
         -- product-only.
         , "assumeEq", "correct_assumeEq"
+        -- OSB's native-core checks (under "Reduced product with bitwise"):
+        -- the 2-adic GCD primitives and native meet\/leq routines have no
+        -- counterpart among Strides' reduced-product properties.
+        , "gcdOddMatchesPrelude", "binGcdMatchesPrelude"
+        , "nativeLeqPreciseMatchesBridge", "native2AdicMeetMatchesBridge"
+        , "nativeLeqExactMatchesBridge", "nativeReduceMatchesBridge"
         ]
       mismatches = [ (sec, bad)
                    | (sec, sNames, wNames) <- shared
@@ -377,7 +403,8 @@ checkOpOrderMirrorsStrides = do
   case mismatches of
     [] -> pure ()
     _  -> assertFailure $ T.unpack $ T.unlines $
-            "Operations in StridesBitwise.hs not a subsequence of Strides.hs in some section:" :
+            ("Operations in " <> T.pack wrapperFile
+             <> " not a subsequence of Strides.hs in some section:") :
             [ "  section " <> sec <> ": '" <> nm <> "'" | (sec, nm) <- mismatches ]
 
 -- | Find the first element of @xs@ that does not appear in @ys@ (in
