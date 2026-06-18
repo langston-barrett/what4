@@ -51,6 +51,16 @@ module What4.Domains.BV.StridesBitwise
   , leq
   , leqPrecise
   , isSelfWrapping
+  -- * Cuboids
+  , Cuboid
+  , fromCuboid
+  , asCuboid
+  , mkCuboid
+  , isCuboid
+  , orbitCube
+  , memberCuboid
+  , leqCuboid
+  , meetCuboid
   -- * Arithmetic
   , negate
   , add
@@ -138,6 +148,7 @@ module What4.Domains.BV.StridesBitwise
   , genDomain
   , genElement
   , genPair
+  , genCuboid
   -- * Properties
   -- ** Construction
   , fromAscEltListMember
@@ -145,6 +156,7 @@ module What4.Domains.BV.StridesBitwise
   , canonLossless
   , canonProper
   , canonIdempotent
+  , canonCuboidSound
   -- ** Conversion
   , toArithCorrect
   , fromArithCorrect
@@ -156,11 +168,14 @@ module What4.Domains.BV.StridesBitwise
   , toListMember
   , memberToList
   , toListNoDuplicates
+  , cuboidMemberAgrees
+  , cuboidOrbitProjection
   , leqCorrect
   , leqReflexive
   , leqTransitive
   , leqPreciseCorrect
   , leqPreciseReflexive
+  , cuboidLeqPreciseAgrees
   , sizeViaToList
   , sizeAtMostComponents
   , sizeExactCorrect
@@ -232,6 +247,8 @@ module What4.Domains.BV.StridesBitwise
   -- *** Meets
   , correct_pseudoMeet
   , correct_pseudoMeetPrecise
+  , cuboidPseudoMeetAgrees
+  , cuboidPseudoMeetPreciseAgrees
   , pseudoMeetLowerBound
   , pseudoMeetPreciseLowerBound
   , pseudoMeetCommutative
@@ -294,6 +311,7 @@ import           Numeric.Natural (Natural)
 import           Prelude hiding (negate, not, and, or, concat)
 import qualified Prelude
 
+import           Control.Exception (assert)
 import qualified Data.Bits as Bits
 import qualified Data.List as List
 import qualified Data.Set as Set
@@ -305,7 +323,7 @@ import qualified What4.Domains.BV.Arith as A
 import qualified What4.Domains.BV.Bitwise as B
 import           What4.Domains.BV.Bounds (UnsignedBounds(..))
 import qualified What4.Domains.BV.Strides as S
-import           What4.Domains.Verification (Property, property, (==>), Gen)
+import           What4.Domains.Verification (Property, property, (==>), Gen, chooseInt, chooseInteger)
 
 -- ------------------------------------------------------------------
 -- The reduced-product domain
@@ -354,8 +372,33 @@ mkReduced = mkReducedBy S.reduce
 -- empty-joint fallback). This never loses precision relative to 'mkReduced'.
 mkReducedPrecise :: (1 <= w) => NatRepr w -> S.Domain w -> B.Domain w -> Domain w
 mkReducedPrecise w s b = case S.reducePrecise w s b of
-  Just (s', b') -> Domain s' b'
+  Just (s', b') -> settleCuboid s' b'
   Nothing       -> mkReduced w s b
+
+-- | Establish the StridesBitwise cuboid invariant on a reduced @(s, b)@ pair:
+-- when the orbit is cube-able, store it in cuboid orientation (the smallest-
+-- stride form, via 'S.canonicalize') and clip the bitwise component to the
+-- orbit\'s cube projection ('orbitCube'). Every 'Domain' built from a reduced
+-- pair funnels through here, so a cuboid is always recognizable by 'isCuboid'
+-- regardless of the input orientation, and always satisfies
+-- @bitwise ⊆ orbitCube@ — the property that makes 'memberCuboid',
+-- 'leqCuboid', and 'meetCuboid' sound without re-deriving it. The cheap
+-- orientation-invariant pre-filter (power-of-two orbit length, non-self-
+-- wrapping; both necessary for a cube) skips the 'S.canonicalize' cost on the
+-- common non-candidate case.
+settleCuboid :: S.Domain w -> B.Domain w -> Domain w
+settleCuboid s b
+  | Bits.popCount (S.n s + 1) == 1 && Prelude.not (S.isSelfWrapping s) =
+      let s' = S.getCanonical (S.canonicalize s)
+          d' = Domain s' b
+      in if isCuboid d'
+           then Domain s' (B.meet b (orbitCube (Cuboid d')))
+           -- Not a cuboid: keep the original orientation. We must NOT adopt the
+           -- canonical (min-stride) one here, because reversing a non-self-
+           -- wrapping large-stride orbit can yield a self-wrapping orbit, on
+           -- which 'S.reduce' is incomplete (would spuriously report empty).
+           else Domain s b
+  | otherwise = Domain s b
 
 -- | Shared driver for 'mkReduced' / 'mkReducedPrecise', parameterized over the
 -- reduction. On a 'Nothing' (joint concluded empty) it falls back to dropping
@@ -365,10 +408,10 @@ mkReducedBy ::
   (NatRepr w -> S.Domain w -> B.Domain w -> Maybe (S.Domain w, B.Domain w)) ->
   NatRepr w -> S.Domain w -> B.Domain w -> Domain w
 mkReducedBy reduceOp w s b = case reduceOp w s b of
-  Just (s', b') -> Domain s' b'
+  Just (s', b') -> settleCuboid s' b'
   Nothing ->
     case reduceOp w s (S.toBitwise s) of
-      Just (s', b') -> Domain s' b'
+      Just (s', b') -> settleCuboid s' b'
       Nothing       -> error "StridesBitwise.mkReducedBy: reduce failed on \
                              \(s, toBitwise s) — invariant violated."
 
@@ -380,7 +423,7 @@ mkReducedBy reduceOp w s b = case reduceOp w s b of
 tryMkReduced ::
   (1 <= w) => NatRepr w -> S.Domain w -> B.Domain w -> Maybe (Domain w)
 tryMkReduced w s b = case S.reduce w s b of
-  Just (s', b') -> Just (Domain s' b')
+  Just (s', b') -> Just (settleCuboid s' b')
   Nothing       -> Nothing
 
 -- | Like 'tryMkReduced', but uses 'S.reducePrecise' (see 'mkReducedPrecise').
@@ -391,7 +434,7 @@ tryMkReduced w s b = case S.reduce w s b of
 tryMkReducedPrecise ::
   (1 <= w) => NatRepr w -> S.Domain w -> B.Domain w -> Maybe (Domain w)
 tryMkReducedPrecise w s b = case S.reducePrecise w s b of
-  Just (s', b') -> Just (Domain s' b')
+  Just (s', b') -> Just (settleCuboid s' b')
   Nothing       -> tryMkReduced w s b
 
 -- ------------------------------------------------------------------
@@ -433,9 +476,24 @@ getCanonical (Canonical c) = c
 -- | Canonicalize the strides component; the bitwise component is left
 -- as-is (it's already exactly determined by the strides component
 -- after reduction, modulo orientation).
+--
+-- One exception: 'S.canonicalize' may reorient a non-wrapping orbit into the
+-- cuboid orientation, after which a pre-canonical tnum can admit points
+-- outside the post-canonical orbit (the orbit's points are unchanged as a
+-- set, but the tnum was settled against the old orientation). The cuboid
+-- fast paths read the denotation straight off the tnum assuming
+-- @tnum ⊆ orbit@, so when the result is a cuboid we restore that invariant
+-- by meeting the tnum against the orbit's cube projection ('orbitCube').
+-- This only shrinks the tnum (sound: it drops points the orbit already
+-- excludes) and leaves the strides component and its forced low bits
+-- unchanged.
 canonicalize :: Domain w -> Canonical w
 canonicalize (Domain s b) =
-  Canonical (Domain (S.getCanonical (S.canonicalize s)) b)
+  let s' = S.getCanonical (S.canonicalize s)
+      d' = Domain s' b
+  in Canonical $ case asCuboid d' of
+       Just cc -> Domain s' (B.meet b (orbitCube cc))
+       Nothing -> d'
 
 -- ------------------------------------------------------------------
 -- * Conversion
@@ -481,7 +539,13 @@ fromBitwise w b = case S.fromBitwise w b of
 -- orbit element already satisfies the bitwise constraint), but we
 -- check both anyway as a defensive sanity check.
 member :: Domain w -> Natural -> Bool
-member (Domain s b) x = S.member s x && B.member b (toInteger x)
+member c x = case asCuboid c of
+  Just cc -> memberCuboid cc x
+  Nothing -> memberGeneral c x
+
+-- | The general 'member': membership in both components.
+memberGeneral :: Domain w -> Natural -> Bool
+memberGeneral (Domain s b) x = S.member s x && B.member b (toInteger x)
 
 -- | Enumerate the joint set: orbit elements that also satisfy the
 -- bitwise component. The reduction invariant tightens both components
@@ -628,13 +692,158 @@ pinsConflict s b =
 leq :: Domain w -> Domain w -> Bool
 leq a b = S.leq (strides a) (strides b) && B.leq (bitwise a) (bitwise b)
 
--- | More precise ordering.
+-- | More precise ordering. When both operands are cuboids this is the exact
+-- denotational order via 'leqCuboid'; otherwise the general (sound) order.
 leqPrecise :: Domain w -> Domain w -> Bool
-leqPrecise a b = S.leqPrecise (strides a) (strides b) && B.leq (bitwise a) (bitwise b)
+leqPrecise a b = case (asCuboid a, asCuboid b) of
+  (Just ca, Just cb) -> leqCuboid ca cb
+  _                  -> leqPreciseGeneral a b
+
+-- | The general (sound) precise ordering: per-component 'S.leqPrecise' and
+-- 'B.leq'.
+leqPreciseGeneral :: Domain w -> Domain w -> Bool
+leqPreciseGeneral a b =
+  S.leqPrecise (strides a) (strides b) && B.leq (bitwise a) (bitwise b)
 
 -- | Whether the strides component is self-wrapping.
 isSelfWrapping :: Domain w -> Bool
 isSelfWrapping (Domain s _) = S.isSelfWrapping s
+
+-- ------------------------------------------------------------------
+-- * Cuboids
+
+-- $cuboid
+--
+-- A 'Domain' is a /cuboid/ when its strides orbit coincides exactly with a
+-- tnum sub-cube: low @v@ bits pinned, a contiguous block of @k@ free bits,
+-- high bits pinned. On a cuboid the orbit equals its bitwise projection, so
+-- membership and the lattice queries can read the denotation straight off the
+-- bitwise component without any modular inverse. The 'Cuboid' newtype carries
+-- that fact in the type (use the 'asCuboid' smart constructor), so the
+-- fast-path operations ('memberCuboid', 'leqCuboid', 'meetCuboid') need not
+-- re-establish it.
+
+-- | A 'Domain' whose strides component is a cuboid. Construct with 'asCuboid'.
+newtype Cuboid w = Cuboid (Domain w)
+  deriving Show
+
+-- | The underlying 'Domain' of a 'Cuboid'.
+fromCuboid :: Cuboid w -> Domain w
+fromCuboid (Cuboid d) = d
+
+-- | Smart constructor: 'Just' iff the domain is a cuboid (see 'isCuboid').
+-- A pure recognizer: by the StridesBitwise invariant ('settleCuboid'), any
+-- 'Domain' that 'isCuboid' already satisfies @bitwise ⊆ orbitCube@, so no
+-- clipping is needed here.
+asCuboid :: Domain w -> Maybe (Cuboid w)
+asCuboid d
+  | isCuboid d = Just (Cuboid d)
+  | otherwise  = Nothing
+{-# INLINE asCuboid #-}
+
+-- | Unchecked 'Cuboid' constructor: wraps a strides+bitwise pair the caller
+-- already knows to be a cuboid (in cuboid orientation, with
+-- @bitwise ⊆ orbitCube@), skipping the 'settleCuboid' normalization that the
+-- general constructors run. The invariant is 'assert'ed (checked builds only).
+-- For internal fast paths like 'meetCuboid' that produce a cuboid directly.
+mkCuboid :: S.Domain w -> B.Domain w -> Cuboid w
+mkCuboid s b =
+  let c = Cuboid (Domain s b)
+  in assert (isCuboid (Domain s b) && B.leq b (orbitCube c)) c
+
+-- | Whether the strides component's orbit is exactly a tnum sub-cube. Prefer
+-- the 'asCuboid' smart constructor; this bare predicate is its kernel.
+--
+-- The predicate is the conjunction of: the stride is a power of two
+-- (@stride = 2^v@, i.e. it equals its own lowest set bit); the orbit length
+-- @n+1@ is a power of two (@popCount (n+1) == 1@, so @n = 2^k - 1@); the
+-- orbit does not wrap mod @2^w@ (@startHigh + n <= mask `shiftR` v@, where
+-- @startHigh = start `shiftR` v@); and @startHigh@ is @2^k@-aligned
+-- (@startHigh .&. n == 0@). Both the alignment and non-wrap conditions are
+-- load-bearing: without them the bounding tnum cube is strictly larger than
+-- the orbit. A singleton (@n == 0@) satisfies the last three trivially and
+-- is a (degenerate) cuboid exactly when its stride is a power of two.
+isCuboid :: Domain w -> Bool
+isCuboid (Domain s _) =
+  st == g                                    -- power-of-two stride
+    && Bits.popCount (nn + 1) == 1           -- power-of-two orbit length
+    && startHigh + nn <= m `Bits.shiftR` v   -- non-wrapping
+    && startHigh Bits..&. nn == 0            -- 2^k-aligned high part
+  where
+    st        = S.stride s
+    g         = lowestSetBitN st              -- 2^v
+    nn        = S.n s
+    m         = S.mask s
+    v         = Bits.popCount (g - 1)         -- log2 g
+    startHigh = S.start s `Bits.shiftR` v
+{-# INLINE isCuboid #-}
+
+-- | @2^(ctz x)@, the lowest set bit of @x@, or @1@ when @x == 0@ (matching
+-- the strides domain's @strideGcd@; avoids @Natural@ underflow on @x - 1@).
+lowestSetBitN :: Natural -> Natural
+lowestSetBitN 0 = 1
+lowestSetBitN x = x `Bits.xor` (x Bits..&. (x - 1))
+
+-- | The orbit of a cuboid expressed as a tnum: the low @v@ bits pinned to
+-- @start@'s low bits, bits @[v, v+k)@ free, and the high bits pinned to
+-- @startHigh@. Used by 'canonicalize' to re-establish the @tnum ⊆ orbit@
+-- invariant after a reorientation, and by the cuboid soundness properties.
+--
+-- Built directly rather than via 'S.toBitwise'\/'S.forcedBits', which
+-- /under/-approximate the orbit's constant bits (see 'pinsConflict') and so
+-- would drop the high pins. On a cuboid @start@'s free-region bits are
+-- already zero by alignment, so @start@ is the forced-ones bound and
+-- @start .|. (n `shiftL` v)@ adds the free block.
+orbitCube :: Cuboid w -> B.Domain w
+orbitCube (Cuboid (Domain s _)) =
+  B.interval (toInteger m) (toInteger st0) (toInteger (st0 Bits..|. free))
+  where
+    g    = lowestSetBitN (S.stride s)   -- 2^v
+    v    = Bits.popCount (g - 1)
+    m    = S.mask s
+    st0  = S.start s
+    free = S.n s `Bits.shiftL` v
+
+-- | The cuboid fast path for 'member': on a cuboid the orbit equals its
+-- bitwise projection and the reduced-product invariant gives @tnum ⊆ orbit@,
+-- so membership is exactly the bitwise check (no 'S.valueIndexMaybe'
+-- inverse). Agrees with 'memberGeneral' on cuboids (see 'cuboidMemberAgrees').
+memberCuboid :: Cuboid w -> Natural -> Bool
+memberCuboid (Cuboid (Domain _ b)) x = B.member b (toInteger x)
+
+-- | The cuboid fast path for 'leqPrecise': both operands denote exactly their
+-- tnums, so containment is the bitwise order alone (no 'S.leqPrecise'
+-- inverse). This is /more precise/, not merely cheaper, than
+-- 'leqPreciseGeneral': the general path additionally demands orbit-orientation
+-- containment via 'S.leqPrecise', which can be 'False' even when the
+-- denotations are equal (e.g. @a@'s orbit is a coarser cuboid than @b@'s but
+-- @a@'s tnum is a strict sub-cube). So it is checked against the denotation,
+-- not against 'leqPreciseGeneral' (see 'cuboidLeqPreciseAgrees').
+leqCuboid :: Cuboid w -> Cuboid w -> Bool
+leqCuboid (Cuboid a) (Cuboid b) = B.leq (bitwise a) (bitwise b)
+
+-- | The cuboid meet. The joint set of two cuboids is exactly their bitwise
+-- meet @ba ∩ bb@ (each cuboid denotes its tnum), so we skip 'S.pseudoMeet'\'s
+-- gcd entirely: meet the tnums and reduce @a@\'s orbit against the result
+-- (using the given constructor, which also re-settles the cuboid invariant).
+-- 'Nothing' iff the joint set is empty.
+--
+-- Note the result is /not/ wrapped as a 'Cuboid': the meet of two cuboids is
+-- not in general a (reduced) cuboid. A cuboid\'s bitwise component may be a
+-- non-contiguous-free sub-cube of its orbit, and the meet inherits that; the
+-- only reduced orbit for a non-contiguous-free tnum is 'S.fromBitwise', a
+-- non-power-of-two-length progression. So this returns a plain reduced
+-- 'Domain' (which @'settleCuboid'@ stores as a cuboid exactly when the meet
+-- happens to be contiguous-free). It is still /more precise/ than the general
+-- meet (which over-approximates the orbit intersection); see
+-- 'cuboidPseudoMeetAgrees'.
+meetCuboid ::
+  (1 <= w) =>
+  (NatRepr w -> S.Domain w -> B.Domain w -> Maybe (Domain w)) ->
+  NatRepr w -> Cuboid w -> Cuboid w -> Maybe (Domain w)
+meetCuboid reConstruct w (Cuboid (Domain sa ba)) (Cuboid (Domain _ bb)) =
+  let mb = B.meet ba bb
+  in if B.isBottom mb then Nothing else reConstruct w sa mb
 
 -- ------------------------------------------------------------------
 -- * Internal helpers
@@ -1041,14 +1250,30 @@ rorRaw w (Domain sa ba) b@(Domain sb bb) =
 pseudoMeet ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-pseudoMeet w (Domain sa ba) (Domain sb bb) = do
-  sm <- S.pseudoMeet w sa sb
-  tryMkReduced w sm (B.meet ba bb)
+pseudoMeet w a b = case (asCuboid a, asCuboid b) of
+  (Just ca, Just cb) -> meetCuboid tryMkReduced w ca cb
+  _                  -> pseudoMeetGeneral w a b
 
 pseudoMeetPrecise ::
   (1 <= w) =>
   NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
-pseudoMeetPrecise w (Domain sa ba) (Domain sb bb) = do
+pseudoMeetPrecise w a b = case (asCuboid a, asCuboid b) of
+  (Just ca, Just cb) -> meetCuboid tryMkReducedPrecise w ca cb
+  _                  -> pseudoMeetGeneralPrecise w a b
+
+-- | The general 'pseudoMeet': strides meet then bitwise meet, reduced.
+pseudoMeetGeneral ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+pseudoMeetGeneral w (Domain sa ba) (Domain sb bb) = do
+  sm <- S.pseudoMeet w sa sb
+  tryMkReduced w sm (B.meet ba bb)
+
+-- | The general 'pseudoMeetPrecise': precise strides meet then bitwise meet.
+pseudoMeetGeneralPrecise ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Domain w -> Maybe (Domain w)
+pseudoMeetGeneralPrecise w (Domain sa ba) (Domain sb bb) = do
   sm <- S.pseudoMeetPrecise w sa sb
   tryMkReducedPrecise w sm (B.meet ba bb)
 
@@ -1193,7 +1418,7 @@ genDomain w = do
   s <- S.genDomain w
   b <- B.genDomain w
   case S.reduce w s b of
-    Just (s', b') -> pure (Domain s' b')
+    Just (s', b') -> pure (settleCuboid s' b')
     Nothing       -> pure (mkReduced w s (S.toBitwise s))
                      -- Fallback: take strides as ground truth, drop @b@.
 
@@ -1209,6 +1434,31 @@ genPair w = do
   d <- genDomain w
   x <- genElement d
   pure (d, x)
+
+-- | Generate a random cuboid 'Domain' (one satisfying 'isCuboid'): a
+-- power-of-two stride @2^v@, a power-of-two orbit length @2^k@, non-wrapping,
+-- with a @2^k@-aligned high part. Used to exercise the cuboid fast paths in
+-- 'member', 'leqPrecise', and 'pseudoMeet'. The bitwise component is settled
+-- by 'mkReduced' against the orbit, so it is the orbit's cube projection
+-- (possibly a strict sub-cube if reduce forces additional bits).
+genCuboid :: (1 <= w) => NatRepr w -> Gen (Cuboid w)
+genCuboid w = do
+  let wi = fromIntegral (NR.natValue w) :: Int
+  -- @v@ is log2 of the stride @2^v@, which must be a valid stride @< 2^w@, so
+  -- @v <= w - 1@ (a singleton with @v = w@ would overflow the mask in 'S.mk').
+  v <- chooseInt (0, wi - 1)        -- log2 of the (power-of-two) stride
+  k <- chooseInt (0, wi - v)        -- log2 of the (power-of-two) orbit length
+  let hiBits = wi - v - k           -- number of high pinned bits
+  aligned <- chooseInteger (0, 2 ^ hiBits - 1)
+  lowBits <- chooseInteger (0, 2 ^ v - 1)
+  let stride    = 1 `Bits.shiftL` v :: Natural
+      nn        = (1 `Bits.shiftL` k) - 1 :: Natural
+      startHigh = fromInteger aligned `Bits.shiftL` k :: Natural
+      start     = (startHigh `Bits.shiftL` v) Bits..|. fromInteger lowBits
+      sd        = S.mk w start stride nn
+  case asCuboid (mkReduced w sd (S.toBitwise sd)) of
+    Just c  -> pure c
+    Nothing -> error "StridesBitwise.genCuboid: constructed a non-cuboid."
 
 -- ------------------------------------------------------------------
 -- ** Helper: NatRepr arithmetic
@@ -1273,6 +1523,19 @@ canonIdempotent _w c x =
         two = canonicalize (getCanonical one)
     in property (member (getCanonical one) x == member (getCanonical two) x)
 
+-- | 'S.canonicalize' may reorient an orbit into the cuboid orientation,
+-- where the cuboid fast paths kick in. This checks that 'canonicalize'
+-- restores the @tnum ⊆ orbit@ invariant on the result (by meeting against
+-- 'orbitCube'), so the fast-path 'member' on the canonical form still agrees
+-- with the full per-component test. A failure here would mean a pre-canonical
+-- tnum was carried onto a reoriented orbit it no longer respects. Exercised
+-- against arbitrary domains so reversed orientations are covered.
+canonCuboidSound :: (1 <= w) => NatRepr w -> Domain w -> Natural -> Property
+canonCuboidSound _w c x =
+  proper c ==>
+    let Domain s' b' = getCanonical (canonicalize c)
+    in property (member (Domain s' b') x == (S.member s' x && B.member b' (toInteger x)))
+
 -- ------------------------------------------------------------------
 -- ** Conversion
 
@@ -1336,6 +1599,28 @@ toListNoDuplicates _w c =
   proper c ==>
     let xs = toList c in property (List.nub xs == xs)
 
+-- | On a cuboid, 'member' reads the answer off the bitwise component alone.
+-- This checks that it agrees with the full per-component membership test,
+-- which holds precisely because the cuboid invariant @tnum ⊆ orbit@ makes
+-- @B.member b x@ imply @S.member s x@. A failure would mean the bitwise
+-- component admits a point outside the orbit (the fast path is unsound). See
+-- 'isCuboid', 'cuboidOrbitProjection'.
+cuboidMemberAgrees :: (1 <= w) => NatRepr w -> Cuboid w -> Natural -> Property
+cuboidMemberAgrees _w cc x =
+  let c = fromCuboid cc
+  in proper c ==> property (memberCuboid cc x == memberGeneral c x)
+
+-- | On a cuboid, 'orbitCube' denotes exactly the strides orbit: for every
+-- value, bitwise membership in the cube matches strides membership in the
+-- orbit. This is the lemma underpinning every cuboid fast path. See
+-- 'orbitCube'.
+cuboidOrbitProjection ::
+  (1 <= w) => NatRepr w -> Cuboid w -> Natural -> Property
+cuboidOrbitProjection _w cc x =
+  let Domain s _ = fromCuboid cc
+  in proper (fromCuboid cc) ==>
+       property (B.member (orbitCube cc) (toInteger x) == S.member s x)
+
 leqCorrect :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
 leqCorrect _w a b =
   proper a ==> proper b ==>
@@ -1360,6 +1645,20 @@ leqPreciseCorrect _w a b =
 
 leqPreciseReflexive :: (1 <= w) => NatRepr w -> Domain w -> Property
 leqPreciseReflexive _w a = proper a ==> property (leqPrecise a a)
+
+-- | On a pair of cuboids, 'leqPreciseCuboid' is exactly denotational
+-- containment: it returns 'True' iff every element of @a@ is a member of @b@
+-- (both soundness and completeness of the fast path). Checked against the
+-- enumerated denotation rather than against 'leqPreciseGeneral', because the
+-- fast path is /strictly more precise/ than the general path (which can
+-- report 'False' on equal denotations). See 'leqPreciseCuboid'.
+cuboidLeqPreciseAgrees ::
+  (1 <= w) => NatRepr w -> Cuboid w -> Cuboid w -> Property
+cuboidLeqPreciseAgrees _w ca cb =
+  let a = fromCuboid ca
+      b = fromCuboid cb
+  in proper a ==> proper b ==>
+       property (leqCuboid ca cb == Prelude.and [member b x | x <- toList a])
 
 -- | Unlike the strides domain's exact 'S.size', the reduced product's
 -- 'size' is a sound /over-approximation/ of the joint cardinality: exact
@@ -2006,6 +2305,34 @@ correct_pseudoMeetPrecise w a b x =
     case pseudoMeetPrecise w a b of
       Nothing -> property False
       Just c  -> property (member c x)
+
+-- | On a pair of cuboids, 'pseudoMeetCuboid' computes the joint set
+-- /exactly/: @x@ is in the meet iff it is in both operands (and the meet is
+-- 'Nothing' iff the joint set is empty). This is the precision win the cuboid
+-- fast path delivers over the general lower-bound meet. See 'pseudoMeetCuboid'.
+cuboidPseudoMeetAgrees ::
+  (1 <= w) =>
+  NatRepr w -> Cuboid w -> Cuboid w -> Natural -> Property
+cuboidPseudoMeetAgrees w ca cb x =
+  let a = fromCuboid ca
+      b = fromCuboid cb
+  in proper a ==> proper b ==>
+       property (case meetCuboid tryMkReduced w ca cb of
+                   Nothing -> Prelude.not (member a x && member b x)
+                   Just c  -> member c x == (member a x && member b x))
+
+-- | Like 'cuboidPseudoMeetAgrees', driven through the public 'pseudoMeet'
+-- (which dispatches to 'meetCuboid' on cuboids) to exercise the dispatch path.
+cuboidPseudoMeetPreciseAgrees ::
+  (1 <= w) =>
+  NatRepr w -> Cuboid w -> Cuboid w -> Natural -> Property
+cuboidPseudoMeetPreciseAgrees w ca cb x =
+  let a = fromCuboid ca
+      b = fromCuboid cb
+  in proper a ==> proper b ==>
+       property (case pseudoMeetPrecise w a b of
+                   Nothing -> Prelude.not (member a x && member b x)
+                   Just c  -> member c x == (member a x && member b x))
 
 -- | Lower-bound property: every member of @pseudoMeet a b@ is a member
 -- of both @a@ and @b@. Restricted to non-wrapping operands; the strides
