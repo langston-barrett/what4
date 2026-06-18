@@ -19,6 +19,7 @@ Extra-doc-files:
   doc/bitsdomain.cry
   doc/strides.cry
   doc/strideddomain.cry
+  doc/geostrides.cry
   doc/xordomain.cry
   doc/README.md
 
@@ -176,6 +177,8 @@ library
     What4.Domains.BV.Strides.Internal
     What4.Domains.BV.StridesBitwise
     What4.Domains.BV.StridedInterval
+    What4.Domains.BV.GeoStrides
+    What4.Domains.BV.Geometric
     What4.Domains.BV.XOR
     What4.Domains.Internal
     What4.Domains.Verification
@@ -204,6 +207,8 @@ test-suite bvdomain_tests
     StridesBitwise
     StridedInterval
     StridedInterval.Precision
+    GeoStrides
+    Geometric
     VerifyBindings
 
 
@@ -223,6 +228,8 @@ test-suite bvdomain_tests_hh
     StridesBitwise
     StridedInterval
     StridedInterval.Precision
+    GeoStrides
+    Geometric
     VerifyBindings
 
 

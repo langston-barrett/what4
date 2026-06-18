@@ -47,6 +47,8 @@ import qualified CLP
 import qualified Strides
 import qualified StridesBitwise
 import qualified StridedInterval
+import qualified GeoStrides
+import qualified Geometric
 
 
 main :: IO ()
@@ -73,6 +75,8 @@ main = defaultMain $
     , Strides.tests
     , StridesBitwise.tests
     , StridedInterval.tests
+    , GeoStrides.tests
+    , Geometric.tests
     ]
 
 data SomeWidth where
