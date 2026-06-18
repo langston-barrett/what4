@@ -68,6 +68,9 @@ tests = TT.testGroup "StridesBitwise"
   , genTest "canonIdempotent" $
       do SW n <- genWidth
          SB.canonIdempotent n <$> SB.genDomain n <*> genNatBV n
+  , genTest "canonCuboidSound" $
+      do SW n <- genWidthSmall
+         SB.canonCuboidSound n <$> SB.genDomain n <*> genNatBV n
   -- ** Conversion
   , genTest "toArithCorrect" $
       do SW n <- genWidth
@@ -130,6 +133,15 @@ tests = TT.testGroup "StridesBitwise"
   , genTest "pinsConflictEmpty" $
       do SW n <- genWidthSmall
          SB.pinsConflictEmpty n <$> SB.genDomain n <*> SB.genDomain n
+  , genTest "cuboidMemberAgrees" $
+      do SW n <- genWidthSmall
+         SB.cuboidMemberAgrees n <$> SB.genCuboid n <*> genNatBV n
+  , genTest "cuboidOrbitProjection" $
+      do SW n <- genWidthSmall
+         SB.cuboidOrbitProjection n <$> SB.genCuboid n <*> genNatBV n
+  , genTest "cuboidLeqPreciseAgrees" $
+      do SW n <- genWidthSmall
+         SB.cuboidLeqPreciseAgrees n <$> SB.genCuboid n <*> SB.genCuboid n
   -- ** Arithmetic
   , genTest "correct_neg" $
       do SW n <- genWidth
@@ -335,6 +347,12 @@ tests = TT.testGroup "StridesBitwise"
   , genTest "correct_pseudoMeetPrecise" $
       do SW n <- genWidth
          SB.correct_pseudoMeetPrecise n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n
+  , genTest "cuboidPseudoMeetAgrees" $
+      do SW n <- genWidthSmall
+         SB.cuboidPseudoMeetAgrees n <$> SB.genCuboid n <*> SB.genCuboid n <*> genNatBV n
+  , genTest "cuboidPseudoMeetPreciseAgrees" $
+      do SW n <- genWidthSmall
+         SB.cuboidPseudoMeetPreciseAgrees n <$> SB.genCuboid n <*> SB.genCuboid n <*> genNatBV n
   , genTest "pseudoMeetLowerBound" $
       do SW n <- genWidth
          SB.pseudoMeetLowerBound n <$> SB.genDomain n <*> SB.genDomain n <*> genNatBV n

@@ -333,11 +333,16 @@ checkSectionsMirrorStrides = do
   stridesSrc  <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
   wrapperSrc  <- TIO.readFile "src/What4/Domains/BV/StridesBitwise.hs"
   let stridesSecs = extractExportSections stridesSrc
-      wrapperSecs = extractExportSections wrapperSrc
+      -- The reduced product may add its own sections with no Strides
+      -- counterpart (e.g. @-- * Cuboids@). We only require that the sections it
+      -- /shares/ with Strides stay in Strides' relative order, so restrict to
+      -- the shared ones before the subsequence check.
+      wrapperSecs = filter (`elem` stridesSecs)
+                           (extractExportSections wrapperSrc)
   case firstNotInSubsequence wrapperSecs stridesSecs of
     Nothing -> pure ()
     Just bad -> assertFailure $ T.unpack $
-      "Section header in StridesBitwise.hs not a subsequence of Strides.hs at: '"
+      "Section header in StridesBitwise.hs not in Strides.hs order at: '"
       <> bad <> "'"
 
 -- | For each section header that appears in both Strides and
@@ -368,6 +373,13 @@ checkOpOrderMirrorsStrides = do
         -- product routes it through 'pseudoMeet'), so these names are
         -- product-only.
         , "assumeEq", "correct_assumeEq"
+        -- Cuboid generator and properties: the cuboid fast paths are a
+        -- reduced-product-specific refinement with no strides counterpart (the
+        -- 'Cuboid' API itself lives in the product-only @-- * Cuboids@ section,
+        -- see 'stridesBitwiseOnlySections').
+        , "genCuboid", "canonCuboidSound"
+        , "cuboidMemberAgrees", "cuboidOrbitProjection", "cuboidLeqPreciseAgrees"
+        , "cuboidPseudoMeetAgrees", "cuboidPseudoMeetPreciseAgrees"
         ]
       mismatches = [ (sec, bad)
                    | (sec, sNames, wNames) <- shared
