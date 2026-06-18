@@ -457,6 +457,7 @@ module What4.Domains.BV.Strides
   , reverseD
   , scale
   , mul
+  , mulFast
   , udiv
   , urem
   , sdiv
@@ -647,6 +648,8 @@ module What4.Domains.BV.Strides
   , psplitOp2Sound
   , correct_scale
   , correct_mul
+  , correct_mulFast
+  , mulDominatesMulFast
   , addSubSizeCorrect
   , addRobustClosedFormAgrees
   , addRobustDominatesRaw
@@ -2823,6 +2826,71 @@ scale w k = liftArith1 w (A.scale k)
 --   * /At least one wraps/: 'mulCorners' and 'mulCutUS' are
 --     incomparable. We compute both and take the cardinality minimum.
 
+-- | /O(G(w))/. The cheapest meaningful multiplication kernel: the spread-term
+-- closed form. Same asymptotic class as the default 'mul', but a single gcd
+-- fold and a handful of multiplies — no corner enumeration, no orientation
+-- dispatch, no cut. The default 'mul' is never larger by cardinality
+-- ('mulDominatesMulFast'); use 'mulFast' when the looser-but-faster transfer
+-- function suffices, and 'mul' for the tightest one.
+--
+-- == The recipe
+--
+-- Writing each operand as @(start, stride, n)@, the
+-- \"Anchors and corner products\" identity above expands the product as
+--
+-- @
+--   (l1 + i·t1)·(l2 + j·t2) = l1·l2 + i·(t1·l2) + j·(t2·l1) + i·j·(t1·t2)
+-- @
+--
+-- so every concrete product is the /anchor/ @l1·l2@ plus an integer
+-- combination of the three /spread coefficients/ @{t1·l2, t2·l1, t1·t2}@.
+-- Hence every product lies on the coset @l1·l2 + ⟨d⟩@ where
+-- @d = gcd@ of the three coefficients (taken over the terms whose index range
+-- is nonempty — a singleton operand contributes no step), reduced mod @2^w@.
+-- The number of @d@-steps from the anchor is bounded by the CLP sum
+--
+-- @
+--   n_a·(t1·l2)/d + n_b·(t2·l1)/d + n_a·n_b·(t1·t2)/d
+-- @
+--
+-- capped to the orbit ('clampToOrbit'). This is exactly 'mulFromCorners' at
+-- the single unsigned anchor @(l1, l2)@ using only the CLP step bound — it
+-- drops the corner-arc bound, the @U@-vs-@Z@ anchor enumeration, the cut, and
+-- the 'orientRobust' wrapper that together make 'mul' tighter (and, on wrapping
+-- operands, much tighter).
+--
+-- == Complexity
+--
+-- Contributing factors:
+--
+-- * the spread-coefficient @gcd@ fold (two gcds): /O(G(w))/
+-- * the anchor and coefficient multiplies, and the CLP-sum divisions: /O(M(w))/
+--
+-- Total: /O(M(w) + G(w)) = O(G(w))/, since @M(w) <= G(w)@ at every tier.
+--
+-- At each tier (see module-level Haddock):
+--
+-- 1. /O(w)/
+-- 2. /O(w^2)/
+-- 3. /O(Õ(w))/
+mulFast :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
+mulFast w a b
+  | n a == 0  = scaleSingleton w (start a) b
+  | n b == 0  = scaleSingleton w (start b) a
+  | otherwise =
+      -- Anchor at the unsigned lo corner @(start a, start b)@; 'mulFast' uses
+      -- only the CLP step bound, so the arc's hi corners aren't needed.
+      let !uAl = toInteger (start a)
+          !uBl = toInteger (start b)
+          !dIntI = cornerProductStride a b uAl uBl
+          !dMod  = if dIntI == 0 then 0 else modMask a (fromInteger dIntI)
+          !startNat = asN w (uAl * uBl)
+      in if dMod == 0
+           then mk w startNat 1 0
+           else
+             let !nRaw = clpStepBound a b uAl uBl dIntI
+             in mk w startNat dMod (clampToOrbit (mask a) dMod (fromInteger nRaw))
+
 -- | /O(G(w))/. Multiplication.
 --
 -- Uses the cheap 'pseudoMeet' and 'pseudoJoin' for the cut + ×_us path. The
@@ -2837,6 +2905,10 @@ scale w k = liftArith1 w (A.scale k)
 -- products and the cut\'s integer strides both depend on operand orientation,
 -- so trying both representatives of each operand and keeping the tightest
 -- result is a sound, cheap precision win (see 'mulRobustDominatesRaw').
+--
+-- See 'mulFast' for the cheaper spread-term kernel ('mul' is never larger,
+-- 'mulDominatesMulFast'); there is no @mulPrecise@ — 'mul' is already the
+-- tightest variant.
 mul :: (1 <= w) => NatRepr w -> Domain w -> Domain w -> Domain w
 mul w = orientRobust w (mulRaw w)
 
@@ -7892,6 +7964,26 @@ correct_mul ::
 correct_mul w a x b y =
   proper a ==> proper b ==> member a x ==> member b y ==>
     property (member (mul w a b) (asN w (toInteger x * toInteger y)))
+
+-- | 'mulFast' is sound: the spread-term closed form contains every concrete
+-- product. Mirrors 'correct_mul' for the cheaper kernel.
+correct_mulFast ::
+  (1 <= w) =>
+  NatRepr w -> Domain w -> Natural -> Domain w -> Natural -> Property
+correct_mulFast w a x b y =
+  proper a ==> proper b ==> member a x ==> member b y ==>
+    property (member (mulFast w a b) (asN w (toInteger x * toInteger y)))
+
+-- | The default 'mul' is never larger than the cheaper 'mulFast' by
+-- cardinality — the @*Fast@ domination law (cf. 'andPreciseDominatesAndFast').
+-- 'mul' takes a size-minimum over a superset of the candidates 'mulFast'
+-- considers (the corner-arc bound, the @U@\/@Z@ anchors, the cut, and both
+-- orientations), so it can only tighten.
+mulDominatesMulFast ::
+  (1 <= w) => NatRepr w -> Domain w -> Domain w -> Property
+mulDominatesMulFast w a b =
+  proper a ==> proper b ==>
+    property (size (mul w a b) <= size (mulFast w a b))
 
 -- | The closed-form 'addSubSize' equals the materialized size of 'addRaw' (and,
 -- since @start'@ doesn\'t affect the count, of 'subRaw') at /every/ orientation

@@ -347,6 +347,12 @@ tests = TT.testGroup "Strides"
   , genTest "mulRobustDominatesRaw" $
       do SW n <- genWidth
          S.mulRobustDominatesRaw n <$> S.genDomain n <*> S.genDomain n
+  , genTest "correct_mulFast" $
+      do SW n <- genWidth
+         S.correct_mulFast n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
+  , genTest "mulDominatesMulFast" $
+      do SW n <- genWidth
+         S.mulDominatesMulFast n <$> S.genDomain n <*> S.genDomain n
   , genTest "correct_mulCorners" $
       do SW n <- genWidth
          S.correct_mulCorners n <$> S.genDomain n <*> genNatBV n <*> S.genDomain n <*> genNatBV n
