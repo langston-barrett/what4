@@ -3,7 +3,6 @@
 
 module VerifyBindings where
 
-import           Control.Applicative
 import           Data.List (intercalate)
 import           Hedgehog
 import qualified Hedgehog.Gen as Gen
@@ -28,6 +27,13 @@ genTest nm p = testProperty nm $ property $ do
   where mkProp (V.BoolProperty b) = test $ assert b
         mkProp (V.AssumptionProp a) = if (V.preCondition a) then (mkProp $ V.assumedProp a) else discard
 
+-- | Like 'genTest' but with a much lower test count, for expensive
+-- exact-containment properties (@*Exact@\/@*Precise@) whose cost isn't a
+-- hot-path concern. The lower count is honored because 'setTestOptions' only
+-- bumps the test-limit /default/ up to 5000 (see there).
+genTestFew :: String -> V.Gen V.Property -> TestTree
+genTestFew nm p = localOption (HedgehogTestLimit (Just 250)) (genTest nm p)
+
 formatDraws :: [String] -> String
 formatDraws [] = "Counterexample: (no primitive draws)"
 formatDraws draws =
@@ -42,5 +48,8 @@ setTestOptions =
   -- this helps prevent those tests from failing for insufficent coverage
   localOption (HedgehogDiscardLimit (Just 500000)) .
 
-  -- run at least 5000 tests
-  adjustOption (\(HedgehogTestLimit x) -> HedgehogTestLimit (max 5000 <$> x <|> Just 5000))
+  -- Run 5000 tests by default, but honor an explicit per-test count (e.g. a
+  -- 'localOption' on an expensive property): only bump the test-limit /default/
+  -- (100, or unset) up to 5000, leaving any value a test set for itself untouched.
+  adjustOption (\(HedgehogTestLimit x) ->
+                  HedgehogTestLimit (if x == Just 100 || x == Nothing then Just 5000 else x))

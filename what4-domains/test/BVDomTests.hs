@@ -46,6 +46,8 @@ import qualified CLP
 #endif
 import qualified Strides
 import qualified StridesBitwise
+import qualified SmoothClp
+import qualified SmoothClpBitwise
 import qualified StridedInterval
 
 
@@ -72,6 +74,8 @@ main = defaultMain $
 #endif
     , Strides.tests
     , StridesBitwise.tests
+    , SmoothClp.tests
+    , SmoothClpBitwise.tests
     , StridedInterval.tests
     ]
 

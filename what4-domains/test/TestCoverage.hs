@@ -52,12 +52,15 @@ data HsModule = HsModule
   }
 
 arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod :: HsModule
+smoothClpMod, smoothClpBitwiseMod :: HsModule
 arithMod          = HsModule "src/What4/Domains/BV/Arith.hs"           "A"  "test/BVDomTests.hs"
 bitwiseMod        = HsModule "src/What4/Domains/BV/Bitwise.hs"         "B"  "test/BVDomTests.hs"
 xorMod            = HsModule "src/What4/Domains/BV/XOR.hs"             "X"  "test/BVDomTests.hs"
 overallMod        = HsModule "src/What4/Domains/BV.hs"                 "O"  "test/BVDomTests.hs"
 stridesMod        = HsModule "src/What4/Domains/BV/Strides.hs"         "S"  "test/Strides.hs"
 stridesBitwiseMod = HsModule "src/What4/Domains/BV/StridesBitwise.hs"  "SB" "test/StridesBitwise.hs"
+smoothClpMod        = HsModule "src/What4/Domains/BV/SmoothClp.hs"        "SC"  "test/SmoothClp.hs"
+smoothClpBitwiseMod = HsModule "src/What4/Domains/BV/SmoothClpBitwise.hs" "SCB" "test/SmoothClpBitwise.hs"
 stridedMod        = HsModule "src/What4/Domains/BV/StridedInterval.hs" "S"  "test/StridedInterval.hs"
 
 -- | All Haskell-side modules whose properties are exercised by the
@@ -65,7 +68,8 @@ stridedMod        = HsModule "src/What4/Domains/BV/StridedInterval.hs" "S"  "tes
 -- in this list.
 allHsModules :: [HsModule]
 allHsModules =
-  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod, stridedMod]
+  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridesBitwiseMod
+  , smoothClpMod, smoothClpBitwiseMod, stridedMod]
 
 -- | Modules backed by a Cryptol model (in @doc/*.cry@). The
 -- Cryptol-correspondence checks run only against these.
@@ -74,7 +78,7 @@ allHsModules =
 -- Haskell-only properties have no Cryptol counterpart.
 cryptolBackedModules :: [HsModule]
 cryptolBackedModules =
-  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, stridedMod]
+  [arithMod, bitwiseMod, xorMod, overallMod, stridesMod, smoothClpMod, stridedMod]
 
 -- | Additional source files that define Haskell @Property@ predicates but
 -- aren't themselves checked for invocation. Currently used to satisfy the
@@ -92,6 +96,7 @@ cryptolFiles =
   , "doc/xordomain.cry"
   , "doc/bvdomain.cry"
   , "doc/strides.cry"
+  , "doc/smoothclp.cry"
   , "doc/strideddomain.cry"
   ]
 
@@ -309,10 +314,22 @@ exportOrderTests = TT.testGroup "Export order matches definition order"
       checkExportOrderFor "src/What4/Domains/BV/Strides.hs"
   , testCase "src/What4/Domains/BV/StridesBitwise.hs" $
       checkExportOrderFor "src/What4/Domains/BV/StridesBitwise.hs"
+  , testCase "src/What4/Domains/BV/SmoothClp.hs" $
+      checkExportOrderFor "src/What4/Domains/BV/SmoothClp.hs"
+  , testCase "src/What4/Domains/BV/SmoothClpBitwise.hs" $
+      checkExportOrderFor "src/What4/Domains/BV/SmoothClpBitwise.hs"
   , testCase "StridesBitwise mirrors Strides section order" $
-      checkSectionsMirrorStrides
+      checkSectionsMirror "src/What4/Domains/BV/Strides.hs"
+                          "src/What4/Domains/BV/StridesBitwise.hs"
   , testCase "StridesBitwise mirrors Strides operation order within sections" $
-      checkOpOrderMirrorsStrides
+      checkOpOrderMirrors "src/What4/Domains/BV/Strides.hs"
+                          "src/What4/Domains/BV/StridesBitwise.hs"
+  , testCase "SmoothClpBitwise mirrors SmoothClp section order" $
+      checkSectionsMirror "src/What4/Domains/BV/SmoothClp.hs"
+                          "src/What4/Domains/BV/SmoothClpBitwise.hs"
+  , testCase "SmoothClpBitwise mirrors SmoothClp operation order within sections" $
+      checkOpOrderMirrors "src/What4/Domains/BV/SmoothClp.hs"
+                          "src/What4/Domains/BV/SmoothClpBitwise.hs"
   ]
 
 -- | Run all the per-file export-order checks on a single file.
@@ -328,26 +345,27 @@ checkExportOrderFor f = do
 -- subsequence of Strides' (the wrapper omits some sections like
 -- "Reduced product with bitwise" or "Internal helpers" but never
 -- reorders).
-checkSectionsMirrorStrides :: Assertion
-checkSectionsMirrorStrides = do
-  stridesSrc  <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
-  wrapperSrc  <- TIO.readFile "src/What4/Domains/BV/StridesBitwise.hs"
+checkSectionsMirror :: FilePath -> FilePath -> Assertion
+checkSectionsMirror baseFile wrapperFile = do
+  stridesSrc  <- TIO.readFile baseFile
+  wrapperSrc  <- TIO.readFile wrapperFile
   let stridesSecs = extractExportSections stridesSrc
       wrapperSecs = extractExportSections wrapperSrc
   case firstNotInSubsequence wrapperSecs stridesSecs of
     Nothing -> pure ()
     Just bad -> assertFailure $ T.unpack $
-      "Section header in StridesBitwise.hs not a subsequence of Strides.hs at: '"
+      "Section header in " <> T.pack wrapperFile
+      <> " not a subsequence of " <> T.pack baseFile <> " at: '"
       <> bad <> "'"
 
 -- | For each section header that appears in both Strides and
 -- StridesBitwise export lists, the exported names in StridesBitwise
 -- under that section must be a subsequence of Strides' names under the
 -- same section, in order.
-checkOpOrderMirrorsStrides :: Assertion
-checkOpOrderMirrorsStrides = do
-  stridesSrc <- TIO.readFile "src/What4/Domains/BV/Strides.hs"
-  wrapperSrc <- TIO.readFile "src/What4/Domains/BV/StridesBitwise.hs"
+checkOpOrderMirrors :: FilePath -> FilePath -> Assertion
+checkOpOrderMirrors baseFile wrapperFile = do
+  stridesSrc <- TIO.readFile baseFile
+  wrapperSrc <- TIO.readFile wrapperFile
   let stridesSecs = exportListSectioned stridesSrc
       wrapperSecs = exportListSectioned wrapperSrc
       shared = [ (sec, sNames, wNames)
@@ -377,7 +395,8 @@ checkOpOrderMirrorsStrides = do
   case mismatches of
     [] -> pure ()
     _  -> assertFailure $ T.unpack $ T.unlines $
-            "Operations in StridesBitwise.hs not a subsequence of Strides.hs in some section:" :
+            ("Operations in " <> T.pack wrapperFile <> " not a subsequence of "
+              <> T.pack baseFile <> " in some section:") :
             [ "  section " <> sec <> ": '" <> nm <> "'" | (sec, nm) <- mismatches ]
 
 -- | Find the first element of @xs@ that does not appear in @ys@ (in
