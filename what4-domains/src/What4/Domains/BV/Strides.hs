@@ -1054,6 +1054,28 @@ strideGcd :: Domain w -> Natural
 strideGcd Domain{stride} = lowestSetBit stride
 {-# INLINE strideGcd #-}
 
+-- | /O(A(w))/ when either argument is a power of two, else /O(G(w))/. Exact
+-- 'Prelude.gcd' with a fast path for the common case that one argument is a
+-- power of two. Writing each argument as @2^k · m@ with @m@ odd, the integer
+-- gcd splits exactly as @gcd(2^ka·ma, 2^kb·mb) = 2^min(ka,kb) · gcd(ma, mb)@.
+-- When either argument is a power of two its odd cofactor is @1@, so
+-- @gcd(ma, mb) = 1@ and the result collapses to @2^min(ka,kb)@ — a
+-- 'countTrailingZerosOr0' and a shift, skipping the general (GMP) gcd
+-- entirely. Strides at the arithmetic call sites are overwhelmingly array and
+-- struct sizes (4, 8, 16, …), which are powers of two, so this path
+-- dominates. Falls back to 'Prelude.gcd' when neither argument is a power of
+-- two; @0@ is handled as by 'Prelude.gcd' (@gcd 0 x = x@).
+gcdPow2 :: (Integral a, Bits.Bits a) => a -> a -> a
+gcdPow2 a b
+  | a == 0 = b
+  | b == 0 = a
+  | isPow2 a || isPow2 b = Bits.bit (min (ctz a) (ctz b))
+  | otherwise            = Prelude.gcd a b
+  where
+    isPow2 = Arith.isPow2Integer . toInteger
+    ctz    = countTrailingZerosOr0 . toInteger
+{-# INLINE gcdPow2 #-}
+
 -- | /O(A(w))/. Sufficient (but not necessary) condition that @a@ and @b@ share
 -- no values: @start a − start b@ is not a multiple of @min(strideGcd a,
 -- strideGcd b)@, so the cosets @start a + ⟨stride a⟩@ and @start b + ⟨stride
@@ -1326,7 +1348,7 @@ fromAscEltList w =
     [x] -> Just (mk w x 1 0)
     (x : xs) ->
       let !diffs = zipWith (-) xs (x:xs)
-          !d = Prelude.foldr1 Prelude.gcd (map toInteger diffs)
+          !d = Prelude.foldr1 gcdPow2 (map toInteger diffs)
           !nn = fromInteger ((toInteger (last xs) - toInteger x) `Prelude.div` d)
       in Just (mk w x (fromInteger d) nn)
 
@@ -2427,7 +2449,7 @@ addSubStrideAndSteps na sa nb sb = (d, n')
           (0, 0) -> 1
           (0, _) -> sb
           (_, 0) -> sa
-          _      -> Prelude.gcd sa sb
+          _      -> gcdPow2 sa sb
     n' = na * (sa `div` d) + nb * (sb `div` d)
 
 -- | /O(M(w))/. The /reverse orientation/ of a progression: the same set walked
@@ -3057,7 +3079,7 @@ cornerProductStride a b al bl =
       !d12 = if n a == 0 then 0 else t1 * Prelude.abs bl
       !d21 = if n b == 0 then 0 else t2 * Prelude.abs al
       !d22 = if n a == 0 || n b == 0 then 0 else t1 * t2
-  in Prelude.gcd d12 (Prelude.gcd d21 d22)
+  in gcdPow2 d12 (gcdPow2 d21 d22)
 
 -- The CLP-style step-count bound: the sum of per-coefficient maxima.
 -- Walking i over @[0, n_a]@ contributes at most @n_a · t1 · |bl|@ integer
@@ -3159,7 +3181,7 @@ mulFromCorners w a b al ah bl bh =
     !d12 = if n a == 0 then 0 else t1 * Prelude.abs bl
     !d21 = if n b == 0 then 0 else t2 * Prelude.abs al
     !d22 = if n a == 0 || n b == 0 then 0 else t1 * t2
-    !dIntI = Prelude.gcd d12 (Prelude.gcd d21 d22)
+    !dIntI = gcdPow2 d12 (gcdPow2 d21 d22)
     !dMod = if dIntI == 0 then 0 else modMask a (fromInteger dIntI)
     !c1 = al * bl
 
@@ -3498,7 +3520,7 @@ addPieces a b splitOp arcOf =
               (0, 0) -> 0  -- both singletons
               (0, _) -> toInteger (stride bj)
               (_, 0) -> toInteger (stride ai)
-              _      -> Prelude.gcd (toInteger (stride ai)) (toInteger (stride bj))
+              _      -> gcdPow2 (toInteger (stride ai)) (toInteger (stride bj))
   ]
 
 -- | Per-piece (lo, hi, d) for 'sub': mirrors 'addPieces' but with the
@@ -3517,7 +3539,7 @@ subPieces a b splitOp arcOf =
               (0, 0) -> 0
               (0, _) -> toInteger (stride bj)
               (_, 0) -> toInteger (stride ai)
-              _      -> Prelude.gcd (toInteger (stride ai)) (toInteger (stride bj))
+              _      -> gcdPow2 (toInteger (stride ai)) (toInteger (stride bj))
   ]
 
 -- | The unsigned arc @[start, end]@ of a non-wrap-mod-@2^w@ piece, as
@@ -5179,7 +5201,7 @@ pseudoMeetStridesBy compactifyOp w a b
 -- | /O(G(w))/. @lcm(x, y)@ on 'Natural's, computed via @x \/ gcd · y@. Both
 -- arguments must be positive.
 lcmNat :: Natural -> Natural -> Natural
-lcmNat x y = (x `Prelude.div` Prelude.gcd x y) * y
+lcmNat x y = (x `Prelude.div` gcdPow2 x y) * y
 {-# INLINE lcmNat #-}
 
 -- | /O(M(w))/. Restrict a stride-1 progression @arith@ to the values
